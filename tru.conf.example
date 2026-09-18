@@ -1,0 +1,56 @@
+# ============================================================
+# TRU Blockchain Configuration Example
+# ============================================================
+[network]
+
+# RPC port used by local miners/tools.
+rpcport=21832
+
+# P2P blockchain networking port.
+p2pPort=21833
+
+# Accept incoming P2P connections.
+listen=1
+
+# ------------------------------------------------------------
+# RPC BIND
+# ------------------------------------------------------------
+rpcbind=127.0.0.1
+
+rpcAllowRemote=0
+
+# Maximum number of RPC connections (default: 32)
+rpcMaxConnections=32
+
+# ------------------------------------------------------------
+# STARTUP PEER / SEED
+# ------------------------------------------------------------
+addnode=137.184.68.43:21833
+
+# Required multinode/reorg activation
+automaticReorg=1
+
+# ------------------------------------------------------------
+# EXTERNAL IP
+# ------------------------------------------------------------
+#externalip=192.168.1.209
+
+[default]
+
+# Local RPC address used by TRU miners/oracle components.
+node.ip=127.0.0.1
+node.port=21832
+
+# ------------------------------------------------------------
+# TOKEN EVOLUTION / ORACLE
+# ------------------------------------------------------------
+
+#oracle.address=YOUR_ORACLE_ADDRESS
+#oracle.wallet=tru.dat
+
+# ===========================================================================
+[chain]
+# Name of the blockchain (default: TRUMain)
+chainName=TRUMain
+# Network type: mainnet, testnet, regtest (default: mainnet)
+networkType=mainnet
