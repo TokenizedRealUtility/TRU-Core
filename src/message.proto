@@ -1,0 +1,150 @@
+syntax = "proto3";
+
+package blockchain;
+
+// ===================================================================
+// The main wrapper message
+// ===================================================================
+message BaseMessage {
+    enum MessageType {
+        VERSION = 0;
+        VERACK  = 1;
+        ADDR    = 2;
+        INV     = 3;
+        GETDATA = 4;
+        BLOCK   = 5; // Now used for "BlockProto"
+        TX      = 6; // Now used for "TxProto"
+        PING    = 7;
+        PONG    = 8;
+        CHAT    = 9; // For chat messages
+        HEIGHT  = 10; // For height synchronization
+        GET_BLOCK = 11; // For block requests
+        GET_HEIGHT = 12; // Added for height requests
+        BLOCK_NOT_FOUND = 13; // Added for block not found responses
+    }
+
+    MessageType type = 1; 
+    bytes payload    = 2; 
+}
+
+// ===================================================================
+// "Version" message
+// ===================================================================
+message Version {
+    uint32 version     = 1;
+    string subVersion  = 2;
+    uint64 services    = 3;
+    uint64 timestamp   = 4;
+    string addrRecv    = 5;
+    string addrFrom    = 6;
+    uint64 nonce       = 7;
+    string userAgent   = 8;
+    uint32 startHeight = 9;
+    // NEW FIELD for "futureFlag" usage:
+    string futureFlag  = 10;  // e.g. "QuantumEncrypted=Yes;AIIntegration=High"
+    // Patch 15B.1: exact TRU network binding. Peers must send "tru-mainnet".
+    string networkId   = 11;
+}
+
+// ===================================================================
+// "VerAck" message (now actually defined, not empty)
+// ===================================================================
+message VerAck {
+    // Let's add a "quantum_ack" field for ephemeral usage
+    string quantum_ack = 1;
+}
+
+// ===================================================================
+// "Addr" message
+// ===================================================================
+message Addr {
+    repeated string addresses = 1; // List of peer addresses
+}
+
+// ===================================================================
+// "Inv" message
+// ===================================================================
+message Inv {
+    repeated string inventory = 1; // List of inventory hashes
+}
+
+// ===================================================================
+// "GetData" message
+// ===================================================================
+message GetData {
+    repeated string inventory = 1; // List of inventory hashes to request
+}
+
+// ===================================================================
+// "BlockProto" message 
+//  (You reference "BlockProto" in peer_connection.cpp 
+//   for sending/receiving blocks.)
+// ===================================================================
+message BlockProto {
+    string hash      = 1;
+    string header     = 2;
+    repeated string transactions = 3;
+    uint64 chain_work = 4;
+    uint32 height     = 5;
+    string token_metadata = 6;
+}
+// ===================================================================
+// "TxProto" message
+//  (You reference "TxProto" in peer_connection.cpp 
+//   for sending/receiving transactions.)
+// ===================================================================
+message TxProto {
+    string txid = 1;
+    bytes raw   = 2;
+}
+
+// ===================================================================
+// "Ping" message
+// ===================================================================
+message Ping {
+    uint64 nonce = 1;
+}
+
+// ===================================================================
+// "Pong" message
+// ===================================================================
+message Pong {
+    uint64 nonce = 1;
+}
+
+// ===================================================================
+// "ChatMessage" message for chat
+// ===================================================================
+message ChatMessage {
+    string text = 1;
+}
+
+// ===================================================================
+// "HeightMessage" for HEIGHT type
+// ===================================================================
+message HeightMessage {
+    uint64 height = 1;
+}
+
+// ===================================================================
+// "GetBlockRequest" for GET_BLOCK type
+// ===================================================================
+message GetBlockRequest {
+    uint64 height = 1;
+}
+
+// ===================================================================
+// "GetHeightRequest" 
+// ===================================================================
+message GetHeightRequest {
+    uint64 timestamp = 1; // Optional: Timestamp of the request
+    string requester_id = 2; // Optional: Unique ID of the requesting peer
+}
+
+// ===================================================================
+// "BlockNotFoundResponse" for BLOCK_NOT_FOUND type
+// ===================================================================
+message BlockNotFoundResponse {
+    uint64 height = 1;
+    string error_message = 2;
+}

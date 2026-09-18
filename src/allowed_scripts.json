@@ -1,0 +1,76 @@
+{
+    "policy_version": "HTLC-01B-v1",
+    "runtime_authority": "compiled structural policy in Mempool::isAllowedSmartContractScript",
+    "notes": [
+        "This file is documentation/reference only. Nodes do not load regexes from the current working directory.",
+        "P2PKH and OP_RETURN/extended-token outputs use dedicated standard policy paths.",
+        "Generic Custom Script is admitted only when bytecode is structurally valid under AnalyzeScriptResources and does not execute reserved/disabled family opcodes.",
+        "Legacy NOVO/BSTY bridge opcodes remain byte-reserved but relay-disabled pending deterministic bridge redesign.",
+        "Canonical Multisig / Escrow V1 is exactly bare 2-of-3 with three strictly sorted compressed SEC1 public keys and OP_CHECKMULTISIG; other new multisig forms remain non-standard.",
+        "Canonical HTLC / Atomic Swap V1 is an exact 103-byte HASH160 + CHECKSIG claim branch and timestamp-domain CLTV + CHECKSIG refund branch; claim/refund public keys are role-specific, compressed, and distinct.",
+        "HTLC classification is exact. Other structurally safe custom scripts remain CUSTOM_SCRIPT and are not promoted to htlc_atomic_swap_v1 merely because they contain IF/HASH160/CLTV opcodes."
+    ],
+    "allowed_scripts": [
+        {
+            "type": "time_lock_p2pkh",
+            "pattern": "^04[0-9a-f]{8}b17576a914[0-9a-f]{40}88ac$",
+            "description": "Canonical timestamp-domain Time Lock V1; relay also requires lockTime >= 500000000."
+        },
+        {
+            "type": "hash_lock",
+            "pattern": "^a914[0-9a-f]{40}87$",
+            "description": "Canonical Hash Lock V1: OP_HASH160 <20-byte HASH160> OP_EQUAL."
+        },
+        {
+            "type": "htlc_atomic_swap_v1",
+            "pattern": "^63a914[0-9a-f]{40}8821(?:02|03)[0-9a-f]{64}ac6704[0-9a-f]{8}b17521(?:02|03)[0-9a-f]{64}ac68$",
+            "description": "Documentation shape only. Runtime parser additionally requires refundLockTime >= 500000000 and distinct compressed claim/refund SEC1 public keys. Claim remains valid after timeout until the UTXO is spent; timeout activates the refund branch."
+        },
+        {
+            "type": "oracle_lock_v1",
+            "pattern": "^12(?:636861696e3a626c6f636b5f686569676874|636861696e3a746f74616c5f737570706c79|636861696e3a626c6f636b5f726577617264)f208[0-9a-f]{16}(?:a1|a2)6976a914[0-9a-f]{40}88ac$",
+            "description": "Patch-18 deterministic Oracle Feed V1 using <= (a1) or >= (a2)."
+        },
+        {
+            "type": "multisig_escrow_2of3_v1",
+            "pattern": "^5221(?:02|03)[0-9a-f]{64}21(?:02|03)[0-9a-f]{64}21(?:02|03)[0-9a-f]{64}53ae$",
+            "description": "Documentation shape only. Runtime parser additionally requires the three compressed SEC1 encodings to be strictly lexicographically increasing (therefore unique)."
+        },
+        {
+            "type": "state_anchor_v1",
+            "pattern": "^f751$",
+            "description": "Canonical f751 state anchor shared by activated stateful_kv_v1, voting_v1, and token_issuer_v1 families; registry determines family."
+        }
+    ],
+    "compiled_structural_families": [
+        {
+            "type": "MAGIC_LOCK",
+            "description": "Canonical V1 is parsed byte-for-byte against Wallet::createMagicLockScript shape; no regex or legacy marker search is used for new relay."
+        },
+        {
+            "type": "CUSTOM_SCRIPT",
+            "description": "Supported deterministic bytecode only. OP_EXTERNALDATA, noncanonical OP_DATAFEED, OP_DELEGATECHECK, arbitrary state-domain opcodes, legacy bridge opcodes, and upgrade NOPs are non-standard."
+        }
+    ],
+    "dedicated_standard_paths": [
+        "P2PKH",
+        "OP_RETURN",
+        "Extended token OP_RETURN"
+    ],
+    "relay_disabled": [
+        "OP_EXTERNALDATA",
+        "OP_DELEGATECHECK",
+        "noncanonical OP_DATAFEED",
+        "noncanonical OP_STORE/OP_LOAD/OP_MINT_TOKEN state scripts",
+        "legacy OP_NOVO_* bridge opcodes",
+        "legacy OP_BSTY_* bridge opcodes",
+        "reserved OP_UPGRADE_NOP1..OP_UPGRADE_NOP8",
+        "noncanonical bare OP_CHECKMULTISIG / OP_CHECKMULTISIGVERIFY scripts outside Multisig / Escrow V1"
+    ],
+    "removed_legacy_regex_classes": [
+        "opcode-prefix wildcard regexes for individual opcodes",
+        "token opcode byte searches that could match bytes inside pushed data",
+        "bridge suffix/payload wildcards",
+        "runtime CWD-loaded policy regexes"
+    ]
+}
