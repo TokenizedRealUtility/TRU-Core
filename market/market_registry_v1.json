@@ -1,0 +1,60 @@
+{
+  "assets": {
+    "BSTY": {
+      "adapter": "bsty-p2sh-htlc",
+      "assetId": "BSTY",
+      "chainId": "globalboost-mainnet",
+      "decimals": 8,
+      "state": "active",
+      "ticker": "BSTY"
+    },
+    "BSV": {
+      "adapter": "bsv-htlc-pending",
+      "assetId": "BSV",
+      "chainId": "bsv-mainnet",
+      "decimals": 8,
+      "state": "planned",
+      "ticker": "BSV"
+    },
+    "BTC": {
+      "adapter": "bitcoin-htlc-pending",
+      "assetId": "BTC",
+      "chainId": "bitcoin-mainnet",
+      "decimals": 8,
+      "state": "planned",
+      "ticker": "BTC"
+    },
+    "TRU": {
+      "adapter": "tru-v1-bare-htlc",
+      "assetId": "TRU",
+      "chainId": "tru-mainnet",
+      "decimals": 8,
+      "state": "active",
+      "ticker": "TRU"
+    }
+  },
+  "authoritativeTradeRule": "posted intents are not trades; only confirmed atomic settlements may feed LAST/volume/OHLC/VWAP",
+  "pairs": {
+    "TRU_BSTY": {
+      "base": "TRU",
+      "pairId": "TRU_BSTY",
+      "quote": "BSTY",
+      "state": "active"
+    },
+    "TRU_BSV": {
+      "base": "TRU",
+      "pairId": "TRU_BSV",
+      "quote": "BSV",
+      "state": "planned"
+    },
+    "TRU_BTC": {
+      "base": "TRU",
+      "pairId": "TRU_BTC",
+      "quote": "BTC",
+      "state": "planned"
+    }
+  },
+  "priceConvention": "quote asset units per 1 base asset; derived from baseAtoms/quoteAtoms",
+  "quantityEncoding": "unsigned base-10 atom strings",
+  "schemaVersion": "TRU-MARKET-INTENT-V1"
+}
