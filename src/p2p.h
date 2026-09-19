@@ -59,6 +59,9 @@ public:
     bool reportPeerViolation(const std::string& ip, std::uint32_t points, const std::string& reason);
 private:
     void acceptLoop();
+    // PEER-REDIAL-01: transport-maintenance only; consensus is untouched.
+    void ensureReconnectLoopStarted();
+    void reconnectLoop();
     void relayMinerReport(const std::string& wire, PeerConnection* sender);
     tru_miner_telemetry::Registry minerReports_;
     void cleanupPeers();
@@ -68,10 +71,13 @@ private:
     int listenSock_;
     std::vector<std::shared_ptr<PeerConnection>> peers_;
     std::mutex peersMutex_;
+    std::mutex reconnectStartMutex_;
     std::thread acceptThread_;
+    std::thread reconnectThread_;
     std::atomic<bool> running_{false};
     std::atomic<bool> stopping_{false};
     std::atomic<bool> acceptLoopExited_{true};
+    std::atomic<bool> reconnectLoopExited_{true};
     PeerManager peerManager_;
     std::string externalIp_;
     std::atomic<int> activePeerCount_{0};

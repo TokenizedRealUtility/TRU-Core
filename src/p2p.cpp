@@ -51,8 +51,74 @@ void P2PNode::startListening(int port, Blockchain* chain) {
 
     Logger::log("[P2PNode] Started listening on port " + std::to_string(port));
     running_ = true;
+    ensureReconnectLoopStarted();
     acceptThread_ = std::thread(&P2PNode::acceptLoop, this);
 }
+//================================================================================
+//                      PEER-REDIAL-01
+//================================================================================
+void P2PNode::ensureReconnectLoopStarted() {
+    if (stopping_.load()) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(reconnectStartMutex_);
+    if (reconnectThread_.joinable() || stopping_.load()) {
+        return;
+    }
+
+    reconnectLoopExited_.store(false);
+    reconnectThread_ = std::thread(&P2PNode::reconnectLoop, this);
+    Logger::log("[PEER-REDIAL-01] Verified-peer reconnect loop started");
+}
+
+void P2PNode::reconnectLoop() {
+    reconnectLoopExited_.store(false);
+
+    auto waitInterruptibly = [&](int milliseconds) {
+        const int slices = std::max(1, milliseconds / 100);
+        for (int i = 0; i < slices && !stopping_.load(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    };
+
+    while (!stopping_.load()) {
+        cleanupPeers();
+
+        const auto candidates = peerManager_.claimReconnectCandidates(2);
+        for (const auto& peer : candidates) {
+            if (stopping_.load()) {
+                break;
+            }
+
+            if (isSelfEndpoint(peer.ip, peer.port)) {
+                Logger::log(
+                    "[PEER-REDIAL-01] Skipping self endpoint " + peer.ip + ":" +
+                    std::to_string(peer.port));
+                peerManager_.noteReconnectFailure(peer.ip);
+                continue;
+            }
+
+            Logger::log(
+                "[PEER-REDIAL-01] Attempting verified-peer redial " +
+                peer.ip + ":" + std::to_string(peer.port));
+
+            if (!connectToPeer(peer.ip, peer.port, 5)) {
+                peerManager_.noteReconnectFailure(peer.ip);
+            } else {
+                Logger::log(
+                    "[PEER-REDIAL-01] TCP redial established to " + peer.ip + ":" +
+                    std::to_string(peer.port) + "; awaiting verified VERSION");
+            }
+        }
+
+        waitInterruptibly(1000);
+    }
+
+    reconnectLoopExited_.store(true);
+    Logger::log("[PEER-REDIAL-01] Verified-peer reconnect loop exiting");
+}
+
 //================================================================================
 //                      P2PNode::ACCEPTLOOP
 //================================================================================
@@ -202,6 +268,10 @@ void P2PNode::acceptLoop() {
 }
 
 bool P2PNode::connectToPeer(const std::string& ip, int port, int timeoutSec) {
+    // PEER-REDIAL-01: explicit outbound use also enables recovery for
+    // outbound-only nodes. The helper is idempotent.
+    ensureReconnectLoopStarted();
+
     // PEER-ENDPOINT-02: reject malformed endpoints before htons()/dial policy.
     if (ip.empty() || port <= 0 || port > 65535) {
         Logger::log(
@@ -494,6 +564,22 @@ void P2PNode::stop() {
     stopping_.store(true);
     running_.store(false);
     Logger::log("[P2PNode] Set stopping_=true and running_=false");
+
+    if (reconnectThread_.joinable()) {
+        const auto warnDeadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!reconnectLoopExited_.load() &&
+               std::chrono::steady_clock::now() < warnDeadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        if (!reconnectLoopExited_.load()) {
+            Logger::log(
+                "[PEER-REDIAL-01] WARNING: reconnect loop exceeded 2s shutdown "
+                "watchdog; joining safely");
+        }
+        reconnectThread_.join();
+        Logger::log("[PEER-REDIAL-01] Reconnect thread terminated");
+    }
 
     if (listenSock_ >= 0) {
         Logger::log(

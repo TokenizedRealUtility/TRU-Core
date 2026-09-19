@@ -2,6 +2,7 @@
 #include "logging.h"
 
 #include <algorithm>
+#include <functional>
 #include <limits>
 #include <stdexcept>
 
@@ -20,6 +21,12 @@ void PeerManager::addPeer(const std::string& ip, int port) {
     }
 
     std::lock_guard<std::mutex> lock(mtx);
+
+    // PEER-REDIAL-01: a valid VERSION handshake is the authority that clears
+    // reconnect backoff. A mere TCP connect never reaches addPeer().
+    auto& reconnectState = reconnect_[ip];
+    reconnectState.consecutiveFailures = 0;
+    reconnectState.nextAttempt = TimePoint{};
 
     // The rest of this PeerManager is deliberately IP-keyed: connection slots,
     // connected state, abuse state, and peers.dat persistence all operate per
@@ -62,6 +69,14 @@ void PeerManager::removePeer(const std::string& ip, int port) {
                 return p.ip == ip && p.port == port;
             }),
         peers.end());
+
+    const bool stillKnown = std::any_of(
+        peers.begin(), peers.end(), [&](const PeerInfo& p) {
+            return p.ip == ip;
+        });
+    if (!stillKnown) {
+        reconnect_.erase(ip);
+    }
 }
 
 std::vector<PeerInfo> PeerManager::getPeers() const {
@@ -251,6 +266,34 @@ bool PeerManager::tryAcquireConnectionSlot(
     return true;
 }
 
+std::uint32_t PeerManager::scheduleReconnectFailureLocked(
+    const std::string& ip,
+    TimePoint now,
+    std::uint32_t& jitterMillisOut) {
+
+    auto& state = reconnect_[ip];
+    if (state.consecutiveFailures < 1000) {
+        ++state.consecutiveFailures;
+    }
+
+    const std::uint32_t failures = state.consecutiveFailures;
+    std::uint32_t baseSeconds = 60;
+    if (failures <= 1) baseSeconds = 5;
+    else if (failures == 2) baseSeconds = 10;
+    else if (failures == 3) baseSeconds = 20;
+    else if (failures == 4) baseSeconds = 40;
+
+    // Deterministic per-peer jitter avoids synchronized reconnect bursts
+    // without introducing shared RNG state into networking threads.
+    const std::size_t seed =
+        std::hash<std::string>{}(ip + ":" + std::to_string(failures));
+    jitterMillisOut = static_cast<std::uint32_t>(seed % 2000U);
+    state.nextAttempt =
+        now + std::chrono::seconds(baseSeconds) +
+        std::chrono::milliseconds(jitterMillisOut);
+    return baseSeconds;
+}
+
 void PeerManager::releaseConnectionSlot(const std::string& ip) {
     std::lock_guard<std::mutex> lock(mtx);
 
@@ -270,14 +313,102 @@ void PeerManager::releaseConnectionSlot(const std::string& ip) {
 
     const bool connected =
         activeConnections_.find(ip) != activeConnections_.end();
+    bool knownPeer = false;
     for (auto& peer : peers) {
         if (peer.ip == ip) {
+            knownPeer = true;
             peer.isConnected = connected;
             peer.lastActive = time(nullptr);
         }
     }
 
+    if (!connected && knownPeer) {
+        // A previously VERIFIED session disappeared. Treat that as the first
+        // reconnect failure. Because addPeer() resets this counter after every
+        // successful VERSION handshake, normal long-lived sessions always begin
+        // recovery at ~5s, while repeated failures back off to a 60s ceiling.
+        std::uint32_t jitterMillis = 0;
+        const std::uint32_t baseSeconds =
+            scheduleReconnectFailureLocked(ip, Clock::now(), jitterMillis);
+        Logger::log(
+            "[PEER-REDIAL-01] Verified peer disconnected " + ip +
+            "; retryInMs=" +
+            std::to_string(baseSeconds * 1000U + jitterMillis));
+    }
+
     pruneStateLocked(Clock::now());
+}
+
+std::vector<PeerInfo> PeerManager::claimReconnectCandidates(
+    std::size_t maxCandidates) {
+
+    std::lock_guard<std::mutex> lock(mtx);
+    std::vector<PeerInfo> result;
+    if (maxCandidates == 0) {
+        return result;
+    }
+
+    const TimePoint now = Clock::now();
+    result.reserve(std::min(maxCandidates, peers.size()));
+
+    for (const auto& peer : peers) {
+        if (result.size() >= maxCandidates) {
+            break;
+        }
+        if (peer.ip.empty() || peer.port <= 0 || peer.port > 65535) {
+            continue;
+        }
+        if (activeConnections_.find(peer.ip) != activeConnections_.end()) {
+            continue;
+        }
+
+        const auto abuseIt = abuse_.find(peer.ip);
+        if (abuseIt != abuse_.end() &&
+            abuseIt->second.bannedUntil != TimePoint{} &&
+            now < abuseIt->second.bannedUntil) {
+            continue;
+        }
+
+        auto& state = reconnect_[peer.ip];
+        if (state.nextAttempt != TimePoint{} && now < state.nextAttempt) {
+            continue;
+        }
+
+        // Attempt lease: longer than the 5s redial connect timeout. If TCP
+        // succeeds but VERSION never validates, releaseConnectionSlot() will
+        // schedule the next exponentially-backed-off attempt.
+        state.nextAttempt = now + std::chrono::seconds(8);
+        result.push_back(peer);
+    }
+
+    return result;
+}
+
+void PeerManager::noteReconnectFailure(const std::string& ip) {
+    std::uint32_t failures = 0;
+    std::uint32_t baseSeconds = 0;
+    std::uint32_t jitterMillis = 0;
+
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        const bool knownPeer = std::any_of(
+            peers.begin(), peers.end(), [&](const PeerInfo& peer) {
+                return peer.ip == ip;
+            });
+        if (!knownPeer) {
+            return;
+        }
+
+        baseSeconds =
+            scheduleReconnectFailureLocked(ip, Clock::now(), jitterMillis);
+        failures = reconnect_[ip].consecutiveFailures;
+    }
+
+    Logger::log(
+        "[PEER-REDIAL-01] Redial failed for " + ip +
+        "; failures=" + std::to_string(failures) +
+        "; retryInMs=" +
+        std::to_string(baseSeconds * 1000U + jitterMillis));
 }
 
 bool PeerManager::canConnect(const std::string& ip) const {
