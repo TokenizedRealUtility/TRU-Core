@@ -58,6 +58,7 @@
 #include <shared_mutex>
 #include "contract_storage.h"
 #include "tru_network_params.h"
+#include "tru_version.h"  // NETWORK-VERSION-01
 #include "script_context_builder.h"  // shared execution context
 #include "contract_call_policy.h"     // Patch 14D2/14D3B: state-anchor call policy
 #include "contract_state_runtime.h"    // confirmed state snapshot + scratch execution
@@ -24514,40 +24515,75 @@ g_explorerServer.Get("/api/uptime", [&](const httplib::Request&, httplib::Respon
         try {
             Logger::log("[Explorer /api/peers] Fetching peer information");
             nlohmann::json peersJson = nlohmann::json::array();
-            
+
             auto peers = node.getPeerManager()->getPeers();
             std::unordered_map<std::string, std::shared_ptr<PeerConnection>> activePeers;
-            
+            std::unordered_map<std::string, std::shared_ptr<PeerConnection>> activeByIp;
+
             auto activePeersList = node.getPeersList();
             for (const auto& peer : activePeersList) {
                 std::string key = peer->getIp() + ":" + std::to_string(peer->getPort());
                 activePeers[key] = peer;
+                activeByIp[peer->getIp()] = peer;
             }
-            
+
+            std::map<std::string, std::size_t> versionCounts;
+            std::size_t connectedCount = 0;
+            std::size_t versionReportingCount = 0;
+
             for (const auto& peerInfo : peers) {
                 std::string peerKey = peerInfo.ip + ":" + std::to_string(peerInfo.port);
-                bool isConnected = activePeers.count(peerKey) > 0;
-                uint64_t peerHeight = 0;
-                if (isConnected) {
-                    peerHeight = activePeers[peerKey]->getPeerHeight();
+                std::shared_ptr<PeerConnection> active;
+                auto exact = activePeers.find(peerKey);
+                if (exact != activePeers.end()) active = exact->second;
+                else {
+                    auto byIp = activeByIp.find(peerInfo.ip);
+                    if (byIp != activeByIp.end()) active = byIp->second;
                 }
-                
+
+                const bool isConnected = static_cast<bool>(active);
+                uint64_t peerHeight = 0;
+                std::string coreVersion = "legacy/unreported";
+                std::string userAgent;
+                if (active) {
+                    ++connectedCount;
+                    peerHeight = active->getPeerHeight();
+                    coreVersion = active->getPeerCoreVersion();
+                    userAgent = active->getPeerUserAgent();
+                    if (coreVersion.empty()) coreVersion = "legacy/unreported";
+                    if (coreVersion != "legacy/unreported") ++versionReportingCount;
+                    ++versionCounts[coreVersion];
+                }
+
                 nlohmann::json peerJson = {
                     {"ip", peerInfo.ip},
                     {"port", peerInfo.port},
                     {"isConnected", isConnected},
                     {"lastActive", peerInfo.lastActive},
-                    {"peerHeight", peerHeight}
+                    {"peerHeight", peerHeight},
+                    {"coreVersion", coreVersion},
+                    {"userAgent", userAgent}
                 };
                 peersJson.push_back(peerJson);
             }
-            
+
+            nlohmann::json versions = nlohmann::json::array();
+            for (const auto& [version, count] : versionCounts) {
+                versions.push_back({{"version", version}, {"count", count}});
+            }
+
             nlohmann::json response = {
                 {"peers", peersJson},
-                {"total", peersJson.size()}
+                {"total", peersJson.size()},
+                {"connected", connectedCount},
+                {"localCoreVersion", tru_version::coreReleaseVersion()},
+                {"versionReportingCount", versionReportingCount},
+                {"versionSummary", versions},
+                {"versionScope", "local node + directly connected peers only"}
             };
             res.set_content(response.dump(2), "application/json");
-            Logger::log("[Explorer /api/peers] Returned " + std::to_string(peersJson.size()) + " peers");
+            Logger::log("[Explorer /api/peers] Returned " + std::to_string(peersJson.size()) +
+                        " peers; localCoreVersion=" + tru_version::coreReleaseVersion());
         } catch (const std::exception& e) {
             Logger::log("[Explorer /api/peers] Error: " + std::string(e.what()));
             res.status = 500;
@@ -24585,12 +24621,16 @@ g_explorerServer.Get("/api/uptime", [&](const httplib::Request&, httplib::Respon
             
             bool isConnected = false;
             uint64_t peerHeight = 0;
+            std::string coreVersion = "legacy/unreported";
+            std::string userAgent;
             auto activePeersList = node.getPeersList();
             for (const auto& peer : activePeersList) {
-                if (peer->getIp() == ip && peer->getPort() == port) {
+                if (peer->getIp() == ip && (peer->getPort() == port || !isConnected)) {
                     isConnected = true;
                     peerHeight = peer->getPeerHeight();
-                    break;
+                    coreVersion = peer->getPeerCoreVersion();
+                    userAgent = peer->getPeerUserAgent();
+                    if (peer->getPort() == port) break;
                 }
             }
             
@@ -24599,7 +24639,10 @@ g_explorerServer.Get("/api/uptime", [&](const httplib::Request&, httplib::Respon
                 {"port", port},
                 {"isConnected", isConnected},
                 {"lastActive", it->lastActive},
-                {"peerHeight", peerHeight}
+                {"peerHeight", peerHeight},
+                {"coreVersion", coreVersion.empty() ? "legacy/unreported" : coreVersion},
+                {"userAgent", userAgent},
+                {"localCoreVersion", tru_version::coreReleaseVersion()}
             };
             
             res.set_content(peerJson.dump(2), "application/json");

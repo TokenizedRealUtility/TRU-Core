@@ -1,6 +1,7 @@
 #include "peer_connection.h"
 #include "message_handler.h"
 #include "p2p.h"
+#include "tru_version.h"  // NETWORK-VERSION-01
 #include <cstring>
 #include <unistd.h>
 #include <fcntl.h>
@@ -672,6 +673,12 @@ void PeerConnection::readLoop() {
 
                             minerIPReportsSupported_.store((versionMsg.services() & tru_miner_telemetry::SERVICE_IP) != 0);
                             minerReportsSupported_.store((versionMsg.services() & tru_miner_telemetry::SERVICE) != 0);
+
+                            {
+                                std::lock_guard<std::mutex> metaLock(peerMetadataMutex_);
+                                peerUserAgent_ = tru_version::boundedUserAgent(versionMsg.useragent());
+                                peerCoreVersion_ = tru_version::parseCoreVersionFromUserAgent(versionMsg.useragent());
+                            }
 
                             // PEER-ENDPOINT-02: promote only a VERIFIED TRU peer.
                             // For outbound sessions, port_ is the endpoint that we

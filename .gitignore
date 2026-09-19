@@ -81,3 +81,4 @@ swap/agent/swap_agent/
 
 # TRU packaged-patch backup workspace
 /.tru_patch_backups/
+.tru_patch_state/

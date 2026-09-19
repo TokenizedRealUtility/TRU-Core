@@ -36,6 +36,14 @@ public:
     std::string getIp() const { return ip_; }
     int getPort() const { return port_; }
     uint64_t getPeerHeight() const { return peerHeight_; }
+    std::string getPeerCoreVersion() const {
+        std::lock_guard<std::mutex> lock(peerMetadataMutex_);
+        return peerCoreVersion_;
+    }
+    std::string getPeerUserAgent() const {
+        std::lock_guard<std::mutex> lock(peerMetadataMutex_);
+        return peerUserAgent_;
+    }
     bool networkHandshakeComplete() const { return networkHandshakeComplete_.load(); }
     bool isRunning() const { return running_; }
     void updateLastActivity() {
@@ -79,6 +87,11 @@ private:
     // proves the exact TRU mainnet VERSION identity.
     std::atomic<bool> networkHandshakeComplete_{false};
     uint64_t peerHeight_;
+    // NETWORK-VERSION-01: observational metadata learned from the validated
+    // VERSION message. Never consulted by consensus or connection admission.
+    mutable std::mutex peerMetadataMutex_;
+    std::string peerCoreVersion_{"legacy/unreported"};
+    std::string peerUserAgent_;
     int pipeFds_[2];
     void sendBlockNotFoundResponse(uint64_t height);
     std::chrono::steady_clock::time_point lastActivity;

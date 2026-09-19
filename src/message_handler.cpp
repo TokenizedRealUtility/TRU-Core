@@ -1,6 +1,7 @@
 #include "message_handler.h"
 #include "miner_telemetry_v1.h"
 #include "tru_network_params.h"
+#include "tru_version.h"  // NETWORK-VERSION-01: release identity only
 #include <random>
 #include <ctime>
 #include <sstream>
@@ -243,7 +244,7 @@ blockchain::BaseMessage MessageHandler::createVersionMessage() {
     std::random_device rd;
     std::mt19937_64 gen(rd());
     versionMsg.set_nonce(gen());
-    versionMsg.set_useragent("/TruChainAdvanced:2.5.0/");
+    versionMsg.set_useragent(tru_version::userAgent()); // NETWORK-VERSION-01
     versionMsg.set_startheight(0); // Updated dynamically in production
     versionMsg.set_futureflag("QuantumEncrypted=Yes;AIIntegration=High");
     versionMsg.set_networkid(std::string(tru_network::MAINNET_NETWORK_ID));
@@ -253,7 +254,8 @@ blockchain::BaseMessage MessageHandler::createVersionMessage() {
     baseMsg.set_payload(versionMsg.SerializeAsString());
     Logger::log("[MessageHandler] Created VERSION message, version: " +
                 std::to_string(versionMsg.version()) +
-                ", networkId=" + versionMsg.networkid());
+                ", networkId=" + versionMsg.networkid() +
+                ", coreVersion=" + tru_version::coreReleaseVersion());
     return baseMsg;
 }
 
