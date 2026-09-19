@@ -72,6 +72,7 @@
 #include <sys/wait.h>   // waitpid for spawned miner processes
 #include <fcntl.h>   // open() for miner log redirect
 #include <future>
+#include <filesystem>
 #include <termios.h>
 #include <unistd.h>
 #include "script_interpreter.h"
@@ -10583,18 +10584,15 @@ int main(int argc, char *argv[]) {
     std::thread minerCleanupThread;
     
     try {
-        Logger::init("Tru_debug.log");
-        initializeSignalWakePipe();
-        Logger::log(
-            "[main] Signal-safe CLI wake pipe initialized for "
-            "SIGINT/SIGTERM/SIGWINCH");
-        Logger::log("[main] Starting TRU Advanced Wallet...");
-
         std::srand(static_cast<unsigned>(std::time(nullptr)));
 
         cxxopts::Options options("tru_advanced", "TRU Blockchain Advanced Wallet CLI");
         options.add_options()
             ("d,datadir", "Path to data dir", cxxopts::value<std::string>()->default_value("data/utxo"))
+            ("logdir", "Directory for TRU application logs (default: sibling logs directory beside datadir)", cxxopts::value<std::string>()->default_value(""))
+            ("loglevel", "Log level: ERROR, WARN, INFO, DEBUG, TRACE", cxxopts::value<std::string>()->default_value("INFO"))
+            ("log-max-mib", "Rotate active log after this many MiB", cxxopts::value<std::uint64_t>()->default_value("32"))
+            ("log-retain", "Number of rotated log files to retain (0-32)", cxxopts::value<std::size_t>()->default_value("4"))
             ("c,cli", "Run in CLI mode", cxxopts::value<bool>()->default_value("true"))
             ("gui", "Run in GUI mode", cxxopts::value<bool>()->default_value("false"))
             //("rpcbind", "RPC bind IP", cxxopts::value<std::string>()->default_value("0.0.0.0"))
@@ -10612,10 +10610,51 @@ int main(int argc, char *argv[]) {
         auto result = options.parse(argc, argv);
         if (result.count("help")) {
             std::cout << options.help() << std::endl;
-            Logger::log("[main] Help requested. Exiting normally.");
-            Logger::shutdown();
             return 0;
         }
+
+        const std::string dbPath = result["datadir"].as<std::string>();
+        std::string logDir = result["logdir"].as<std::string>();
+        const std::string logLevel = result["loglevel"].as<std::string>();
+        const std::uint64_t logMaxMiB = result["log-max-mib"].as<std::uint64_t>();
+        const std::size_t logRetain = result["log-retain"].as<std::size_t>();
+
+        if (logMaxMiB == 0 || logMaxMiB > 4096) {
+            throw std::runtime_error("--log-max-mib must be between 1 and 4096");
+        }
+        if (logRetain > 32) {
+            throw std::runtime_error("--log-retain must be between 0 and 32");
+        }
+
+        namespace fs = std::filesystem;
+        fs::path requestedLogDir;
+        if (logDir.empty()) {
+            fs::path dataPath(dbPath);
+            fs::path base = dataPath.parent_path();
+            if (base.empty()) base = fs::path(".");
+            requestedLogDir = base / "logs";
+        } else {
+            requestedLogDir = fs::path(logDir);
+        }
+        logDir = fs::absolute(requestedLogDir).lexically_normal().string();
+
+        const fs::path logPath = fs::path(logDir) / "Tru_debug.log";
+        Logger::init(
+            logPath.string(),
+            logLevel,
+            logMaxMiB * 1024ULL * 1024ULL,
+            logRetain);
+        initializeSignalWakePipe();
+        Logger::log(
+            "[main] Signal-safe CLI wake pipe initialized for "
+            "SIGINT/SIGTERM/SIGWINCH");
+        Logger::log("[main] Starting TRU Advanced Wallet...");
+        Logger::log(
+            "[LOGGING-01C] datadir=" + dbPath +
+            "; logdir=" + logDir +
+            "; level=" + logLevel +
+            "; maxMiB=" + std::to_string(logMaxMiB) +
+            "; retained=" + std::to_string(logRetain));
 
         // SEC-14G — encrypted-first wallet bootstrap runs before config,
         // blockchain construction, networking, RPC, or any chain mutation.
@@ -10707,7 +10746,6 @@ int main(int argc, char *argv[]) {
             return 0;
         }
 
-        std::string dbPath = result["datadir"].as<std::string>();
         bool cliMode = result["cli"].as<bool>();
         bool guiMode = result["gui"].as<bool>();
         std::string cfgFile = result["conf"].as<std::string>();
