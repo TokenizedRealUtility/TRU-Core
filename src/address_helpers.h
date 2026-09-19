@@ -110,7 +110,8 @@ inline std::string base58Encode(const std::vector<uint8_t> &input) {
 
 inline std::vector<uint8_t> base58Decode(const std::string &input)
 {
-    Logger::log("[base58Decode] Decoding base58 string: " + input);
+    // TRU-LOGGING-01B: successful Base58 decode is an extremely hot path.
+    // Keep malformed-input diagnostics below, but do not emit success-path I/O.
 
     // Result starts empty (NOT with an extra 0)
     std::vector<uint8_t> result;
@@ -166,12 +167,6 @@ inline std::vector<uint8_t> base58Decode(const std::string &input)
     std::reverse(result.begin(), result.end());
     decoded.insert(decoded.end(), result.begin(), result.end());
 
-    // Logging
-    std::ostringstream oss;
-    oss << "[base58Decode] raw decoded size=" << decoded.size()
-        << ", hex=" << hexEncode(decoded);
-    Logger::log(oss.str());
-
     return decoded;
 }
 // ----------------------------------------------------------------------
@@ -180,7 +175,8 @@ inline std::vector<uint8_t> base58Decode(const std::string &input)
 
 inline std::vector<uint8_t> decodeBase58Check(const std::string &base58Addr)
 {
-    Logger::log("[decodeBase58Check] Starting decode for address=" + base58Addr);
+    // TRU-LOGGING-01B: normal Base58Check entry/success is intentionally silent.
+    // Size/checksum failures remain logged before throwing.
 
     // 1) Base58 decode
     std::vector<uint8_t> raw = base58Decode(base58Addr);
@@ -222,11 +218,6 @@ inline std::vector<uint8_t> decodeBase58Check(const std::string &base58Addr)
     }
 
     // 5) If we get here, success => raw is version+payload+4 cksum (often 25 bytes total)
-    std::ostringstream oss;
-    oss << "[decodeBase58Check] decode success => total bytes=" << raw.size()
-        << ", hex=" << hexEncode(raw);
-    Logger::log(oss.str());
-
     return raw;
 }
 

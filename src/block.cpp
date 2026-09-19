@@ -167,11 +167,14 @@ void Block::fromProto(const ::blockchain::BlockProto& proto) {
 // buildBlockHeader80
 // --------------------------------------------------
 std::vector<unsigned char> buildBlockHeader80(const BlockHeader &hdr) {
+    // TRU-LOGGING-01A: this function is on the block-hash/validation hot path.
+    // Successful header construction is intentionally silent; malformed header
+    // inputs still log immediately below before throwing. This changes logging
+    // side effects only, not the canonical 80-byte header.
     std::vector<unsigned char> buf(80, 0);
 
     // Version (4 bytes, little-endian)
     write32LE(&buf[0], hdr.version);
-    Logger::log("[buildBlockHeader80] Version: " + std::to_string(hdr.version));
 
     // Previous Hash (32 bytes, little-endian)
     unsigned char prevHashBytes[32];
@@ -180,7 +183,6 @@ std::vector<unsigned char> buildBlockHeader80(const BlockHeader &hdr) {
         throw std::runtime_error("Invalid previous hash");
     }
     std::memcpy(&buf[4], prevHashBytes, 32);
-    Logger::log("[buildBlockHeader80] Previous Hash: " + hdr.prevHash);
 
     // Merkle Root (32 bytes, little-endian)
     unsigned char merkleRootBytes[32];
@@ -189,19 +191,15 @@ std::vector<unsigned char> buildBlockHeader80(const BlockHeader &hdr) {
         throw std::runtime_error("Invalid merkle root");
     }
     std::memcpy(&buf[36], merkleRootBytes, 32);
-    Logger::log("[buildBlockHeader80] Merkle Root: " + hdr.merkleRoot);
 
     // Timestamp (4 bytes, little-endian)
     write32LE(&buf[68], hdr.timestamp);
-    Logger::log("[buildBlockHeader80] Timestamp: " + std::to_string(hdr.timestamp));
 
     // Bits (4 bytes, little-endian)
     write32LE(&buf[72], hdr.bits);
-    Logger::log("[buildBlockHeader80] Bits: " + std::to_string(hdr.bits));
 
     // Nonce (4 bytes, little-endian)
     write32LE(&buf[76], static_cast<uint32_t>(hdr.nonce));
-    Logger::log("[buildBlockHeader80] Nonce: " + std::to_string(hdr.nonce));
 
     return buf;
 }
@@ -295,22 +293,17 @@ Block::Block(int height, const std::string& ph, uint32_t ts, uint32_t b)
 //     computeHash => double-SHA256 +21E8 injection
 // --------------------------------------------------
 std::string Block::computeHash() const {
-    Logger::log("[computeHash] Computing hash for block");
-
+    // TRU-LOGGING-01A: hash computation is consensus-critical and extremely hot.
+    // Do not emit success-path log lines here. The byte/hash computation below
+    // is unchanged; only per-hash diagnostic I/O is removed.
     // Build 80-byte header
     std::vector<unsigned char> hdrBytes = buildBlockHeader80(header);
-    Logger::log("[computeHash] Header bytes built, size: " + std::to_string(hdrBytes.size()));
-
     // First SHA256
     unsigned char h1[32];
     SHA256(hdrBytes.data(), hdrBytes.size(), h1);
-    Logger::log("[computeHash] First SHA256 computed");
-
     // Second SHA256
     unsigned char h2[32];
     SHA256(h1, 32, h2);
-    Logger::log("[computeHash] Second SHA256 computed");
-
     // Apply 21E8 injection
     uint32_t last32 = (static_cast<uint32_t>(h2[28]) << 24) |
                       (static_cast<uint32_t>(h2[29]) << 16) |
@@ -321,7 +314,6 @@ std::string Block::computeHash() const {
     h2[29] = static_cast<unsigned char>((last32 >> 16) & 0xff);
     h2[30] = static_cast<unsigned char>((last32 >> 8) & 0xff);
     h2[31] = static_cast<unsigned char>(last32 & 0xff);
-    Logger::log("[computeHash] 21E8 injection applied");
 
     // Convert to big-endian hex
     std::ostringstream oss;
@@ -330,7 +322,6 @@ std::string Block::computeHash() const {
         oss << std::setw(2) << static_cast<int>(h2[i]);
     }
     std::string hash = oss.str();
-    Logger::log("[computeHash] Computed hash: " + hash);
     return hash;
 }
 

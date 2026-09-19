@@ -5020,7 +5020,9 @@ static ContractRegistryView loadContractRegistryView(
 }
 
 nlohmann::json Blockchain::getContracts() const {
-    Logger::log("[getContracts] Starting contract retrieval");
+    // TRU-LOGGING-01B: contract discovery scans the active chain and can visit
+    // thousands of outputs per request. Keep warnings/errors and one summary,
+    // but suppress per-output / per-contract success-path disk logging.
     nlohmann::json contracts = nlohmann::json::array();
 
     // Contract Vault maturity uses the same parent-chain MTP
@@ -5067,28 +5069,23 @@ nlohmann::json Blockchain::getContracts() const {
             for (size_t i = 0; i < tx.vout.size(); ++i) {
                 const auto& out = tx.vout[i];
                 std::string scriptPubKey = out.scriptPubKey;
-                Logger::log("[getContracts] Examining scriptPubKey: " + scriptPubKey + " for tx: " + tx.txid);
 
                 if (scriptPubKey.size() > 2 && scriptPubKey.substr(0, 2) == "6a") {
                     std::string dataHex = scriptPubKey.substr(4);
                     std::vector<unsigned char> data = hexDecode(dataHex);
                     std::string dataStr(data.begin(), data.end());
-                    Logger::log("[getContracts] OP_RETURN data: " + dataStr);
 
                     if (dataStr.find("TRU_CONTRACT:") == 0) {
                         std::string remainder = dataStr.substr(13);
                         size_t reasonPos = remainder.find(":REASON:");
                         contractName = (reasonPos != std::string::npos) ? remainder.substr(0, reasonPos) : remainder;
                         lockReason = (reasonPos != std::string::npos) ? remainder.substr(reasonPos + 8) : "";
-                        Logger::log("[getContracts] Found contract metadata - Name: " + contractName + ", Reason: " + lockReason);
                         
                         // Take the next output as the contract script
                         if (i + 1 < tx.vout.size()) {
                             contractScript = tx.vout[i + 1].scriptPubKey;
                             contractVout = i + 1;
                             contractAmount = tx.vout[i + 1].amount; // Get the amount locked
-                            Logger::log("[getContracts] Contract script identified: " + contractScript + 
-                                      ", amount: " + std::to_string(contractAmount));
                         }
                         break; // Stop after finding metadata and contract script
                     }
@@ -5217,7 +5214,6 @@ nlohmann::json Blockchain::getContracts() const {
                         static_cast<uint32_t>(contractVout), this);
                     if (contractAddr.empty()) contractAddr = canonicalOutpoint;
                 }
-                Logger::log("[getContracts] Contract identity: " + contractAddr);
 
                 nlohmann::json contract;
                 contract["name"] = contractName.empty() ? "Unnamed Contract" : contractName;
@@ -5300,10 +5296,6 @@ nlohmann::json Blockchain::getContracts() const {
                         {"fundingOutpoint", canonicalOutpoint}};
                 }
 
-                Logger::log(
-                    "[getContracts] Assigned type: " + contractType +
-                    " source=" + classificationSource +
-                    " for script: " + contractScript);
 
                 // bridge enrichment is classification-preserving.
                 // The push-aware scanner above decides BRIDGE; payload bytes can
