@@ -30,7 +30,14 @@ inline std::string trim(const std::string& in) {
     return in.substr(first, last - first + 1);
 }
 
+inline constexpr std::size_t MAX_AUTH_TOKEN_LENGTH = 256;
+
 inline bool constantTimeEqual(const std::string& a, const std::string& b) {
+    // AUDIT-HARDENING-01A / Track 13: reject attacker-controlled
+    // oversized credentials before entering the length-oblivious loop.
+    if (a.size() > MAX_AUTH_TOKEN_LENGTH || b.size() > MAX_AUTH_TOKEN_LENGTH) {
+        return false;
+    }
     const std::size_t maxLen = a.size() > b.size() ? a.size() : b.size();
     unsigned int diff = static_cast<unsigned int>(a.size() ^ b.size());
     for (std::size_t i = 0; i < maxLen; ++i) {

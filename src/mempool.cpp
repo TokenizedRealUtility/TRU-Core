@@ -1494,6 +1494,23 @@ bool Mempool::isTransactionValidUnchecked(
             return false;
         }
 
+        // TRU AUDIT-HARDENING-01C / Track 04 — relay-only dust policy.
+        // Restrict the economic dust floor to ordinary spendable P2PKH
+        // outputs. TRU protocol outputs (OP_RETURN/token metadata and
+        // canonical contract/state anchors) retain their existing dedicated
+        // policy, including intentional zero/one-atom values. This is NOT a
+        // block-consensus rule and does not invalidate historical blocks.
+        if (isStandardPaymentScript(out.scriptPubKey) &&
+            out.amount < tru_limits::MIN_OUTPUT_DUST_ATOMS) {
+            Logger::log(
+                "[Mempool] Rejecting standard payment output below dust policy: output=" +
+                std::to_string(i) + " amount=" + std::to_string(out.amount) +
+                " minimum=" +
+                std::to_string(tru_limits::MIN_OUTPUT_DUST_ATOMS) +
+                " txid=" + tx.txid);
+            return false;
+        }
+
         if (isMagicLockScript(out.scriptPubKey)) {
             Logger::log(
                 "[Mempool] Detected MagicLock script in output #" +

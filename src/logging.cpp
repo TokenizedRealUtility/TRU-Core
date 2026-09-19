@@ -70,7 +70,24 @@ bool Logger::shouldLogLocked(Level level) {
 }
 
 std::string Logger::formatLineLocked(Level level, const std::string& message) {
-    return "[" + timestampNow() + "] [" + levelName(level) + "] " + message + "\n";
+    // AUDIT-HARDENING-01A / Track 15: one logger call must produce exactly
+    // one physical record. Escape CR/LF/NUL and other C0 controls so remote
+    // peer metadata cannot forge timestamp/severity-looking log entries.
+    std::string sanitized;
+    sanitized.reserve(message.size());
+    static const char hex[] = "0123456789ABCDEF";
+    for (unsigned char c : message) {
+        if (c == '\r' || c == '\n') {
+            sanitized += (c == '\r') ? "\\r" : "\\n";
+        } else if (c < 0x20U || c == 0x7FU) {
+            sanitized += "\\x";
+            sanitized.push_back(hex[(c >> 4) & 0x0FU]);
+            sanitized.push_back(hex[c & 0x0FU]);
+        } else {
+            sanitized.push_back(static_cast<char>(c));
+        }
+    }
+    return "[" + timestampNow() + "] [" + levelName(level) + "] " + sanitized + "\n";
 }
 
 void Logger::openCurrentLocked(bool append) {

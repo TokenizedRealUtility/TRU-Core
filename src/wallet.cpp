@@ -398,6 +398,9 @@ static std::string hashLockPreimageHash160Hex(const std::string& preimage)
 // HTLC-01C: HASH160 over exact binary preimage bytes. Atomic-swap secrets are
 // byte strings, not locale/text values, so the generated path keeps the raw
 // 32-byte preimage intact and only hex-encodes it for operator transport.
+// AUDIT-HARDENING-01E / Track 12: minimum local refund horizon.
+static constexpr std::uint32_t HTLC_MIN_SAFETY_MARGIN_SECONDS = 7200U;
+
 static std::string htlcPreimageHash160Hex(
     const std::vector<unsigned char>& preimage)
 {
@@ -4120,9 +4123,12 @@ HtlcAtomicSwapPrepareResult Wallet::prepareHtlcAtomicSwapV1(
     }
 
     const std::uint32_t currentMtp = getWalletChainMedianTimePast(*blockchainPtr);
-    if (currentMtp > 0 && refundLockTime <= currentMtp) {
+    if (currentMtp > 0 &&
+        (refundLockTime <= currentMtp ||
+         static_cast<std::uint64_t>(refundLockTime) <
+             static_cast<std::uint64_t>(currentMtp) + HTLC_MIN_SAFETY_MARGIN_SECONDS)) {
         throw std::invalid_argument(
-            "HTLC / Atomic Swap V1 refund time must be later than current chain MTP");
+            "HTLC / Atomic Swap V1 refund time must be at least 7200 seconds beyond current chain MTP");
     }
 
     const std::string sender = getCurrentAddress();
@@ -4799,9 +4805,12 @@ HtlcAtomicSwapCreateResult Wallet::createHtlcAtomicSwapV1(
     }
 
     const std::uint32_t currentMtp = getWalletChainMedianTimePast(*blockchainPtr);
-    if (currentMtp > 0 && refundLockTime <= currentMtp) {
+    if (currentMtp > 0 &&
+        (refundLockTime <= currentMtp ||
+         static_cast<std::uint64_t>(refundLockTime) <
+             static_cast<std::uint64_t>(currentMtp) + HTLC_MIN_SAFETY_MARGIN_SECONDS)) {
         throw std::invalid_argument(
-            "HTLC / Atomic Swap V1 refund time must be later than current chain MTP");
+            "HTLC / Atomic Swap V1 refund time must be at least 7200 seconds beyond current chain MTP");
     }
 
     const std::string sender = getCurrentAddress();

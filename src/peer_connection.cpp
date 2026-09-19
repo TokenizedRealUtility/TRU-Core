@@ -496,7 +496,24 @@ void PeerConnection::sendBlock(const Block &block) {
 void PeerConnection::readLoop() {
     Logger::log("[PeerConnection::readLoop] Entering readLoop for " + ip_ + ":" + std::to_string(port_));
     std::vector<char> readBuffer(16384); // 16KB buffer for incoming data
-    
+
+    // AUDIT-HARDENING-01B / Track 09: an outbound TCP connection is not a
+    // usable peer until it completes the validated TRU VERSION handshake.
+    // Bound that pre-handshake state so a silent/slow endpoint cannot retain
+    // an outbound connection slot indefinitely. Inbound sessions retain the
+    // existing transport policy; this closes the verified-peer redial case.
+    static constexpr std::int64_t OUTBOUND_VERSION_DEADLINE_MS = 10000;
+    const auto outboundVersionDeadline =
+        std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(OUTBOUND_VERSION_DEADLINE_MS);
+
+    // AUDIT-HARDENING-01A / Track 07: a peer may fragment a valid frame,
+    // but it may not keep one incomplete frame alive forever by trickling
+    // bytes. This is transport policy only; it does not change wire format.
+    static constexpr std::int64_t FRAME_READ_TIMEOUT_MS = 30000;
+    bool partialFramePending = false;
+    std::chrono::steady_clock::time_point partialFrameSince{};
+
     // Set socket options for reliability
     int yes = 1;
     if (setsockopt(sock_, SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(yes)) < 0) {
@@ -514,13 +531,30 @@ void PeerConnection::readLoop() {
     }
 
     while (running_) {
+        if (!inbound_ && !networkHandshakeComplete_.load() &&
+            std::chrono::steady_clock::now() >= outboundVersionDeadline) {
+            Logger::log(
+                "[PeerConnection::readLoop][AUDIT-HARDENING-01B] "
+                "Disconnecting outbound peer for VERSION handshake deadline: " +
+                ip_ + ":" + std::to_string(port_));
+            running_ = false;
+            buffer_.clear();
+            break;
+        }
+
         fd_set readSet;
         FD_ZERO(&readSet);
         FD_SET(sock_, &readSet);
         FD_SET(pipeFds_[0], &readSet); // For shutdown signal
         int maxFd = std::max(sock_, pipeFds_[0]) + 1;
 
-        struct timeval timeout = {15, 0}; // 15-second select timeout
+        // Before outbound VERSION validation, wake at least once per second so
+        // the 10-second application deadline is enforced independently of TCP
+        // keepalive and of whether the remote endpoint sends any bytes.
+        struct timeval timeout = {15, 0};
+        if (!inbound_ && !networkHandshakeComplete_.load()) {
+            timeout.tv_sec = 1;
+        }
 
         int selectResult = select(maxFd, &readSet, nullptr, nullptr, &timeout);
 
@@ -537,6 +571,26 @@ void PeerConnection::readLoop() {
             running_ = false;
             break;
         } else if (selectResult == 0) {
+            // The one-second pre-handshake poll exists only to enforce the
+            // outbound VERSION deadline. Do not send application PING traffic
+            // before network identity has been validated.
+            if (!inbound_ && !networkHandshakeComplete_.load()) {
+                continue;
+            }
+            if (partialFramePending) {
+                const auto ageMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - partialFrameSince).count();
+                if (ageMs >= FRAME_READ_TIMEOUT_MS) {
+                    Logger::log("[PeerConnection::readLoop][AUDIT-HARDENING-01A] "
+                                "Disconnecting peer for incomplete-frame deadline: " +
+                                ip_ + ":" + std::to_string(port_));
+                    reportAbuse(tru_limits::P2P_MALFORMED_FRAME_SCORE,
+                                "incomplete frame deadline");
+                    running_ = false;
+                    buffer_.clear();
+                    break;
+                }
+            }
             // Timeout: Send a ping to keep the connection alive
             try {
                 blockchain::BaseMessage pingMsg = MessageHandler::createPingMessage();
@@ -618,8 +672,29 @@ void PeerConnection::readLoop() {
                     buffer_.clear();
                     break;
                 } else if (consumed == 0) {
-                    break; // Incomplete but size-valid frame; wait for more data
+                    const auto now = std::chrono::steady_clock::now();
+                    if (!partialFramePending) {
+                        partialFramePending = true;
+                        partialFrameSince = now;
+                    } else {
+                        const auto ageMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            now - partialFrameSince).count();
+                        if (ageMs >= FRAME_READ_TIMEOUT_MS) {
+                            Logger::log("[PeerConnection::readLoop][AUDIT-HARDENING-01A] "
+                                        "Disconnecting slow-drip incomplete frame from " +
+                                        ip_ + ":" + std::to_string(port_));
+                            reportAbuse(tru_limits::P2P_MALFORMED_FRAME_SCORE,
+                                        "slow-drip incomplete frame");
+                            running_ = false;
+                            buffer_.clear();
+                        }
+                    }
+                    break; // Incomplete but size-valid frame; wait within deadline
                 }
+
+                // A complete frame was consumed. Any remaining bytes begin a new
+                // frame and receive a fresh deadline only if they prove incomplete.
+                partialFramePending = false;
 
                 if (!throttleInboundMessage(msg.type())) {
                     break; // shutdown while applying message/request backpressure

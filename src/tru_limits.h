@@ -119,6 +119,13 @@ inline constexpr std::size_t MAX_TX_QUEUE_TXS = 1024;
 // Every direct/queued/RPC/internal Mempool::addTransaction() call shares the
 // same bounded script-validation concurrency gate.
 inline constexpr std::uint64_t MIN_RELAY_FEE_SAT_PER_BYTE = 1;
+
+// TRU AUDIT-HARDENING-01C / Track 04: NODE POLICY ONLY.
+// Ordinary spendable P2PKH outputs below this value are non-standard for
+// mempool admission. Protocol/data outputs keep their existing dedicated
+// policy because several canonical TRU contract/token anchors intentionally
+// use zero or one atom. Historical blocks remain consensus-valid.
+inline constexpr std::uint64_t MIN_OUTPUT_DUST_ATOMS = 546;
 inline constexpr std::size_t MAX_CONCURRENT_MEMPOOL_VALIDATIONS = 4;
 
 // BUSY is retryable overload, not transaction invalidity. The bounded P2P

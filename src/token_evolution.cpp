@@ -10,6 +10,7 @@
 #include <ctime>
 #include <iomanip>
 #include <limits>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -19,6 +20,9 @@ using nlohmann::json;
 
 namespace {
 constexpr std::size_t TOKEN_EVOLUTION_MAX_ANCHOR_QUEUE_ITEMS = 256U;
+// AUDIT-HARDENING-01D / Track 11: one token may not monopolize the global
+// bounded pre-submission queue. The global bound remains as a final resource cap.
+constexpr std::size_t MAX_ANCHORS_PER_TOKEN = 8U;
 constexpr std::size_t TOKEN_EVOLUTION_MAX_ANCHOR_QUEUE_BYTES = 65536U;
 constexpr std::size_t TOKEN_EVOLUTION_MAX_QUEUE_ITEM_BYTES = 64U;
 constexpr uint64_t TOKEN_EVOLUTION_MAX_VERIFY_EPOCHS = 100000U;
@@ -707,6 +711,11 @@ TokenEvolutionResult TokenEvolutionEngine::evolvePreview(
 }
 
 bool TokenEvolutionEngine::persistPreview(const json& record) {
+    // Track 11: serialize the queue read/compact/write transaction.
+    // storeContractDataBatch is atomic, but without this guard two concurrent
+    // persistPreview calls can both derive from the same pre-write queue image.
+    static std::mutex evolutionAnchorQueueWriteMutex;
+    std::lock_guard<std::mutex> queueWriteLock(evolutionAnchorQueueWriteMutex);
     if (!storage_ || !record.is_object()) return false;
 
     const std::string tokenID = record.value("tokenID", "");
@@ -935,6 +944,30 @@ bool TokenEvolutionEngine::persistPreview(const json& record) {
     }
 
     if (!alreadyQueued) {
+        // Track 11 fairness: bound each token independently inside the durable
+        // global queue. This prevents one token lineage from consuming all 256
+        // queue positions while preserving the existing queue schema/readers.
+        std::size_t anchorsForToken = 0U;
+        for (const auto& item : compactQueue) {
+            std::string queuedTokenID;
+            uint64_t queuedEpoch = 0;
+            if (!parseEvolutionQueueItem(item.get<std::string>(), queuedTokenID, queuedEpoch)) {
+                Logger::log("[TokenEvolution] Refusing malformed compact queue item");
+                return false;
+            }
+            if (queuedTokenID == tokenID) {
+                ++anchorsForToken;
+            }
+        }
+
+        if (anchorsForToken >= MAX_ANCHORS_PER_TOKEN) {
+            Logger::log(
+                "[TokenEvolution] Per-token anchor queue limit reached token=" +
+                tokenID
+            );
+            return false;
+        }
+
         if (compactQueue.size() >= TOKEN_EVOLUTION_MAX_ANCHOR_QUEUE_ITEMS) {
             Logger::log(
                 "[TokenEvolution] Anchor queue full; refusing unqueued epoch"

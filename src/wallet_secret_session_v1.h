@@ -38,8 +38,12 @@ public:
 
 private:
     static void secureClear(std::vector<std::uint8_t>& bytes) noexcept;
+    static bool lockMemory(std::vector<std::uint8_t>& bytes) noexcept;
+    static void unlockMemory(std::vector<std::uint8_t>& bytes) noexcept;
 
     bool unlocked_ = false;
     std::vector<std::uint8_t> seed_;
     std::vector<std::uint8_t> privateMaterial_;
+    bool seedMemoryLocked_ = false;
+    bool privateMemoryLocked_ = false;
 };

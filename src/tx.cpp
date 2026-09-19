@@ -956,13 +956,15 @@ static uint64_t readVarInt(const std::vector<unsigned char> &raw, size_t &pos) {
         return val;
     } else if (c == 0xFE) {
         if (pos + 4 > raw.size()) throw std::runtime_error("readVarInt[0xFE]: out of range");
+        // AUDIT-REMEDIATION-01 / Track 01: read32LE advances pos.
+        // Do not advance the cursor a second time here.
         uint32_t val = read32LE(raw, pos);
-        pos += 4;
         return val;
     } else if (c == 0xFF) {
         if (pos + 8 > raw.size()) throw std::runtime_error("readVarInt[0xFF]: out of range");
+        // AUDIT-REMEDIATION-01 / Track 01: read64LE advances pos.
+        // Do not advance the cursor a second time here.
         uint64_t val = read64LE(raw, pos);
-        pos += 8;
         return val;
     }
     throw std::runtime_error("Invalid varint prefix");

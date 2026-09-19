@@ -28,13 +28,38 @@ void WalletSecretSessionV1::secureClear(
     bytes.clear();
 }
 
+bool WalletSecretSessionV1::lockMemory(std::vector<std::uint8_t>& bytes) noexcept
+{
+    return bytes.empty() || sodium_mlock(bytes.data(), bytes.size()) == 0;
+}
+
+void WalletSecretSessionV1::unlockMemory(std::vector<std::uint8_t>& bytes) noexcept
+{
+    if (!bytes.empty()) {
+        // sodium_munlock() zeroes the region before releasing the page lock.
+        sodium_munlock(bytes.data(), bytes.size());
+    }
+}
+
 void WalletSecretSessionV1::lock() noexcept
 {
     // Clear the state flag first so any concurrent/exceptional observation
     // cannot treat the session as usable while destruction is in progress.
     unlocked_ = false;
-    secureClear(seed_);
-    secureClear(privateMaterial_);
+    if (seedMemoryLocked_) {
+        unlockMemory(seed_);
+        seedMemoryLocked_ = false;
+        seed_.clear();
+    } else {
+        secureClear(seed_);
+    }
+    if (privateMemoryLocked_) {
+        unlockMemory(privateMaterial_);
+        privateMemoryLocked_ = false;
+        privateMaterial_.clear();
+    } else {
+        secureClear(privateMaterial_);
+    }
 }
 
 bool WalletSecretSessionV1::isLocked() const noexcept
@@ -73,8 +98,21 @@ void WalletSecretSessionV1::replacePrivateMaterial(
             "wallet secret-session private-material replacement requires unlocked session");
     }
 
-    secureClear(privateMaterial_);
+    // Pin replacement before making it the live secret buffer. Fail closed if
+    // the OS refuses the page lock.
+    if (!lockMemory(replacement)) {
+        secureClear(replacement);
+        throw std::runtime_error("unable to mlock replacement wallet private material");
+    }
+    if (privateMemoryLocked_) {
+        unlockMemory(privateMaterial_);
+        privateMemoryLocked_ = false;
+        privateMaterial_.clear();
+    } else {
+        secureClear(privateMaterial_);
+    }
     privateMaterial_ = std::move(replacement);
+    privateMemoryLocked_ = true;
 }
 
 
@@ -120,9 +158,23 @@ bool WalletSecretSessionV1::unlock(
         return false;
     }
 
-    // Move authenticated plaintext into the sole live session buffers.
+    // Pin authenticated plaintext before publishing the unlocked session.
+    // This prevents the live seed/private material from being swapped to disk.
+    const bool seedPinned = lockMemory(seedCandidate);
+    const bool privatePinned = seedPinned && lockMemory(privateCandidate);
+    if (!seedPinned || !privatePinned) {
+        if (seedPinned) unlockMemory(seedCandidate); else secureClear(seedCandidate);
+        if (privatePinned) unlockMemory(privateCandidate); else secureClear(privateCandidate);
+        seedCandidate.clear();
+        privateCandidate.clear();
+        setError(errorOut, "unable to mlock wallet secret session");
+        return false;
+    }
+
     seed_.swap(seedCandidate);
     privateMaterial_.swap(privateCandidate);
+    seedMemoryLocked_ = true;
+    privateMemoryLocked_ = true;
 
     // The swapped candidates now contain the old (empty) session buffers,
     // but clear them explicitly to preserve the invariant if implementation

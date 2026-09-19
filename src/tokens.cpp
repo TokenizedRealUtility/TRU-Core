@@ -307,6 +307,16 @@ bool updateTokenOwnership(LevelDBStorage* storage, const std::string& hashedToke
         return false;
     }
 
+    // AUDIT-REMEDIATION-01 / Track 02:
+    // A self-transfer must preserve the already-confirmed ownership amount.
+    // Returning success here preserves historical transaction acceptance while
+    // preventing two writes to the same LevelDB key from turning quantity into
+    // an artificial balance increase.
+    if (fromAddress == toAddress) {
+        Logger::log("[updateTokenOwnership] Self-transfer: ownership unchanged");
+        return true;
+    }
+
     leveldb::WriteBatch batch;
     uint64_t rem = have - quantity;
     if (rem > 0) {

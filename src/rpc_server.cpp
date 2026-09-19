@@ -2053,6 +2053,12 @@ static json handleGetTRUScripts(Blockchain &chain, const json &params, int id) {
 // Get specific TRUScript details
 //==============================================
 static json handleGetTRUScriptDetails(Blockchain &chain, const json &params, int id) {
+    // AUDIT-REMEDIATION-01 / Track 06: externally reachable RPC
+    // handlers fail closed if the chain storage service is unavailable.
+    auto storage = chain.getStorage();
+    if (!storage) {
+        return makeError(-32603, "Internal storage unavailable");
+    }
     if (!params.contains("txid")) {
         return makeError(-32602, "Missing txid parameter");
     }
@@ -2063,7 +2069,7 @@ static json handleGetTRUScriptDetails(Blockchain &chain, const json &params, int
         // Get metadata
         std::string metaKey = "tokenMetadata:" + txid;
         std::string metaValue;
-        if (!chain.getStorage()->getWithDataChecksum(metaKey, metaValue)) {
+        if (!storage->getWithDataChecksum(metaKey, metaValue)) {
             return makeError(-32000, "TRUScript not found");
         }
         
@@ -2081,7 +2087,7 @@ static json handleGetTRUScriptDetails(Blockchain &chain, const json &params, int
         } else {
             // Fall back to separate storage
             std::string dataKey = "truscriptData:" + txid;
-            chain.getStorage()->getWithDataChecksum(dataKey, inscriptionData);
+            storage->getWithDataChecksum(dataKey, inscriptionData);
         }
         
         // Get actual block height if transaction is confirmed
@@ -3622,6 +3628,12 @@ static json handleGetTokenUTXO(Blockchain& chain, const json& params, int id) {
 //              GET TOKEN META DATA
 //================================================================
 static json handleGetTokenMetadata(Blockchain& chain, const json& params, int id) {
+    // AUDIT-REMEDIATION-01 / Track 06: externally reachable RPC
+    // handlers fail closed if the chain storage service is unavailable.
+    auto storage = chain.getStorage();
+    if (!storage) {
+        return makeError(-32603, "Internal storage unavailable");
+    }
     // Validate input parameters
     if (!params.contains("txid")) {
         return makeError(-32602, "Missing txid");
@@ -3635,7 +3647,7 @@ static json handleGetTokenMetadata(Blockchain& chain, const json& params, int id
     // Construct storage key and fetch metadata
     std::string metaKey = "tokenMetadata:" + txid;
     std::string metaValue;
-    if (!chain.getStorage()->getWithDataChecksum(metaKey, metaValue)) {
+    if (!storage->getWithDataChecksum(metaKey, metaValue)) {
         return makeError(-32000, "No metadata found for the given txid");
     }
 
@@ -3926,6 +3938,12 @@ static json handleVerifyTokenBalance(Blockchain &chain, const json &params, int 
 // Handle FIx Token Meta
 //========================
 static json handleFixTokenMetadata(Blockchain &chain, const json &params, int id) {
+    // AUDIT-REMEDIATION-01 / Track 06: externally reachable RPC
+    // handlers fail closed if the chain storage service is unavailable.
+    auto storage = chain.getStorage();
+    if (!storage) {
+        return makeError(-32603, "Internal storage unavailable");
+    }
     if (!params.contains("txid") || !params.contains("metadata")) {
         return makeError(-32602, "Missing txid or metadata parameter");
     }
@@ -3958,7 +3976,7 @@ static json handleFixTokenMetadata(Blockchain &chain, const json &params, int id
         
         // Store the fixed metadata
         std::string metaKey = "tokenMetadata:" + txid;
-        chain.getStorage()->putWithDataChecksum(metaKey, compatMeta.dump());
+        storage->putWithDataChecksum(metaKey, compatMeta.dump());
         
         Logger::log("[handleFixTokenMetadata] Fixed metadata for " + txid);
         
@@ -4114,6 +4132,12 @@ static uint64_t calculateCurrentSatNumber(Blockchain& chain) {
 }
 
 static json handleInscribeTRUScriptSigned(Blockchain &chain, const json &params, int id) {
+    // AUDIT-REMEDIATION-01 / Track 06: externally reachable RPC
+    // handlers fail closed if the chain storage service is unavailable.
+    auto storage = chain.getStorage();
+    if (!storage) {
+        return makeError(-32603, "Internal storage unavailable");
+    }
     if (!params.contains("signedTxHex")) {
         return makeError(-32602, "Missing signedTxHex parameter");
     }
@@ -4136,13 +4160,13 @@ static json handleInscribeTRUScriptSigned(Blockchain &chain, const json &params,
             
             // Store the inscription data
             std::string dataKey = "truscriptData:" + tx.txid;
-            chain.getStorage()->putWithDataChecksum(dataKey, inscriptionData);
+            storage->putWithDataChecksum(dataKey, inscriptionData);
             
             // Calculate inscription index by counting existing TRUScripts
             uint64_t inscriptionIndex = 0;
             std::string countKey = "truscriptCount";
             std::string countStr;
-            if (chain.getStorage()->getWithDataChecksum(countKey, countStr)) {
+            if (storage->getWithDataChecksum(countKey, countStr)) {
                 try {
                     inscriptionIndex = std::stoull(countStr) + 1;
                 } catch (...) {
@@ -4153,7 +4177,7 @@ static json handleInscribeTRUScriptSigned(Blockchain &chain, const json &params,
             }
             
             // Update the count
-            chain.getStorage()->putWithDataChecksum(countKey, std::to_string(inscriptionIndex));
+            storage->putWithDataChecksum(countKey, std::to_string(inscriptionIndex));
             
             // Calculate TRU atom number (cumulative TRU atoms from genesis)
             uint64_t satNumber = calculateCurrentSatNumber(chain);
@@ -4175,7 +4199,7 @@ static json handleInscribeTRUScriptSigned(Blockchain &chain, const json &params,
             metadata["currentTxid"] = tx.txid;
             
             std::string metaKey = "tokenMetadata:" + tx.txid;
-            chain.getStorage()->putWithDataChecksum(metaKey, metadata.dump());
+            storage->putWithDataChecksum(metaKey, metadata.dump());
             
             Logger::log("[handleInscribeTRUScriptSigned] Stored TRUScript #" + std::to_string(inscriptionIndex) +
                        " with size=" + std::to_string(sizeBytes) + " bytes");
@@ -8279,6 +8303,8 @@ static json handleHtlcGenerateSecret(Wallet& wallet, const json& params, int id)
 //====================================================================================
 // SWAP-FRESH-01B4D2 — authenticated signed funding preparation / NO BROADCAST
 //====================================================================================
+// Track 12 policy is enforced in Wallet::prepare/createHtlcAtomicSwapV1 via
+// HTLC_MIN_SAFETY_MARGIN_SECONDS (7200 seconds beyond current chain MTP).
 static json handleHtlcPrepareFunding(Wallet& wallet, const json& params, int id) {
     try {
         requireTruSwapRpcAuth(params);
