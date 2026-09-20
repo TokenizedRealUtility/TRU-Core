@@ -88,3 +88,9 @@ swap/agent/swap_agent/
 build-gui-desktop01/
 build-desktop/
 build-desktop-test/
+
+# MAC-DESKTOP-01 local patch/build artifacts
+TRU_MAC_DESKTOP_01_ADDON/
+TRU_MAC_DESKTOP_01A_VERSION_SYNC_PINNED.sh
+build-desktop-mac01-test/
+build-desktop-mac01-qt6-test/
