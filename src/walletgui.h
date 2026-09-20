@@ -24,11 +24,15 @@
 // Forward declarations
 class AnimatedBackground;
 class GlowBorder;
+class DesktopPanel;
+class QProcess;
+class QPlainTextEdit;
+class QCloseEvent;
 
 class WalletGUI : public QWidget {
     Q_OBJECT
 public:
-    explicit WalletGUI(Wallet &walletRef, QWidget *parent = nullptr);
+    explicit WalletGUI(Wallet &walletRef, QWidget *parent = nullptr, int rpcPort = tru_network::MAINNET_RPC_PORT, const QByteArray& rpcToken = {});
     ~WalletGUI();
 
 private slots:
@@ -81,9 +85,26 @@ private slots:
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
+    void closeEvent(QCloseEvent *event) override;
 
 private:
     void setupUI();
+    void setupMiningTab();
+    void setupMultisigTab();
+    void retire_token();
+    bool selectWalletAddress(const QString& address);
+    bool confirmAction(const QString& action, const QString& details);
+    void persistSettings();
+    int localRpcPort;
+    QByteArray localRpcToken;
+    DesktopPanel* corePanel = nullptr;
+    QProcess* minerProcess = nullptr;
+    QComboBox* minerKind = nullptr;
+    QSpinBox* minerThreads = nullptr;
+    QPlainTextEdit* minerOutput = nullptr;
+    QLineEdit* contract_amount_edit = nullptr;
+    QPlainTextEdit* token_extra_metadata = nullptr;
+    bool closingAfterMiner = false;
     void setupWalletTab();
     void setupSendTab();
     void setupTokensTab();

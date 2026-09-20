@@ -1,5 +1,8 @@
 #ifdef BUILD_WITH_QT
 #include <QtWidgets/QApplication>
+#include <QInputDialog>
+#include <QLineEdit>
+#include <QTimer>
 #include "walletgui.h"
 #endif
 #include "smart_contract.h"
@@ -10613,6 +10616,19 @@ int main(int argc, char *argv[]) {
             return 0;
         }
 
+        // GUI-DESKTOP-01: initialize Qt only for GUI launches. CLI/headless
+        // execution never attempts to connect to a display server.
+#ifdef BUILD_WITH_QT
+        std::unique_ptr<QApplication> qtApp;
+        if (result["gui"].as<bool>()) {
+            QApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
+            qtApp = std::make_unique<QApplication>(argc, argv);
+        }
+#else
+        if (result["gui"].as<bool>())
+            throw std::runtime_error("GUI unavailable; rebuild with BUILD_WITH_QT=ON");
+#endif
+
         const std::string dbPath = result["datadir"].as<std::string>();
         std::string logDir = result["logdir"].as<std::string>();
         const std::string logLevel = result["loglevel"].as<std::string>();
@@ -11177,6 +11193,22 @@ std::string walletPath = "tru.dat";
         // Encrypted wallets start ENCRYPTED_LOCKED with public metadata only.
         // Authenticate locally before any worker/CLI path can reach signing.
         if (wallet.getWalletSecurityMode() == WalletSecurityModeV1::ENCRYPTED_LOCKED) {
+#ifdef BUILD_WITH_QT
+            if (qtApp) {
+                bool accepted = false;
+                QString entered = QInputDialog::getText(nullptr, "Unlock TRU wallet",
+                    "Wallet passphrase (local authentication):", QLineEdit::Password, {}, &accepted);
+                if (!accepted || entered.isEmpty()) throw std::runtime_error("Wallet unlock cancelled");
+                std::string passphrase = entered.toStdString();
+                entered.fill(QChar('\0')); entered.clear();
+                std::string unlockError;
+                const bool unlocked = wallet.unlockEncryptedWalletFromFiles(passphrase, &unlockError);
+                std::fill(passphrase.begin(), passphrase.end(), '\0'); passphrase.clear();
+                if (!unlocked || wallet.getWalletSecurityMode() != WalletSecurityModeV1::ENCRYPTED_UNLOCKED)
+                    throw std::runtime_error("Wallet unlock failed: " + unlockError);
+            } else
+#endif
+            {
             if (!::isatty(STDIN_FILENO)) {
                 throw std::runtime_error(
                     "[SEC-14R.4] encrypted wallet requires an interactive terminal for authenticated unlock");
@@ -11243,6 +11275,7 @@ std::string walletPath = "tru.dat";
 
             Logger::log(
                 "[SEC-14R.4] authenticated encrypted-wallet signing session active");
+                    }
         }
 
         // TRU-SWAP-B — one-time deterministic role-key provisioning.
@@ -11379,10 +11412,15 @@ std::string walletPath = "tru.dat";
                     Logger::log("[main] ERROR: Sync failed: " + std::string(e.what()));
                 }
             });
-            QApplication app(argc, argv);
-            WalletGUI gui(wallet);
+            WalletGUI gui(wallet, nullptr, rpcPort, QByteArray::fromStdString(rpcAuthToken));
+            QTimer guiSignalDispatch;
+            QObject::connect(&guiSignalDispatch, &QTimer::timeout, &gui, [&gui]() {
+                dispatchPendingSignalEvents();
+                if (!g_running.load(std::memory_order_acquire)) gui.close();
+            });
+            guiSignalDispatch.start(250);
             gui.show();
-            int guiResult = app.exec();
+            int guiResult = qtApp->exec();
             Logger::log("[main] GUI closed, initiating shutdown...");
             g_running = false;
             syncRunning = false;

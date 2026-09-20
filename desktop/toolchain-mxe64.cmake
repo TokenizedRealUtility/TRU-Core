@@ -1,0 +1,15 @@
+# WINDOWS-DESKTOP-01: use MXE's complete 64-bit toolchain and Qt host tools.
+# Supply -DTRU_MXE_ROOT=/absolute/path/to/mxe on the configure command.
+set(TRU_MXE_ROOT "$ENV{TRU_MXE_ROOT}" CACHE PATH "MXE installation root")
+if(NOT TRU_MXE_ROOT)
+    set(TRU_MXE_ROOT "/opt/mxe" CACHE PATH "MXE installation root" FORCE)
+endif()
+set(TRU_MXE_TARGET "x86_64-w64-mingw32.static" CACHE STRING "64-bit MXE target")
+if(NOT TRU_MXE_TARGET MATCHES "^x86_64-w64-mingw32\\.(static|shared)$")
+    message(FATAL_ERROR "Choose one consistent 64-bit MXE static or shared target")
+endif()
+set(_tru_mxe_toolchain "${TRU_MXE_ROOT}/usr/${TRU_MXE_TARGET}/share/cmake/mxe-conf.cmake")
+if(NOT EXISTS "${_tru_mxe_toolchain}")
+    message(FATAL_ERROR "MXE toolchain not found: ${_tru_mxe_toolchain}. Build MXE cc and qtbase first.")
+endif()
+include("${_tru_mxe_toolchain}")

@@ -1,5 +1,26 @@
 // walletgui.cpp
 #include "tru_network_params.h"
+#include "tru_version.h"
+#include "tru_limits.h"
+#include "desktop_panel.h"
+#include "desktop_values.h"
+#include "contract_call_policy.h"
+#include "contract_state_init_envelope.h"
+#include "rpc_utils.h"
+#include <QSignalBlocker>
+#include <QProcess>
+#include <QProcessEnvironment>
+#include <QPlainTextEdit>
+#include <QCloseEvent>
+#include <QScrollArea>
+#include <QThread>
+#include <QDir>
+#include <QFileInfo>
+#include <QFormLayout>
+#include <sodium.h>
+#include <climits>
+#include <set>
+#include <limits>
 #include "walletgui.h"
 #include <QMessageBox>
 #include <QVBoxLayout>
@@ -93,8 +114,8 @@ uint64_t getJsonUint64(const nlohmann::json& j, const std::string& key, uint64_t
 }
 
 
-WalletGUI::WalletGUI(Wallet &walletRef, QWidget *parent)
-    : QWidget(parent), wallet(walletRef), is_mining(false), cached_balance(0.0), currentTheme("dark_futuristic") {
+WalletGUI::WalletGUI(Wallet &walletRef, QWidget *parent, int rpcPort, const QByteArray& rpcToken)
+    : QWidget(parent), localRpcPort(rpcPort), localRpcToken(rpcToken), wallet(walletRef), is_mining(false), cached_balance(0.0), currentTheme("dark_futuristic") {
     setupUI();
     
     // Apply modern theme
@@ -116,18 +137,19 @@ WalletGUI::WalletGUI(Wallet &walletRef, QWidget *parent)
     updateBalanceDisplay();
     updateBlockHeight();
     refresh_tokens();
+    refresh_tru_scripts();
     updateNetworkStatus();
     
     // Set window properties
-    setWindowTitle("TRU Blockchain Wallet - Futuristic Edition");
-    resize(1100, 750);
+    setWindowTitle("TRU Core " + QString::fromStdString(tru_version::coreReleaseVersion()) + " — Wallet & Node");
+    resize(1280, 900);
     
     // Load custom logo/branding
     loadCustomLogo();
 }
 
 WalletGUI::~WalletGUI() {
-    save_settings();
+    persistSettings();
 }
 
 void WalletGUI::setupUI() {
@@ -135,12 +157,10 @@ void WalletGUI::setupUI() {
     mainLayout->setContentsMargins(15, 15, 15, 15);
     
     // Create animated background
-    backgroundWidget = new AnimatedBackground(this);
-    backgroundWidget->lower();
+    backgroundWidget = nullptr;
     
     // Create glow border effect
-    glowBorder = new GlowBorder(this);
-    glowBorder->lower();
+    glowBorder = nullptr;
     
     // Logo/branding area
     QHBoxLayout *headerLayout = new QHBoxLayout();
@@ -161,6 +181,25 @@ void WalletGUI::setupUI() {
     setupTransactionsTab();
     setupSettingsTab();
     setupContractsTab();
+    setupMiningTab();
+    setupMultisigTab();
+    corePanel = new DesktopPanel(this);
+    corePanel->useLocalNode(localRpcPort, localRpcToken);
+    tabWidget->addTab(corePanel, "Core / AI / Swaps");
+    tabWidget->setUsesScrollButtons(true);
+    // Long forms remain usable on laptop and HiDPI screens.
+    for (int i = 0; i < tabWidget->count(); ++i) {
+        QWidget* page = tabWidget->widget(i);
+        const QString label = tabWidget->tabText(i);
+        tabWidget->removeTab(i);
+        auto scroll = new QScrollArea;
+        scroll->setWidgetResizable(true);
+        scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setWidget(page);
+        tabWidget->insertTab(i, scroll, label);
+    }
+    for (auto table : findChildren<QTableWidget*>())
+        table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     
     mainLayout->addWidget(tabWidget);
     
@@ -206,6 +245,17 @@ void WalletGUI::setupWalletTab() {
     buttonRow1->addWidget(import_key_button);
     buttonRow1->addWidget(backup_button);
     buttonRow1->addWidget(restore_button);
+    auto security = new QLabel(QString("Wallet security: %1").arg(wallet.getWalletSecurityModeName()));
+    walletLayout->addWidget(security);
+    if (wallet.getWalletSecurityMode() != WalletSecurityModeV1::LEGACY_PLAINTEXT) {
+        create_wallet_button->setEnabled(false);
+        import_key_button->setEnabled(false);
+        restore_button->setEnabled(false);
+        const QString hint = "Encrypted wallets use authenticated persistence. Create/import/restore through the supported offline wallet workflow.";
+        create_wallet_button->setToolTip(hint);
+        import_key_button->setToolTip(hint);
+        restore_button->setToolTip(hint);
+    }
     
     walletLayout->addLayout(buttonRow1);
     
@@ -427,6 +477,11 @@ void WalletGUI::setupTokensTab() {
     QGroupBox *tokenListGroup = new QGroupBox("My Tokens");
     QVBoxLayout *tokenListLayout = new QVBoxLayout();
     
+    token_extra_metadata = new QPlainTextEdit;
+    token_extra_metadata->setPlaceholderText("Optional metadata JSON object: {\"ai_version\":\"1\",\"learning_mode\":\"supervised\"}");
+    token_extra_metadata->setMaximumHeight(100);
+    layout->addWidget(new QLabel("Additional metadata (string values; SFT / NCFT / NFT / FT)"));
+    layout->addWidget(token_extra_metadata);
     // Add refresh button at the top
     QHBoxLayout *tokenControlsLayout = new QHBoxLayout();
     refresh_tokens_button = new QPushButton("Refresh Tokens", this);
@@ -436,7 +491,7 @@ void WalletGUI::setupTokensTab() {
     tokenListLayout->addLayout(tokenControlsLayout);
     
     tokens_table = new QTableWidget(0, 5, this);
-    tokens_table->setHorizontalHeaderLabels(QStringList() << "Token ID" << "Type" << "Amount" << "Symbol" << "Name");
+    tokens_table->setHorizontalHeaderLabels(QStringList() << "Token ID" << "Type" << "Raw units" << "Symbol" << "Name");
     tokens_table->horizontalHeader()->setStretchLastSection(true);
     tokens_table->setAlternatingRowColors(true);
     tokens_table->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -446,6 +501,9 @@ void WalletGUI::setupTokensTab() {
     
     tokenListLayout->addWidget(tokens_table);
     tokenListLayout->addWidget(transfer_token_button);
+    auto burnButton = new QPushButton("Retire selected token holding…");
+    tokenListLayout->addWidget(burnButton);
+    connect(burnButton, &QPushButton::clicked, this, &WalletGUI::retire_token);
     tokenListGroup->setLayout(tokenListLayout);
     layout->addWidget(tokenListGroup);
     
@@ -653,7 +711,15 @@ void WalletGUI::import_private_key() {
 
 void WalletGUI::generate_new_address() {
     try {
-        std::string newAddr = wallet.generateNewAddress();
+        std::string newAddr;
+        if (wallet.getWalletSecurityMode() == WalletSecurityModeV1::LEGACY_PLAINTEXT) {
+            newAddr = wallet.generateNewAddress();
+        } else {
+            std::string pubkey, error;
+            std::uint32_t index = 0;
+            if (!wallet.generateNewAddressEncrypted(newAddr, pubkey, index, &error))
+                throw std::runtime_error(error.empty() ? "Encrypted address creation failed" : error);
+        }
         showMessage("New Address Generated",
                    QString("New address: %1").arg(QString::fromStdString(newAddr)));
         refresh_addresses();
@@ -663,7 +729,9 @@ void WalletGUI::generate_new_address() {
 }
 
 void WalletGUI::refresh_addresses() {
-    // Update address combo boxes
+    const QSignalBlocker addressGuard(address_combo);
+    const QSignalBlocker senderGuard(from_address_combo);
+    // Refresh must never trigger a wallet selection mutation or passphrase dialog.
     address_combo->clear();
     from_address_combo->clear();
     
@@ -751,13 +819,17 @@ void WalletGUI::show_qr_code() {
 }
 
 void WalletGUI::backup_wallet() {
+    if (wallet.getWalletSecurityMode() != WalletSecurityModeV1::LEGACY_PLAINTEXT) {
+        showMessage("Encrypted wallet backup", "Close the node cleanly, then back up tru.dat.enc, tru.dat.public and wallet_seed.dat.enc together from the node working directory. Keep your passphrase separately. Do not copy a live partial wallet snapshot.");
+        return;
+    }
     QString fileName = QFileDialog::getSaveFileName(this, "Backup Wallet", 
                                                    "wallet_backup.dat",
                                                    "Wallet Files (*.dat)");
     if (fileName.isEmpty()) return;
     
     try {
-        wallet.saveToFile(fileName.toStdString());
+        if (!wallet.saveToFile(fileName.toStdString())) throw std::runtime_error("Wallet backup failed");
         showMessage("Success", "Wallet backed up successfully");
     } catch (const std::exception &e) {
         showMessage("Error", QString::fromStdString(e.what()), true);
@@ -771,7 +843,8 @@ void WalletGUI::restore_wallet() {
     if (fileName.isEmpty()) return;
     
     try {
-        wallet.loadFromFile(fileName.toStdString());
+        if (!confirmAction("Restore wallet", "Replace the currently loaded legacy wallet from this file?\n" + fileName)) return;
+        if (!wallet.loadFromFile(fileName.toStdString())) throw std::runtime_error("Wallet restore failed");
         showMessage("Success", "Wallet restored successfully");
         refresh_addresses();
         updateBalanceDisplay();
@@ -807,7 +880,12 @@ void WalletGUI::send_transaction() {
     send_button->setEnabled(false);
     
     try {
-        wallet.setCurrentAddress(from);
+        if (!confirmAction("Send TRU", "From: " + QString::fromStdString(from) + "\nTo: " + QString::fromStdString(recipient) + "\nAmount: " + QString::fromStdString(tru_amount::format(amountAtoms)) + "\nThe core adds its policy fee.")) {
+            send_progress->hide(); send_button->setEnabled(true); return;
+        }
+        if (!selectWalletAddress(QString::fromStdString(from))) {
+            send_progress->hide(); send_button->setEnabled(true); return;
+        }
         std::string txid = wallet.send_transaction(recipient, amountAtoms, nodeIP, port);
         showMessage("Transaction Sent",
                    QString("Transaction sent successfully!\nTXID: %1")
@@ -832,61 +910,36 @@ void WalletGUI::check_balance() {
 }
 
 void WalletGUI::mine() {
-    if (!is_mining) {
-        is_mining = true;
-        mine_button->setText("Stop Mining");
-        mining_status_label->setText("Mining: Syncing...");
-        mining_status_label->setStyleSheet("QLabel { color: blue; }");
-        
-        try {
-            // First, sync with the network
-            if (wallet.isLocalChainAvailable()) {
-                // Use const reference since getBlockchain() returns const
-                const Blockchain& blockchain = wallet.getBlockchain();
-                
-                // Update status
-                mining_status_label->setText("Mining: Checking blockchain...");
-                QApplication::processEvents(); // Update UI
-                
-                // For now, we'll just check the height since syncWithPeers 
-                // requires P2PNode and running flag which we don't have here
-                int localHeight = blockchain.getBestTipHeight();
-                
-                // Update wallet UTXOs after checking
-                wallet.updateLocalUTXOSetFromChain();
-                updateBlockHeight();
-                
-                // Show current status
-                showMessage("Chain Status", 
-                           QString("Local chain height: %1\nReady to mine.").arg(localHeight));
-            }
-            
-            // Now mine
-            mining_status_label->setText("Mining: Active");
-            mining_status_label->setStyleSheet("QLabel { color: green; }");
-            
-            wallet.mine();
-            showMessage("Block Mined", "Block mined successfully!");
-            
-            // Update wallet state after mining
-            wallet.updateLocalUTXOSetFromChain();
-            updateBalanceDisplay();
-            updateBlockHeight();
-            refresh_addresses();
-            refresh_tokens();
-            
-        } catch (const std::exception &e) {
-            showMessage("Error", QString::fromStdString(e.what()), true);
-        }
-        
-        is_mining = false;
-        mine_button->setText("Start Mining");
-        mining_status_label->setText("Mining: Idle");
-        mining_status_label->setStyleSheet("QLabel { color: black; }");
+    if (minerProcess->state() != QProcess::NotRunning) {
+        minerProcess->terminate();
+        mining_status_label->setText("Mining: stopping…");
+        return;
     }
+    if (!confirmAction("Start miner", "Mine to " + QString::fromStdString(wallet.getCurrentAddress()) + " using the selected CPU/GPU process?")) return;
+    const bool gpu = minerKind->currentIndex() == 1;
+    const QString executable = QDir(QCoreApplication::applicationDirPath()).filePath(gpu ? "tru_miner" : "tru_miner_cpu");
+    if (!QFileInfo(executable).isExecutable()) {
+        showMessage("Miner unavailable", "Build this miner target first:\n" + executable, true); return;
+    }
+    QStringList args{"--node-ip", "127.0.0.1", "--node-port", QString::number(localRpcPort),
+        "--mineraddr", QString::fromStdString(wallet.getCurrentAddress()),
+        "--log-file", gpu ? "gui_gpu_miner.log" : "gui_cpu_miner.log"};
+    if (!gpu) args << "--threads" << QString::number(minerThreads->value()) << "--quiet";
+    auto env = QProcessEnvironment::systemEnvironment();
+    if (!localRpcToken.isEmpty()) env.insert("TRU_RPC_TOKEN", QString::fromUtf8(localRpcToken));
+    minerProcess->setProcessEnvironment(env);
+    minerProcess->setWorkingDirectory(QDir::currentPath());
+    minerProcess->start(executable, args);
+    mine_button->setText("Stop Mining");
+    mining_status_label->setText("Mining: starting…");
 }
 
 void WalletGUI::refresh_transactions() {
+    struct SortingGuard {
+        QTableWidget* table;
+        explicit SortingGuard(QTableWidget* t) : table(t) { table->setSortingEnabled(false); }
+        ~SortingGuard() { table->setSortingEnabled(true); }
+    } sortingGuard(transactions_table);
     transactions_table->setRowCount(0);
     
     // Get transactions for current address or all addresses
@@ -974,11 +1027,11 @@ void WalletGUI::refresh_transactions() {
 }
 
 void WalletGUI::on_address_selection_changed() {
-    QString addr = address_combo->currentText();
-    if (!addr.isEmpty()) {
-        wallet.setCurrentAddress(addr.toStdString());
-        updateBalanceDisplay();
-    }
+    const QString selected = address_combo->currentText();
+    if (!selected.isEmpty()) selectWalletAddress(selected);
+    const QSignalBlocker blocker(address_combo);
+    address_combo->setCurrentText(QString::fromStdString(wallet.getCurrentAddress()));
+    updateBalanceDisplay();
 }
 
 void WalletGUI::issue_token() {
@@ -986,7 +1039,22 @@ void WalletGUI::issue_token() {
         std::string tokenID = token_id_edit->text().toStdString();
         std::string name = token_name_edit->text().toStdString();
         std::string symbol = token_symbol_edit->text().toStdString();
-        uint64_t supply = token_supply_edit->text().toULongLong();
+        std::uint64_t supply = 1;
+        if (token_type_combo->currentIndex() != 1 &&
+            !tru_desktop::positiveUnits(token_supply_edit->text().trimmed().toStdString(), supply))
+            throw std::runtime_error("Supply must be a positive integer in raw token units (uint64).");
+        std::unordered_map<std::string, std::string> extra;
+        const auto extraText = token_extra_metadata->toPlainText().trimmed();
+        if (!extraText.isEmpty()) {
+            const auto meta = nlohmann::json::parse(extraText.toStdString());
+            if (!meta.is_object()) throw std::runtime_error("Additional metadata must be a JSON object");
+            for (auto it = meta.begin(); it != meta.end(); ++it) {
+                if (!it.value().is_string()) throw std::runtime_error("Additional metadata values must be strings");
+                static const std::set<std::string> reserved{"name","symbol","description","image","decimals","creator","external_link"};
+                if (reserved.count(it.key())) throw std::runtime_error("Use the named form field for standard metadata: " + it.key());
+                extra[it.key()] = it.value().get<std::string>();
+            }
+        }
         std::string desc = token_description_edit->toPlainText().toStdString();
         std::string imageUrl = token_image_url_edit->text().toStdString();
         uint32_t decimals = token_decimals_spin->value();
@@ -996,23 +1064,24 @@ void WalletGUI::issue_token() {
             return;
         }
         
+        if (!confirmAction("Issue token", "Token: " + QString::fromStdString(tokenID) + "\nType: " + token_type_combo->currentText() + "\nRaw supply: " + QString::number(static_cast<qulonglong>(supply)) + "\nOwner: " + QString::fromStdString(wallet.getCurrentAddress()) + "\nMetadata becomes public on chain.")) return;
         std::string txid;
         int tokenType = token_type_combo->currentIndex();
         
         switch (tokenType) {
             case 0: // FT
                 // Pass decimals as integer, not string
-                txid = wallet.issueExtendedFT(tokenID, supply, name, symbol, desc, imageUrl, decimals);
+                txid = wallet.issueExtendedFT(tokenID, supply, name, symbol, desc, imageUrl, decimals, extra);
                 break;
             case 1: // NFT
                 txid = wallet.issueExtendedNFT(tokenID, name, desc, imageUrl, 
-                                               wallet.getCurrentAddress(), "");
+                                               wallet.getCurrentAddress(), "", extra);
                 break;
             case 2: // SFT
-                txid = wallet.issueExtendedSFT(tokenID, supply, name, symbol, desc, imageUrl, decimals);
+                txid = wallet.issueExtendedSFT(tokenID, supply, name, symbol, desc, imageUrl, decimals, extra);
                 break;
             case 3: // NCFT
-                txid = wallet.issueExtendedNCFT(tokenID, supply, name, desc, imageUrl);
+                txid = wallet.issueExtendedNCFT(tokenID, supply, name, desc, imageUrl, extra);
                 break;
         }
         
@@ -1027,6 +1096,7 @@ void WalletGUI::issue_token() {
         token_description_edit->clear();
         token_image_url_edit->clear();
         token_decimals_spin->setValue(8);
+        token_extra_metadata->clear();
         
         // Update wallet UTXOs and refresh display
         wallet.updateLocalUTXOSetFromChain();
@@ -1050,14 +1120,18 @@ void WalletGUI::transfer_token() {
     if (!ok || recipient.isEmpty()) return;
     
     QString amountStr = QInputDialog::getText(this, "Transfer Token",
-                                             QString("Amount to transfer (available: %1):")
+                                             QString("Raw integer units to transfer (available: %1):")
                                              .arg(currentAmount),
                                              QLineEdit::Normal, "1", &ok);
     if (!ok || amountStr.isEmpty()) return;
     
     try {
+        std::uint64_t units = 0;
+        if (!tru_desktop::positiveUnits(amountStr.trimmed().toStdString(), units))
+            throw std::runtime_error("Enter positive integer raw token units (no decimals).");
+        if (!confirmAction("Transfer token", "Token: " + tokenID + "\nRaw units: " + amountStr + "\nRecipient: " + recipient)) return;
         std::string txid = wallet.sendToken(tokenID.toStdString(),
-                                           amountStr.toULongLong(),
+                                           units,
                                            recipient.toStdString(),
                                            wallet.getCurrentAddress());
         showMessage("Token Transferred",
@@ -1081,10 +1155,13 @@ void WalletGUI::refresh_tokens() {
         
         for (const auto& [key, tokenInfo] : tokenUTXOs) {
             const auto& [txid, vout, amount, tokenData, owner] = tokenInfo;
+            if (owner != wallet.getCurrentAddress()) continue;
             
             auto it = tokenSummary.find(tokenData.tokenID);
             if (it != tokenSummary.end()) {
                 // Add to existing amount
+                if (amount > std::numeric_limits<std::uint64_t>::max() - std::get<1>(it->second))
+                    throw std::runtime_error("Token quantity overflow");
                 std::get<1>(it->second) += amount;
             } else {
                 // New token
@@ -1105,13 +1182,8 @@ void WalletGUI::refresh_tokens() {
             // Type
             tokens_table->setItem(row, 1, new QTableWidgetItem(QString::fromStdString(tokenTypeToString(tokenData.type))));
             
-            // Amount (considering decimals)
-            double displayAmount = totalAmount;
-            int decimals = getJsonInt(tokenData.meta.data, "decimals", 0);
-            if (decimals > 0) {
-                displayAmount = totalAmount / std::pow(10, decimals);
-            }
-            tokens_table->setItem(row, 2, new QTableWidgetItem(QString::number(displayAmount, 'f', decimals)));
+            // Exact raw units match the quantity accepted by transfer/burn APIs.
+            tokens_table->setItem(row, 2, new QTableWidgetItem(QString::number(static_cast<qulonglong>(totalAmount))));
             
             // Symbol
             std::string symbol = getJsonString(tokenData.meta.data, "symbol", "N/A");
@@ -1122,11 +1194,6 @@ void WalletGUI::refresh_tokens() {
             tokens_table->setItem(row, 4, new QTableWidgetItem(QString::fromStdString(name)));
         }
         
-        // Log success
-        if (tokenSummary.size() > 0) {
-            showMessage("Tokens Refreshed", 
-                       QString("Found %1 tokens").arg(tokenSummary.size()));
-        }
     } catch (const std::exception &e) {
         // Show error message
         showMessage("Error", QString("Failed to refresh tokens: %1").arg(e.what()), true);
@@ -1160,6 +1227,7 @@ void WalletGUI::inscribe_tru_script() {
     }
     
     try {
+        if (!confirmAction("Publish TRUScript", "This publishes the entered data on chain. Continue?")) return;
         std::string txid = wallet.inscribeTRUScript(data, owner);
         showMessage("TRUScript Inscribed",
                    QString("TRUScript inscribed successfully!\nTXID: %1")
@@ -1224,7 +1292,7 @@ void WalletGUI::refresh_tru_scripts() {
     }
 }
 
-void WalletGUI::save_settings() {
+void WalletGUI::persistSettings() {
     QSettings settings("TRUBlockchain", "WalletGUI");
     
     settings.setValue("nodeIP", nodeIP_edit->text());
@@ -1232,14 +1300,20 @@ void WalletGUI::save_settings() {
     settings.setValue("autoRefresh", auto_refresh_check->isChecked());
     settings.setValue("refreshInterval", refresh_interval_spin->value());
     
+}
+
+void WalletGUI::save_settings() {
+    persistSettings();
     showMessage("Settings Saved", "Settings have been saved successfully");
 }
 
 void WalletGUI::load_settings() {
     QSettings settings("TRUBlockchain", "WalletGUI");
     
-    nodeIP_edit->setText(settings.value("nodeIP", "127.0.0.1").toString());
-    nodePort_edit->setText(settings.value("nodePort", QString::number(tru_network::MAINNET_RPC_PORT)).toString());
+    nodeIP_edit->setText("127.0.0.1");
+    nodePort_edit->setText(QString::number(localRpcPort));
+    nodeIP_edit->setReadOnly(true);
+    nodePort_edit->setReadOnly(true);
     auto_refresh_check->setChecked(settings.value("autoRefresh", false).toBool());
     refresh_interval_spin->setValue(settings.value("refreshInterval", 30).toInt());
     
@@ -1295,11 +1369,10 @@ void WalletGUI::updateBalanceDisplay() {
 }
 
 void WalletGUI::showMessage(const QString &title, const QString &message, bool isError) {
-    if (isError) {
-        QMessageBox::critical(this, title, message);
-    } else {
-        QMessageBox::information(this, title, message);
-    }
+    QMessageBox box(isError ? QMessageBox::Critical : QMessageBox::Information,
+        title, message, QMessageBox::Ok, this);
+    box.setTextFormat(Qt::PlainText);
+    box.exec();
 }
 
 QString WalletGUI::formatBalance(double balance) const {
@@ -1447,6 +1520,11 @@ void WalletGUI::setupContractsTab() {
     contract_name_edit->setPlaceholderText("My Smart Contract");
     nameLayout->addWidget(contract_name_edit);
     createLayout->addLayout(nameLayout);
+    auto amountRow = new QHBoxLayout;
+    amountRow->addWidget(new QLabel("Contract value (TRU)"));
+    contract_amount_edit = new QLineEdit("0.00100000");
+    amountRow->addWidget(contract_amount_edit);
+    createLayout->addLayout(amountRow);
     
     // Stacked widget for contract-specific parameters
     contract_params_stack = new QStackedWidget(this);
@@ -1569,9 +1647,9 @@ void WalletGUI::setupContractsTab() {
     
     // Gas estimation
     QHBoxLayout *gasLayout = new QHBoxLayout();
-    QPushButton *estimateGasBtn = new QPushButton("Estimate Gas", this);
+    QPushButton *estimateGasBtn = new QPushButton("Validate script", this);
     connect(estimateGasBtn, &QPushButton::clicked, this, &WalletGUI::estimate_contract_gas);
-    QLabel *gasEstimateLabel = new QLabel("Estimated Gas: N/A");
+    QLabel *gasEstimateLabel = new QLabel("Validate script before submission");
     gasEstimateLabel->setObjectName("gasEstimateLabel");
     gasLayout->addWidget(estimateGasBtn);
     gasLayout->addWidget(gasEstimateLabel);
@@ -1681,57 +1759,88 @@ void WalletGUI::updateContractCreationUI() {
 
 void WalletGUI::create_smart_contract() {
     try {
-        std::string contractName = contract_name_edit->text().toStdString();
-        if (contractName.empty()) {
-            showMessage("Invalid Input", "Please enter a contract name", true);
-            return;
+        wallet.requirePrivateAccess("GUI contract creation");
+        const std::string name = contract_name_edit->text().trimmed().toStdString();
+        if (name.empty() || name.size() > 50) throw std::runtime_error("Contract name must be 1–50 UTF-8 bytes");
+        const auto script = compileTextScript(generateContractScript());
+        const auto scriptHex = bytesToHex(script);
+        std::string reason;
+        // compileTextScript above performs the current VM preflight.
+        if (!wallet.isLocalChainAvailable()) throw std::runtime_error("Contract creation requires the local core");
+        const auto& chain = wallet.getBlockchain();
+        if (!chain.mempool || !chain.mempool->isAllowedSmartContractScript(scriptHex))
+            throw std::runtime_error("Script is not permitted by the current core policy");
+        std::uint64_t value = 0;
+        if (!tru_amount::parse(contract_amount_edit->text().toStdString(), value, reason) || value > tru_limits::MAX_MONEY)
+            throw std::runtime_error(reason.empty() ? "Contract amount exceeds MAX_MONEY" : reason);
+        const bool opReturn = !script.empty() && script.front() == OP_RETURN;
+        if (opReturn && value != 0) throw std::runtime_error("OP_RETURN data must carry exactly 0 TRU");
+        if (!opReturn && value == 0) throw std::runtime_error("Choose a positive contract value");
+        const auto sender = wallet.getCurrentAddress();
+        const auto [prevTxid, prevVout] = wallet.findOneSpendableUtxo(sender, chain.mempool.get());
+        UTXO coin;
+        if (prevTxid.empty() || !chain.utxoSet.getUTXO(prevTxid, prevVout, coin))
+            throw std::runtime_error("No available funding UTXO; wait for confirmation or consolidate coins");
+        std::uint64_t fee = 10000;
+        if (coin.amount <= value || coin.amount - value <= fee)
+            throw std::runtime_error("Selected funding UTXO cannot cover contract value, fee and change");
+        Transaction tx;
+        tx.version = 1; tx.lockTime = 0;
+        tx.vin.emplace_back(prevTxid, prevVout);
+        const std::string metadata = "TRU_CONTRACT:" + name;
+        std::vector<unsigned char> metadataScript{OP_RETURN};
+        if (!tru_contract_call::AppendCanonicalDataPush(metadataScript, std::vector<unsigned char>(metadata.begin(), metadata.end())))
+            throw std::runtime_error("Cannot encode contract metadata");
+        tx.vout.emplace_back(0, bytesToHex(metadataScript));
+        tx.vout.emplace_back(value, scriptHex);
+        if (contract_type_combo->currentIndex() == 3) {
+            tru_contract_state_init::StateInitEnvelope init;
+            init.targetVout = 1;
+            const auto key = state_key_edit->text().toStdString();
+            const auto val = state_value_edit->text().toStdString();
+            init.entries.emplace_back(key, std::vector<unsigned char>(val.begin(), val.end()));
+            std::vector<unsigned char> initScript;
+            if (!tru_contract_state_init::BuildOpReturnScript(init, initScript))
+                throw std::runtime_error("State key/value exceeds the canonical initialization limits");
+            tx.vout.emplace_back(0, bytesToHex(initScript));
         }
-        
-        // Generate the script based on type
-        std::string scriptText = generateContractScript();
-        if (scriptText.empty()) {
-            showMessage("Invalid Input", "Failed to generate contract script", true);
-            return;
+        tx.vout.emplace_back(coin.amount - value - fee, createP2PKHScriptHexFromAddress(sender));
+        // Size-aware fee with signature-size margin, checked before subtraction.
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            for (auto& in : tx.vin) { in.scriptSig.clear(); in.pubKey.clear(); }
+            tx.txid.clear();
+            if (!wallet.signTransaction(tx)) throw std::runtime_error("Contract signing failed");
+            const auto required = std::max<std::uint64_t>(10000,
+                (tx.serializeBinary().size() + 128ULL) * tru_limits::MIN_RELAY_FEE_SAT_PER_BYTE);
+            if (fee >= required) break;
+            fee = required;
+            if (coin.amount - value <= fee) throw std::runtime_error("Funding UTXO cannot cover the size-aware fee");
+            tx.vout.back().amount = coin.amount - value - fee;
+            if (attempt == 2) throw std::runtime_error("Could not stabilize transaction fee");
         }
-        
-        // Get current pubkeyhash for the wallet
-        std::string currentAddr = wallet.getCurrentAddress();
-        std::string pubkeyhash = wallet.getPubKeyHashForAddress(currentAddr);
-        
-        // Call wallet's contract creation method
-        std::string result = wallet.createSmartContract(
-            contract_type_combo->currentText().toStdString(),
-            contractName,
-            scriptText,
-            nodeIP_edit->text().toStdString(),
-            nodePort_edit->text().toInt()
-        );
-        
-        // Parse result to get contract address
-        QStringList lines = QString::fromStdString(result).split('\n');
-        QString contractAddr;
-        for (const QString& line : lines) {
-            if (line.contains("Contract Address:")) {
-                contractAddr = line.split(":").last().trimmed();
-                break;
-            }
-        }
-        
-        showMessage("Contract Created", 
-                   QString("Smart contract deployed successfully!\n\n%1")
-                   .arg(QString::fromStdString(result)));
-        
-        // Clear form
-        contract_name_edit->clear();
-        updateContractCreationUI();
-        
-        // Refresh contracts list
-        refresh_contracts();
-        
+        tx.computeTxId();
+        const QString txid = QString::fromStdString(tx.txid);
+        const QString details = "Contract: " + QString::fromStdString(name) + "\nType: " + contract_type_combo->currentText() +
+            "\nFrom: " + QString::fromStdString(sender) + "\nValue: " + QString::fromStdString(tru_amount::format(value)) +
+            "\nFee: " + QString::fromStdString(tru_amount::format(fee)) + "\nOutput: " + txid + ":1";
+        if (!confirmAction("Publish contract", details)) return;
+        const nlohmann::json params{{"txHex", hexEncode(tx.serializeBinary())}};
+        create_contract_button->setEnabled(false);
+        corePanel->rpc()->call("sendrawtransaction", QByteArray::fromStdString(params.dump()),
+            [this, txid, details](const QJsonValue& result, const QByteArray&, const QString& error) {
+                create_contract_button->setEnabled(true);
+                if (!error.isEmpty()) { showMessage("Contract submission", error + "\nCandidate TXID: " + txid, true); return; }
+                if (!result.toObject().value("accepted").toBool()) {
+                    showMessage("Contract submission", "Core did not report acceptance. Candidate TXID: " + txid, true); return;
+                }
+                showMessage("Contract accepted to mempool", details + "\n\nAwait block confirmation before spending or calling the contract.");
+                refresh_contracts(); updateBalanceDisplay();
+            });
     } catch (const std::exception& e) {
-        showMessage("Error", QString::fromStdString(e.what()), true);
+        showMessage("Contract rejected", QString::fromUtf8(e.what()), true);
     }
 }
+
 
 std::string WalletGUI::generateContractScript() {
     int type = contract_type_combo->currentIndex();
@@ -1739,7 +1848,11 @@ std::string WalletGUI::generateContractScript() {
     
     switch (type) {
         case 0: { // Time Lock
-            uint32_t lockTime = timelock_timestamp_edit->text().toUInt();
+            bool timeOk = false;
+            const qulonglong entered = timelock_timestamp_edit->text().toULongLong(&timeOk);
+            if (!timeOk || entered < 500000000ULL || entered > UINT32_MAX)
+                throw std::runtime_error("Time Lock requires a uint32 Unix timestamp >= 500000000");
+            const uint32_t lockTime = static_cast<uint32_t>(entered);
             std::string pubkeyhash = timelock_pubkeyhash_edit->text().toStdString();
             
             if (pubkeyhash.empty()) {
@@ -1749,8 +1862,7 @@ std::string WalletGUI::generateContractScript() {
             }
             
             // Convert locktime to little-endian hex
-            char timeHex[9];
-            snprintf(timeHex, sizeof(timeHex), "%08x", lockTime);
+            const std::string timeHex = tru_desktop::littleEndianHex(lockTime, 4);
             
             script = std::string(timeHex) + " OP_CHECKLOCKTIMEVERIFY OP_DROP "
                     "OP_DUP OP_HASH160 " + pubkeyhash + " OP_EQUALVERIFY OP_CHECKSIG";
@@ -1771,7 +1883,10 @@ std::string WalletGUI::generateContractScript() {
         
         case 2: { // Oracle-based
             std::string key = oracle_key_edit->text().toStdString();
-            uint64_t threshold = oracle_threshold_edit->text().toULongLong();
+            std::uint64_t threshold = 0;
+            const auto thresholdText = oracle_threshold_edit->text().trimmed().toStdString();
+            if (thresholdText != "0" && !tru_desktop::positiveUnits(thresholdText, threshold))
+                throw std::runtime_error("Oracle threshold must be uint64 decimal");
             bool isGreaterThan = (oracle_comparison_combo->currentIndex() == 0);
             
             if (key.empty()) return "";
@@ -1784,8 +1899,7 @@ std::string WalletGUI::generateContractScript() {
             std::vector<unsigned char> keyBytes(key.begin(), key.end());
             
             // Convert threshold to hex (8 bytes, little-endian)
-            char thresholdHex[17];
-            snprintf(thresholdHex, sizeof(thresholdHex), "%016" PRIx64, threshold);
+            const std::string thresholdHex = tru_desktop::littleEndianHex(threshold, 8);
             
             script = bytesToHex(keyBytes) + " OP_DATAFEED " + std::string(thresholdHex) + " " +
                     (isGreaterThan ? "OP_GREATERTHAN" : "OP_LESSTHAN") + 
@@ -1803,7 +1917,7 @@ std::string WalletGUI::generateContractScript() {
             std::vector<unsigned char> keyBytes(key.begin(), key.end());
             std::vector<unsigned char> valueBytes(value.begin(), value.end());
             
-            script = bytesToHex(keyBytes) + " " + bytesToHex(valueBytes) + " OP_STORE OP_RETURN";
+            script = "OP_STORE OP_1";
             break;
         }
         
@@ -1840,90 +1954,37 @@ void WalletGUI::calculate_hash() {
 
 void WalletGUI::estimate_contract_gas() {
     try {
-        std::string script = custom_script_edit->toPlainText().toStdString();
-        if (script.empty()) {
-            showMessage("No Script", "Please enter a script to estimate gas", true);
-            return;
-        }
-        
-        // Compile and estimate gas
-        std::vector<unsigned char> scriptBytes = compileTextScript(script);
-        
-        // Basic gas estimation based on script complexity
-        uint64_t estimatedGas = 1000; // Base gas
-        estimatedGas += scriptBytes.size() * 10; // Per byte cost
-        
-        // Add costs for specific opcodes
-        for (size_t i = 0; i < scriptBytes.size(); i++) {
-            switch (scriptBytes[i]) {
-                case OP_CHECKSIG:
-                case OP_CHECKSIGVERIFY:
-                    estimatedGas += 100;
-                    break;
-                case OP_SHA256:
-                case OP_HASH160:
-                case OP_SHA3:
-                case OP_HASHBLAKE2B:
-                    estimatedGas += 50;
-                    break;
-                case OP_STORE:
-                case OP_LOAD:
-                    estimatedGas += 200;
-                    break;
-                case OP_DATAFEED:
-                case OP_EXTERNALDATA:
-                    estimatedGas += 500;
-                    break;
-            }
-        }
-        
-        QLabel* gasLabel = findChild<QLabel*>("gasEstimateLabel");
-        if (gasLabel) {
-            gasLabel->setText(QString("Estimated Gas: %1").arg(estimatedGas));
-        }
-        
+        const auto compiled = compileTextScript(custom_script_edit->toPlainText().toStdString());
+        if (auto label = findChild<QLabel*>("gasEstimateLabel"))
+            label->setText(QString("VM preflight passed · %1 script bytes. Fee is calculated from the signed transaction; execution limits remain core-authoritative.").arg(compiled.size()));
     } catch (const std::exception& e) {
-        showMessage("Estimation Error", QString::fromStdString(e.what()), true);
+        showMessage("Script validation", QString::fromUtf8(e.what()), true);
     }
 }
 
 void WalletGUI::refresh_contracts() {
     contracts_table->setRowCount(0);
-    
     try {
-        // Query contracts from wallet/blockchain
-        auto contracts = wallet.getSmartContracts();
-        
-        // Debug: Show count
-        showMessage("Debug", QString("Found %1 contracts").arg(contracts.size()));
-        
-        // If no contracts from wallet, try direct blockchain query for debugging
-        if (contracts.empty() && wallet.isLocalChainAvailable()) {
-            nlohmann::json blockchainContracts = wallet.getBlockchain().getContracts();
-            showMessage("Debug", QString("Blockchain has %1 contracts")
-                       .arg(blockchainContracts["contracts"].size()));
-        }
-        
-        for (const auto& contract : contracts) {
-            int row = contracts_table->rowCount();
+        if (!wallet.isLocalChainAvailable()) return;
+        const auto payload = wallet.getBlockchain().getContracts();
+        if (!payload.contains("contracts") || !payload["contracts"].is_array())
+            throw std::runtime_error("Malformed contract vault response");
+        for (const auto& c : payload["contracts"]) {
+            const int row = contracts_table->rowCount();
             contracts_table->insertRow(row);
-            
-            contracts_table->setItem(row, 0, new QTableWidgetItem(
-                QString::fromStdString(contract.name)));
-            contracts_table->setItem(row, 1, new QTableWidgetItem(
-                QString::fromStdString(contract.type)));
-            contracts_table->setItem(row, 2, new QTableWidgetItem(
-                QString::fromStdString(contract.address)));
-            contracts_table->setItem(row, 3, new QTableWidgetItem(
-                QString::fromStdString(contract.status)));
-            contracts_table->setItem(row, 4, new QTableWidgetItem(
-                QString::number(contract.value / 100000000.0, 'f', 8) + " TRU"));
-            contracts_table->setItem(row, 5, new QTableWidgetItem(
-                QDateTime::fromSecsSinceEpoch(contract.createdAt).toString("yyyy-MM-dd HH:mm")));
+            const QStringList fields{
+                QString::fromStdString(c.value("name", "Unnamed")),
+                QString::fromStdString(c.value("type", "Unknown")),
+                QString::fromStdString(c.value("identifier", "")),
+                QString::fromStdString(c.value("status", "Unknown")),
+                QString::fromStdString(tru_amount::format(c.value("amount", std::uint64_t{0}))),
+                QDateTime::fromSecsSinceEpoch(c.value("creationTime", std::int64_t{0})).toString("yyyy-MM-dd HH:mm")};
+            for (int col = 0; col < fields.size(); ++col)
+                contracts_table->setItem(row, col, new QTableWidgetItem(fields[col]));
+            contracts_table->item(row, 0)->setData(Qt::UserRole, QString::fromStdString(c.dump(2)));
         }
-        
     } catch (const std::exception& e) {
-        showMessage("Refresh Error", QString::fromStdString(e.what()), true);
+        showMessage("Contract vault", QString::fromUtf8(e.what()), true);
     }
 }
 
@@ -1935,33 +1996,23 @@ void WalletGUI::on_contract_selected() {
         return;
     }
     
-    execute_contract_button->setEnabled(true);
+    const QString family = contracts_table->item(row, 1)->text().toUpper();
+    execute_contract_button->setEnabled(
+        (family == "HASH LOCK" || family == "TIME LOCK" || family == "HASH_LOCK" || family == "TIME_LOCK") &&
+        contracts_table->item(row, 3)->text() == "Active");
     
     QString address = contracts_table->item(row, 2)->text();
     displayContractDetails(address);
 }
 
 void WalletGUI::displayContractDetails(const QString& contractAddress) {
-    try {
-        auto details = wallet.getContractDetails(contractAddress.toStdString());
-        
-        QString detailsText = QString(
-            "Contract: %1\n"
-            "Type: %2\n"
-            "Script: %3\n"
-            "State: %4\n"
-            "Executable: %5"
-        ).arg(QString::fromStdString(details.name))
-         .arg(QString::fromStdString(details.type))
-         .arg(QString::fromStdString(details.scriptHex))
-         .arg(QString::fromStdString(details.state))
-         .arg(details.canExecute ? "Yes" : "No");
-        
-        contract_details_text->setText(detailsText);
-        
-    } catch (const std::exception& e) {
-        contract_details_text->setText("Error loading contract details");
+    for (int row = 0; row < contracts_table->rowCount(); ++row) {
+        if (contracts_table->item(row, 2)->text() == contractAddress) {
+            contract_details_text->setPlainText(contracts_table->item(row, 0)->data(Qt::UserRole).toString());
+            return;
+        }
     }
+    contract_details_text->setPlainText("Select a contract to inspect its authoritative core record.");
 }
 
 void WalletGUI::execute_contract() {
@@ -1969,11 +2020,12 @@ void WalletGUI::execute_contract() {
     if (row < 0) return;
     
     QString contractAddr = contracts_table->item(row, 2)->text();
-    QString contractType = contracts_table->item(row, 1)->text();
+    QString contractType = contracts_table->item(row, 1)->text().toUpper();
     
+    if (!confirmAction("Redeem contract", "Spend contract output " + contractAddr + "?")) return;
     try {
         // Different execution based on contract type
-        if (contractType == "Hash Lock") {
+        if (contractType == "HASH LOCK" || contractType == "HASH_LOCK") {
             bool ok;
             QString preimage = QInputDialog::getText(this, "Execute Hash Lock",
                                                    "Enter preimage (secret):",
@@ -1985,18 +2037,14 @@ void WalletGUI::execute_contract() {
             showMessage("Contract Executed", 
                        QString("Hash lock redeemed!\nTXID: %1").arg(QString::fromStdString(txid)));
             
-        } else if (contractType == "Time Lock") {
+        } else if (contractType == "TIME LOCK" || contractType == "TIME_LOCK") {
             // Check if time has passed
             std::string txid = wallet.redeemTimeLock(contractAddr.toStdString());
             showMessage("Contract Executed", 
                        QString("Time lock redeemed!\nTXID: %1").arg(QString::fromStdString(txid)));
             
-        } else if (contractType == "Oracle-Based") {
-            // Execute oracle-based contract
-            std::string txid = wallet.executeOracleContract(contractAddr.toStdString());
-            showMessage("Contract Executed", 
-                       QString("Oracle contract executed!\nTXID: %1").arg(QString::fromStdString(txid)));
-            
+        } else if (contractType == "ORACLE-BASED" || contractType == "ORACLE LOCK") {
+            throw std::runtime_error("Oracle execution requires the canonical CLI workflow; the legacy desktop executor is disabled.");
         } else {
             showMessage("Not Implemented", 
                        "Execution for this contract type is not yet implemented", true);
@@ -2026,4 +2074,179 @@ void WalletGUI::handleTransactionContextMenu(const QPoint& pos) {
         QApplication::clipboard()->setText(fullTxid);
         showMessage("Copied", "Transaction ID copied to clipboard");
     }
+}
+
+// GUI-DESKTOP-01: authenticated wallet selection, exact token units and owned
+// miner processes. These paths invoke existing core policy/Wallet methods.
+bool WalletGUI::confirmAction(const QString& action, const QString& details) {
+    QMessageBox box(QMessageBox::Question, action, details,
+        QMessageBox::Yes | QMessageBox::Cancel, this);
+    box.setTextFormat(Qt::PlainText);
+    box.setDefaultButton(QMessageBox::Cancel);
+    return box.exec() == QMessageBox::Yes;
+}
+
+bool WalletGUI::selectWalletAddress(const QString& address) {
+    try {
+        if (address.toStdString() == wallet.getCurrentAddress()) return true;
+        if (wallet.getWalletSecurityMode() == WalletSecurityModeV1::LEGACY_PLAINTEXT) {
+            wallet.setCurrentAddress(address.toStdString());
+        } else {
+            bool ok = false;
+            QString entered = QInputDialog::getText(this, "Authenticate address selection",
+                "Wallet passphrase (used locally for authenticated persistence):", QLineEdit::Password, {}, &ok);
+            if (!ok || entered.isEmpty()) return false;
+            std::string secret = entered.toStdString();
+            entered.fill(QChar('\0')); entered.clear();
+            std::string error;
+            const bool selected = wallet.setCurrentAddressEncrypted(address.toStdString(), secret, &error);
+            sodium_memzero(secret.data(), secret.size()); secret.clear();
+            if (!selected) throw std::runtime_error(error.empty() ? "Address selection failed" : error);
+        }
+        const QSignalBlocker guard(from_address_combo);
+        from_address_combo->setCurrentText(address);
+        return true;
+    } catch (const std::exception& e) {
+        showMessage("Address selection", QString::fromUtf8(e.what()), true);
+        return false;
+    }
+}
+
+void WalletGUI::retire_token() {
+    const int row = tokens_table->currentRow();
+    if (row < 0 || !tokens_table->item(row, 0)) return;
+    const QString token = tokens_table->item(row, 0)->text();
+    const QString owner = QString::fromStdString(wallet.getCurrentAddress());
+    if (!confirmAction("Permanent token retirement", "Token: " + token + "\nOwner: " + owner +
+        "\nThis retires the entire selected controlling holding to the canonical sink. On-chain history remains.")) return;
+    bool ok = false;
+    const QString typed = QInputDialog::getText(this, "Confirm retirement", "Type BURN:", QLineEdit::Normal, {}, &ok);
+    if (!ok || typed != "BURN") return;
+    try {
+        const auto txid = wallet.burnToken(token.toStdString(), owner.toStdString());
+        showMessage("Retirement submitted", "TXID: " + QString::fromStdString(txid) + "\nAwait confirmation.");
+        refresh_tokens();
+    } catch (const std::exception& e) {
+        showMessage("Retirement rejected", QString::fromUtf8(e.what()), true);
+    }
+}
+
+void WalletGUI::setupMiningTab() {
+    auto page = new QWidget;
+    auto layout = new QVBoxLayout(page);
+    auto form = new QFormLayout;
+    minerKind = new QComboBox;
+    minerKind->addItems({"CPU — tru_miner_cpu", "GPU — tru_miner (OpenCL)"});
+    minerThreads = new QSpinBox;
+    minerThreads->setRange(1, std::max(1, QThread::idealThreadCount()));
+    minerThreads->setValue(std::max(1, QThread::idealThreadCount() / 2));
+    form->addRow("Miner", minerKind);
+    form->addRow("CPU threads", minerThreads);
+    layout->addLayout(form);
+    auto controls = new QHBoxLayout;
+    auto start = new QPushButton("Start / stop selected miner");
+    controls->addWidget(start); controls->addStretch();
+    layout->addLayout(controls);
+    auto note = new QLabel("Runs a separate miner beside tru_advanced, paying the current wallet address. This window owns only the miner it starts. CPU/GPU switching takes effect on the next start.");
+    note->setWordWrap(true); layout->addWidget(note);
+    minerOutput = new QPlainTextEdit;
+    minerOutput->setReadOnly(true);
+    minerOutput->setMaximumBlockCount(1000);
+    layout->addWidget(minerOutput);
+    minerProcess = new QProcess(this);
+    minerProcess->setProcessChannelMode(QProcess::MergedChannels);
+    connect(start, &QPushButton::clicked, this, &WalletGUI::mine);
+    connect(minerProcess, &QProcess::readyReadStandardOutput, this, [this] {
+        minerOutput->appendPlainText(QString::fromUtf8(minerProcess->readAllStandardOutput()));
+    });
+    connect(minerProcess, &QProcess::started, this, [this] {
+        is_mining = true;
+        mining_status_label->setText("Mining: process running");
+        minerKind->setEnabled(false); minerThreads->setEnabled(false);
+    });
+    connect(minerProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+        [this](int code, QProcess::ExitStatus status) {
+            is_mining = false;
+            mine_button->setText("Start Mining");
+            mining_status_label->setText("Mining: stopped");
+            minerKind->setEnabled(true); minerThreads->setEnabled(true);
+            minerOutput->appendPlainText(QString("Miner exited: code %1, %2").arg(code).arg(status == QProcess::NormalExit ? "normal" : "crashed"));
+            if (closingAfterMiner) close();
+        });
+    connect(minerProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError) {
+        minerOutput->appendPlainText("Miner process error: " + minerProcess->errorString());
+        if (minerProcess->state() == QProcess::NotRunning) {
+            mine_button->setText("Start Mining"); mining_status_label->setText("Mining: unavailable");
+        }
+    });
+    tabWidget->addTab(page, "Mining");
+}
+
+void WalletGUI::closeEvent(QCloseEvent* event) {
+    if (minerProcess && minerProcess->state() != QProcess::NotRunning) {
+        event->ignore();
+        if (closingAfterMiner) return;
+        if (!confirmAction("Close TRU", "Stop the miner started by this window, then shut down the node?")) return;
+        closingAfterMiner = true;
+        minerProcess->terminate();
+        QTimer::singleShot(10000, this, [this] {
+            if (minerProcess->state() != QProcess::NotRunning) {
+                closingAfterMiner = false;
+                showMessage("Miner still stopping", "The miner has not exited yet. The node remains open. Wait and close again; inspect the miner log if it stays unresponsive.", true);
+            }
+        });
+        return;
+    }
+    event->accept();
+}
+
+void WalletGUI::setupMultisigTab() {
+    auto page = new QWidget;
+    auto layout = new QVBoxLayout(page);
+    auto note = new QLabel("Canonical 2-of-3 Multisig / Escrow V1. Signatures are created locally. Verify the recipient and output before sharing or combining signature packages.");
+    note->setWordWrap(true); layout->addWidget(note);
+    auto form = new QFormLayout;
+    std::array<QLineEdit*, 3> keys{{new QLineEdit, new QLineEdit, new QLineEdit}};
+    for (int i = 0; i < 3; ++i) form->addRow(QString("Compressed public key %1").arg(i+1), keys[i]);
+    auto amount = new QLineEdit("0.00100000"); form->addRow("Escrow value (TRU)", amount);
+    auto create = new QPushButton("Create escrow…"); form->addRow(create);
+    auto txid = new QLineEdit; form->addRow("Funding TXID", txid);
+    auto vout = new QSpinBox; vout->setRange(0, INT_MAX); vout->setValue(1); form->addRow("Output index", vout);
+    auto recipient = new QLineEdit; form->addRow("Release recipient", recipient);
+    auto signer = new QLineEdit; form->addRow("Your signer public key", signer);
+    auto sign = new QPushButton("Create signature package…"); form->addRow(sign);
+    auto keyA = new QLineEdit; auto keyB = new QLineEdit;
+    auto sigA = new QLineEdit; auto sigB = new QLineEdit;
+    form->addRow("First signer public key", keyA); form->addRow("First signature hex", sigA);
+    form->addRow("Second signer public key", keyB); form->addRow("Second signature hex", sigB);
+    auto redeem = new QPushButton("Verify signatures and release…"); form->addRow(redeem);
+    layout->addLayout(form);
+    auto receipt = new QPlainTextEdit; receipt->setReadOnly(true); layout->addWidget(receipt);
+    connect(create, &QPushButton::clicked, this, [=] {
+        try {
+            std::uint64_t atoms = 0; std::string error;
+            if (!tru_amount::parse(amount->text().toStdString(), atoms, error) || !atoms || atoms > tru_limits::MAX_MONEY)
+                throw std::runtime_error("Enter a valid positive TRU amount");
+            if (!confirmAction("Create 2-of-3 escrow", "Value: " + amount->text() + " TRU\n" + keys[0]->text() + "\n" + keys[1]->text() + "\n" + keys[2]->text())) return;
+            const auto r = wallet.createMultisigEscrowV1({keys[0]->text().toStdString(), keys[1]->text().toStdString(), keys[2]->text().toStdString()}, atoms);
+            receipt->setPlainText("Accepted TXID: " + QString::fromStdString(r.txid) + ":" + QString::number(r.contractVout) + "\nFee: " + QString::fromStdString(tru_amount::format(r.feeAtoms)) + "\nAwait confirmation.");
+        } catch (const std::exception& e) { receipt->setPlainText("ERROR: " + QString::fromUtf8(e.what())); }
+    });
+    connect(sign, &QPushButton::clicked, this, [=] {
+        try {
+            if (!confirmAction("Sign escrow release", "Output: " + txid->text() + ":" + QString::number(vout->value()) + "\nRecipient: " + recipient->text() + "\nSigner: " + signer->text())) return;
+            const auto r = wallet.signMultisigEscrowV1(txid->text().toStdString(), vout->value(), recipient->text().toStdString(), signer->text().toStdString());
+            const nlohmann::json j{{"contractTxid", r.contractTxid}, {"contractVout", r.contractVout}, {"recipient", r.recipient}, {"sighashHex", r.sighashHex}, {"signerPubkeyHex", r.signerPubkeyHex}, {"signatureHex", r.signatureHex}, {"releaseAmountAtoms", r.releaseAmountAtoms}, {"feeAtoms", r.feeAtoms}};
+            receipt->setPlainText(QString::fromStdString(j.dump(2)));
+        } catch (const std::exception& e) { receipt->setPlainText("ERROR: " + QString::fromUtf8(e.what())); }
+    });
+    connect(redeem, &QPushButton::clicked, this, [=] {
+        try {
+            if (!confirmAction("Release escrow", "Output: " + txid->text() + ":" + QString::number(vout->value()) + "\nRecipient: " + recipient->text())) return;
+            const auto r = wallet.redeemMultisigEscrowV1(txid->text().toStdString(), vout->value(), recipient->text().toStdString(),
+                {keyA->text().toStdString(), keyB->text().toStdString()}, {sigA->text().toStdString(), sigB->text().toStdString()});
+            receipt->setPlainText("Accepted release TXID: " + QString::fromStdString(r.txid) + "\nReleased: " + QString::fromStdString(tru_amount::format(r.releaseAmountAtoms)) + "\nAwait confirmation.");
+        } catch (const std::exception& e) { receipt->setPlainText("ERROR: " + QString::fromUtf8(e.what())); }
+    });
+    tabWidget->addTab(page, "Multisig");
 }

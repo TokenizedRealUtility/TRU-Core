@@ -943,3 +943,6 @@ target_include_directories(tru_vah_04_sensor_batch_materialize_dev PRIVATE src)
 target_link_libraries(tru_vah_04_sensor_batch_materialize_dev PRIVATE OpenSSL::Crypto ${LEVELDB_LIBRARY} fmt::fmt pthread)
 target_compile_options(tru_vah_04_sensor_batch_materialize_dev PRIVATE -Wno-deprecated-declarations -Wall -Wextra -Wpedantic)
 set_target_properties(tru_vah_04_sensor_batch_materialize_dev PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# GUI-DESKTOP-01 clean repository GUI integration
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/TRUGuiDesktop.cmake")

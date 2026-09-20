@@ -82,3 +82,9 @@ swap/agent/swap_agent/
 # TRU packaged-patch backup workspace
 /.tru_patch_backups/
 .tru_patch_state/
+
+# Local TRU patch rollback/build artifacts
+.tru-patches/
+build-gui-desktop01/
+build-desktop/
+build-desktop-test/
