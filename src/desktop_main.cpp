@@ -22,7 +22,7 @@ int main(int argc, char** argv) {
         "QTabBar::tab:selected {background:#205269;color:#72f0db;}"
         "QTabWidget::pane {border:1px solid #294056;}");
     DesktopPanel desktop;
-    desktop.setWindowTitle("TRU Core Desktop — local node client");
+    desktop.setWindowTitle("TRU Desktop — RPC Client");
     desktop.resize(1120, 780);
     desktop.show();
     // A deterministic screenshot hook is useful for package QA; no connection,

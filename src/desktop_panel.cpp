@@ -16,11 +16,13 @@
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QRadioButton>
 #include <QSettings>
 #include <QSplitter>
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTimer>
+#include <QVariant>
 #include <QVBoxLayout>
 
 namespace {
@@ -71,24 +73,344 @@ QString readable(const QJsonValue& v) {
 }
 QLabel* makeMetric(QHBoxLayout* row, const QString& title) {
     auto box = new QGroupBox(title);
+    box->setProperty("truMetric", true);
+
     auto layout = new QVBoxLayout(box);
+
     auto value = new QLabel("—");
-    value->setStyleSheet("font-size: 27px; font-weight: bold; color: #5fe0cf; padding: 8px;");
+    value->setObjectName("truMetricValue");
+    value->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+
     layout->addWidget(value);
     row->addWidget(box);
+
     return value;
 }
 }
 
 DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
+
+    // RPC-01C — final cross-platform TRU Desktop visual layer.
+    // Presentation only: no RPC, wallet, consensus or P2P semantics.
+    setStyleSheet(R"TRUQSS(
+        QWidget {
+            background-color: #05111e;
+            color: #d9e9f5;
+            font-size: 13px;
+        }
+
+        QTabWidget::pane {
+            border: 1px solid #1b4562;
+            border-radius: 8px;
+            background-color: #061522;
+            top: -1px;
+        }
+
+        QTabBar::tab {
+            background-color: #0a1c2d;
+            color: #8eaec4;
+            border: 1px solid #173c56;
+            border-bottom: none;
+            padding: 10px 18px;
+            min-width: 86px;
+        }
+
+        QTabBar::tab:selected {
+            background-color: #0d3549;
+            color: #70f0e1;
+            border-color: #2b7792;
+        }
+
+        QTabBar::tab:hover {
+            color: #9df8ef;
+            background-color: #0c2a3d;
+        }
+
+        QGroupBox {
+            background-color: #071827;
+            border: 1px solid #1a4764;
+            border-radius: 11px;
+            margin-top: 13px;
+            padding: 17px 10px 10px 10px;
+            color: #8fbbd2;
+            font-weight: 700;
+        }
+
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            left: 13px;
+            padding: 0 7px;
+            color: #9ccbe2;
+        }
+
+        QGroupBox[truMetric="true"] {
+            background: qlineargradient(
+                x1:0, y1:0, x2:1, y2:1,
+                stop:0 #071827,
+                stop:0.55 #081c2c,
+                stop:1 #092338
+            );
+            border: 1px solid #245875;
+            min-height: 92px;
+        }
+
+        QLabel#truMetricValue {
+            color: #67f4df;
+            font-size: 29px;
+            font-weight: 800;
+            padding: 7px;
+        }
+
+        QLabel#truBrand {
+            color: #69eaff;
+            font-size: 25px;
+            font-weight: 800;
+            padding: 0px;
+        }
+
+        QLabel#truSubtitle {
+            color: #688da5;
+            font-size: 11px;
+            font-weight: 700;
+            padding-top: 2px;
+        }
+
+        QLabel#truModeBadge,
+        QLabel#truSecurityBadge,
+        QLabel#truMainnetBadge {
+            background-color: #092238;
+            color: #77eadf;
+            border: 1px solid #246680;
+            border-radius: 10px;
+            padding: 5px 10px;
+            font-size: 10px;
+            font-weight: 800;
+        }
+
+        QLabel#truSecurityBadge {
+            color: #71caff;
+        }
+
+        QLabel#truMainnetBadge {
+            color: #c09aff;
+            border-color: #594b85;
+        }
+
+        QLabel#truSignalRail {
+            background-color: #061723;
+            color: #4c819f;
+            border-top: 1px solid #12344b;
+            border-bottom: 1px solid #12344b;
+            padding: 6px 10px;
+            font-size: 10px;
+            font-weight: 700;
+        }
+
+        QLabel#truConnectionBanner {
+            background: qlineargradient(
+                x1:0, y1:0, x2:1, y2:0,
+                stop:0 #082137,
+                stop:0.55 #09283a,
+                stop:1 #071b2b
+            );
+            color: #8ee9de;
+            border: 1px solid #215b74;
+            border-left: 3px solid #49dccd;
+            border-radius: 7px;
+            padding: 9px 12px;
+            font-weight: 700;
+        }
+
+        QLabel#truTip {
+            background-color: #061521;
+            color: #7ea6bd;
+            border: 1px solid #173b52;
+            border-radius: 6px;
+            padding: 8px 10px;
+            font-family: "DejaVu Sans Mono", "Menlo", "Consolas";
+        }
+
+        QLabel#truSectionTitle {
+            color: #e4f3fb;
+            font-size: 18px;
+            font-weight: 800;
+            padding: 8px 0px 4px 1px;
+        }
+
+        QLabel#truSecurityNote {
+            background-color: #071a2a;
+            color: #89aabc;
+            border: 1px solid #19445e;
+            border-radius: 7px;
+            padding: 10px;
+        }
+
+        QLabel#truSourceNote {
+            color: #668aa1;
+            padding: 5px 2px;
+        }
+
+        QPushButton {
+            background-color: #0c3047;
+            color: #d9f7fb;
+            border: 1px solid #24708d;
+            border-radius: 7px;
+            padding: 9px 15px;
+            font-weight: 700;
+        }
+
+        QPushButton:hover {
+            background-color: #10435c;
+            border-color: #47cce8;
+            color: #ffffff;
+        }
+
+        QPushButton:pressed {
+            background-color: #09283b;
+        }
+
+        QPushButton:disabled {
+            background-color: #081927;
+            color: #496273;
+            border-color: #173346;
+        }
+
+        QPushButton#truPrimaryAction {
+            background: qlineargradient(
+                x1:0, y1:0, x2:1, y2:0,
+                stop:0 #0d4b62,
+                stop:1 #0b6670
+            );
+            color: #eaffff;
+            border-color: #43d8d0;
+        }
+
+        QPushButton#truSecondaryAction {
+            background-color: #0b273d;
+            border-color: #29617e;
+        }
+
+        QLineEdit,
+        QPlainTextEdit,
+        QComboBox {
+            background-color: #091a2b;
+            color: #d9edf7;
+            border: 1px solid #294b63;
+            border-radius: 6px;
+            padding: 8px;
+            selection-background-color: #17697b;
+        }
+
+        QLineEdit:focus,
+        QPlainTextEdit:focus,
+        QComboBox:focus {
+            border: 1px solid #43cfe1;
+            background-color: #0a2032;
+        }
+
+        QLineEdit:disabled {
+            background-color: #061420;
+            color: #5d7484;
+            border-color: #173347;
+        }
+
+        QLineEdit#truEndpoint,
+        QLineEdit#truCookie {
+            font-family: "DejaVu Sans Mono", "Menlo", "Consolas";
+        }
+
+        QTableWidget {
+            background-color: #071625;
+            alternate-background-color: #091c2d;
+            border: 1px solid #1d4964;
+            border-radius: 7px;
+            gridline-color: #15384f;
+            selection-background-color: #113d56;
+            selection-color: #e9ffff;
+        }
+
+        QHeaderView::section {
+            background-color: #0b2235;
+            color: #8fb9d0;
+            border: none;
+            border-right: 1px solid #183d55;
+            border-bottom: 1px solid #24526c;
+            padding: 9px;
+            font-weight: 700;
+        }
+
+        QRadioButton {
+            color: #c3dbe8;
+            spacing: 7px;
+            padding: 3px;
+        }
+
+        QRadioButton:checked {
+            color: #7ef2e6;
+            font-weight: 700;
+        }
+
+        QSplitter::handle {
+            background-color: #173a50;
+            height: 2px;
+        }
+
+        QToolTip {
+            background-color: #071827;
+            color: #d9f5fa;
+            border: 1px solid #2b7189;
+            padding: 6px;
+        }
+    )TRUQSS");
+
     auto root = new QVBoxLayout(this);
+    auto brandRow = new QHBoxLayout;
+
+    auto brandStack = new QVBoxLayout;
+
     auto brand = new QLabel("TRU  /  CORE DESKTOP");
-    brand->setStyleSheet("font-size: 23px; font-weight: bold; color: #66dbef; padding: 8px 0;");
-    root->addWidget(brand);
-    connection_ = new QLabel("Configure your local node connection.");
+    brand->setObjectName("truBrand");
+
+    auto subtitle =
+        new QLabel("MAINNET RPC CONTROL PLANE  //  LOCAL + REMOTE");
+    subtitle->setObjectName("truSubtitle");
+
+    brandStack->addWidget(brand);
+    brandStack->addWidget(subtitle);
+
+    brandRow->addLayout(brandStack);
+    brandRow->addStretch();
+
+    auto mainnetBadge = new QLabel("TRU MAINNET");
+    mainnetBadge->setObjectName("truMainnetBadge");
+
+    modeBadge_ = new QLabel("LOCAL NODE");
+    modeBadge_->setObjectName("truModeBadge");
+
+    securityBadge_ = new QLabel("LOOPBACK / COOKIE");
+    securityBadge_->setObjectName("truSecurityBadge");
+
+    brandRow->addWidget(mainnetBadge, 0, Qt::AlignVCenter);
+    brandRow->addWidget(modeBadge_, 0, Qt::AlignVCenter);
+    brandRow->addWidget(securityBadge_, 0, Qt::AlignVCenter);
+
+    root->addLayout(brandRow);
+
+    auto signalRail = new QLabel(
+        "BLOCKCHAIN TELEMETRY  //  PEER MESH  //  MINER NETWORK  //  SECURE RPC"
+    );
+    signalRail->setObjectName("truSignalRail");
+    root->addWidget(signalRail);
+
+    connection_ = new QLabel(
+        "Configure a local or secure remote TRU node connection."
+    );
+    connection_->setObjectName("truConnectionBanner");
     connection_->setWordWrap(true);
     connection_->setTextFormat(Qt::PlainText);
+
     root->addWidget(connection_);
+
     pages_ = new QTabWidget;
     root->addWidget(pages_);
     auto overview = new QWidget;
@@ -99,14 +421,16 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
     rate_ = makeMetric(metrics, "REPORTED HASH RATE");
     overviewLayout->addLayout(metrics);
     tip_ = new QLabel("Best tip: —");
+    tip_->setObjectName("truTip");
     tip_->setTextFormat(Qt::PlainText);
     tip_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     tip_->setWordWrap(true);
     overviewLayout->addWidget(tip_);
     auto refreshButton = new QPushButton("Refresh node snapshot");
+    refreshButton->setObjectName("truSecondaryAction");
     overviewLayout->addWidget(refreshButton, 0, Qt::AlignLeft);
     auto miningTitle = new QLabel("ACTIVE MINERS");
-    miningTitle->setStyleSheet("font-weight: bold; font-size: 17px; padding-top: 12px;");
+    miningTitle->setObjectName("truSectionTitle");
     overviewLayout->addWidget(miningTitle);
     miners_ = new QTableWidget(0, 4);
     miners_->setHorizontalHeaderLabels({"Address", "Status", "Hash rate (H/s)", "Blocks mined"});
@@ -116,6 +440,7 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
     miners_->setSelectionBehavior(QAbstractItemView::SelectRows);
     overviewLayout->addWidget(miners_);
     auto sourceNote = new QLabel("Telemetry from the connected node. Unreported producers may not appear in this RPC view.");
+    sourceNote->setObjectName("truSourceNote");
     sourceNote->setWordWrap(true);
     overviewLayout->addWidget(sourceNote);
     pages_->addTab(overview, "Overview");
@@ -171,30 +496,185 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
 
     auto config = new QWidget;
     auto form = new QFormLayout(config);
+
     QSettings settings("TRUBlockchain", "CoreDesktop");
-    endpoint_ = new QLineEdit(settings.value("endpoint", QString("http://127.0.0.1:%1/rpc").arg(tru_network::MAINNET_RPC_PORT)).toString());
-    cookie_ = new QLineEdit(settings.value("cookie", DesktopRpc::defaultCookiePath(tru_network::MAINNET_RPC_PORT)).toString());
+
+    auto modeRow = new QWidget;
+    auto modeLayout = new QHBoxLayout(modeRow);
+    modeLayout->setContentsMargins(0, 0, 0, 0);
+
+    localMode_ = new QRadioButton("Local Node");
+    remoteMode_ = new QRadioButton("Remote Node");
+
+    const QString savedMode =
+        settings.value("connectionMode", "local").toString();
+
+    remoteMode_->setChecked(savedMode == "remote");
+    localMode_->setChecked(!remoteMode_->isChecked());
+
+    modeLayout->addWidget(localMode_);
+    modeLayout->addWidget(remoteMode_);
+    modeLayout->addStretch();
+
+    form->addRow("CONNECTION MODE", modeRow);
+
+    const QString localDefault =
+        QString("http://127.0.0.1:%1/rpc")
+            .arg(tru_network::MAINNET_RPC_PORT);
+
+    const QString remoteDefault =
+        QStringLiteral(
+            "https://node.tokenizedrealutility.com/rpc"
+        );
+
+    endpoint_ = new QLineEdit(
+        settings.value(
+            remoteMode_->isChecked()
+                ? "remoteEndpoint"
+                : "localEndpoint",
+            remoteMode_->isChecked()
+                ? remoteDefault
+                : localDefault
+        ).toString()
+    );
+
+    endpoint_->setObjectName("truEndpoint");
+    endpoint_->setClearButtonEnabled(true);
+
+    cookie_ = new QLineEdit(
+        settings.value(
+            "cookie",
+            DesktopRpc::defaultCookiePath(
+                tru_network::MAINNET_RPC_PORT
+            )
+        ).toString()
+    );
+
+    cookie_->setObjectName("truCookie");
+    cookie_->setProperty(
+        "truLocalCookiePath",
+        cookie_->text()
+    );
+
     sessionToken_ = new QLineEdit;
     sessionToken_->setEchoMode(QLineEdit::Password);
-    sessionToken_->setPlaceholderText("Optional; retained only for this session");
-    form->addRow("Local RPC endpoint", endpoint_);
+    sessionToken_->setObjectName("truSessionToken");
+    sessionToken_->setClearButtonEnabled(true);
+    sessionToken_->setPlaceholderText(
+        "Session only — never saved"
+    );
+
+    form->addRow("Endpoint", endpoint_);
     form->addRow("RPC cookie file", cookie_);
-    auto browse = new QPushButton("Select cookie file…");
-    form->addRow("", browse);
-    form->addRow("Session RPC token", sessionToken_);
-    auto apply = new QPushButton("Connect");
-    form->addRow("", apply);
-    auto help = new QLabel("Use the existing node's cookie or TRU_RPC_TOKEN. RPC credentials never go to a public host. "
-        "A desktop client does not start, unlock or synchronize a full node. On Windows, connect to a local forward to your running Linux node. "
-        "Wallet passphrases and private keys are never requested by this RPC client.");
+
+    browseCookie_ =
+        new QPushButton("Select cookie file…");
+
+    form->addRow("", browseCookie_);
+    form->addRow(
+        "Access / session token",
+        sessionToken_
+    );
+
+    auto actionRow = new QWidget;
+    auto actionLayout = new QHBoxLayout(actionRow);
+
+    actionLayout->setContentsMargins(0, 0, 0, 0);
+
+    testConnection_ =
+        new QPushButton("Test Connection");
+    testConnection_->setObjectName("truSecondaryAction");
+
+    connectButton_ =
+        new QPushButton("Connect");
+    connectButton_->setObjectName("truPrimaryAction");
+
+    actionLayout->addWidget(testConnection_);
+    actionLayout->addWidget(connectButton_);
+    actionLayout->addStretch();
+
+    form->addRow("", actionRow);
+
+    auto help = new QLabel(
+        "Local Node connects directly to TRU Core on this "
+        "computer using loopback HTTP and may authenticate "
+        "with the local RPC cookie or an in-memory token. "
+        "Remote Node requires HTTPS and an explicit session "
+        "access token. Remote cookie files are never used. "
+        "Connection mode and endpoint may be remembered; "
+        "access tokens are never written to QSettings. "
+        "Wallet passphrases and private keys are never "
+        "requested by this Desktop RPC client."
+    );
+
+    help->setObjectName("truSecurityNote");
     help->setWordWrap(true);
     form->addRow(help);
+
     pages_->addTab(config, "Connection");
-    connect(browse, &QPushButton::clicked, this, [this] {
-        auto path = QFileDialog::getOpenFileName(this, "Select local RPC cookie", QDir::homePath());
-        if (!path.isEmpty()) cookie_->setText(path);
-    });
-    connect(apply, &QPushButton::clicked, this, [this]{ applyConnection(); });
+
+    connect(
+        browseCookie_,
+        &QPushButton::clicked,
+        this,
+        [this] {
+            auto path =
+                QFileDialog::getOpenFileName(
+                    this,
+                    "Select local RPC cookie",
+                    QDir::homePath()
+                );
+
+            if (!path.isEmpty()) {
+                cookie_->setText(path);
+                cookie_->setProperty(
+                    "truLocalCookiePath",
+                    path
+                );
+            }
+        }
+    );
+
+    connect(
+        localMode_,
+        &QRadioButton::toggled,
+        this,
+        [this](bool checked) {
+            if (checked)
+                updateConnectionMode();
+        }
+    );
+
+    connect(
+        remoteMode_,
+        &QRadioButton::toggled,
+        this,
+        [this](bool checked) {
+            if (checked)
+                updateConnectionMode();
+        }
+    );
+
+    connect(
+        testConnection_,
+        &QPushButton::clicked,
+        this,
+        [this] {
+            testConnection();
+        }
+    );
+
+    connect(
+        connectButton_,
+        &QPushButton::clicked,
+        this,
+        [this] {
+            applyConnection();
+        }
+    );
+
+    updateConnectionMode();
+
     refresh_ = new QTimer(this);
     refresh_->setInterval(30000);
     connect(refresh_, &QTimer::timeout, this, [this] {
@@ -206,33 +686,349 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
     // actual port/token after construction, before the first request.
 }
 
-void DesktopPanel::useLocalNode(int port, const QByteArray& token) {
-    endpoint_->setText(QString("http://127.0.0.1:%1/rpc").arg(port));
-    cookie_->setText(DesktopRpc::defaultCookiePath(port));
+void DesktopPanel::useLocalNode(
+    int port,
+    const QByteArray& token) {
+
+    localMode_->setChecked(true);
+
+    endpoint_->setText(
+        QString("http://127.0.0.1:%1/rpc")
+            .arg(port)
+    );
+
+    cookie_->setText(
+        DesktopRpc::defaultCookiePath(port)
+    );
+
+    cookie_->setProperty(
+        "truLocalCookiePath",
+        cookie_->text()
+    );
+
     rpc_.setSessionToken(token);
+
     QString error;
-    if (!rpc_.configure(QUrl(endpoint_->text()), cookie_->text(), error)) {
-        connection_->setText(error); return;
+
+    if (!rpc_.configure(
+            QUrl(endpoint_->text()),
+            cookie_->text(),
+            error)) {
+
+        connection_->setText(error);
+        return;
     }
-    // Embedded mode cannot accidentally switch the wallet UI to another core.
+
+    // Integrated mode cannot accidentally switch
+    // the wallet UI to another Core.
     pages_->setTabEnabled(2, false);
+
     refresh_->start();
-    QTimer::singleShot(500, this, [this]{ refreshOverview(); });
+
+    QTimer::singleShot(
+        500,
+        this,
+        [this] {
+            refreshOverview();
+        }
+    );
 }
 
-void DesktopPanel::applyConnection() {
-    QString error;
-    if (!rpc_.configure(QUrl(endpoint_->text().trimmed()), cookie_->text().trimmed(), error)) {
-        connection_->setText(error); return;
-    }
-    rpc_.setSessionToken(sessionToken_->text().toUtf8());
+
+void DesktopPanel::updateConnectionMode() {
+
+    QSettings settings(
+        "TRUBlockchain",
+        "CoreDesktop"
+    );
+
+    const bool remote =
+        remoteMode_->isChecked();
+
+    const QString localDefault =
+        QString("http://127.0.0.1:%1/rpc")
+            .arg(tru_network::MAINNET_RPC_PORT);
+
+    const QString remoteDefault =
+        QStringLiteral(
+            "https://node.tokenizedrealutility.com/rpc"
+        );
+
+    // Authentication material never crosses connection modes.
+    rpc_.setSessionToken(QByteArray());
     sessionToken_->clear();
-    QSettings settings("TRUBlockchain", "CoreDesktop");
-    settings.setValue("endpoint", endpoint_->text());
-    settings.setValue("cookie", cookie_->text());
+
+    if (remote) {
+        const QString current =
+            endpoint_->text().trimmed();
+
+        if (current.startsWith("http://127.0.0.1") ||
+            current.startsWith("http://localhost") ||
+            current.startsWith("http://[::1]")) {
+
+            endpoint_->setText(
+                settings.value(
+                    "remoteEndpoint",
+                    remoteDefault
+                ).toString()
+            );
+        }
+
+        // Preserve the real local cookie path in memory, but make it
+        // visually explicit that remote mode cannot consume it.
+        if (cookie_->text() !=
+            "Not used in Remote Node mode") {
+
+            cookie_->setProperty(
+                "truLocalCookiePath",
+                cookie_->text()
+            );
+        }
+
+        cookie_->setText(
+            "Not used in Remote Node mode"
+        );
+
+        cookie_->setEnabled(false);
+        browseCookie_->setEnabled(false);
+
+        sessionToken_->setPlaceholderText(
+            "Paste session access token here — session only"
+        );
+
+        modeBadge_->setText("REMOTE NODE");
+        securityBadge_->setText(
+            "HTTPS / SESSION TOKEN"
+        );
+
+        connection_->setText(
+            "Remote Node mode  //  TLS transport armed  //  "
+            "session access token required."
+        );
+
+    } else {
+        if (endpoint_->text()
+                .trimmed()
+                .startsWith("https://")) {
+
+            endpoint_->setText(
+                settings.value(
+                    "localEndpoint",
+                    localDefault
+                ).toString()
+            );
+        }
+
+        QString localCookie =
+            cookie_->property(
+                "truLocalCookiePath"
+            ).toString();
+
+        if (localCookie.isEmpty() ||
+            localCookie ==
+                "Not used in Remote Node mode") {
+
+            localCookie =
+                settings.value(
+                    "cookie",
+                    DesktopRpc::defaultCookiePath(
+                        tru_network::MAINNET_RPC_PORT
+                    )
+                ).toString();
+        }
+
+        cookie_->setText(localCookie);
+        cookie_->setProperty(
+            "truLocalCookiePath",
+            localCookie
+        );
+
+        cookie_->setEnabled(true);
+        browseCookie_->setEnabled(true);
+
+        sessionToken_->setPlaceholderText(
+            "Optional — local cookie may authenticate instead"
+        );
+
+        modeBadge_->setText("LOCAL NODE");
+        securityBadge_->setText(
+            "LOOPBACK / COOKIE"
+        );
+
+        connection_->setText(
+            "Local Node mode  //  loopback transport  //  "
+            "TRU Core on this computer."
+        );
+    }
+}
+
+
+void DesktopPanel::testConnection() {
+
+    const QUrl endpoint(
+        endpoint_->text().trimmed()
+    );
+
+    if (remoteMode_->isChecked() &&
+        sessionToken_->text()
+            .trimmed()
+            .isEmpty()) {
+
+        connection_->setText(
+            "Remote Node requires a session access token."
+        );
+
+        return;
+    }
+
+    // Probe using a temporary transport so Test Connection
+    // never silently changes the active Desktop connection.
+    auto probe = new DesktopRpc(this);
+
+    QString error;
+
+    if (!probe->configure(
+            endpoint,
+            remoteMode_->isChecked()
+                ? QString()
+                : cookie_->text().trimmed(),
+            error)) {
+
+        connection_->setText(error);
+        probe->deleteLater();
+        return;
+    }
+
+    probe->setSessionToken(
+        sessionToken_->text().toUtf8()
+    );
+
+    connection_->setText(
+        "Testing connection…"
+    );
+
+    testConnection_->setEnabled(false);
+    connectButton_->setEnabled(false);
+
+    probe->call(
+        "getinfo",
+        "{}",
+        [this, probe, endpoint](
+            const QJsonValue& value,
+            const QByteArray&,
+            const QString& error) {
+
+            testConnection_->setEnabled(true);
+            connectButton_->setEnabled(true);
+
+            // Explicitly erase the probe token before disposal.
+            probe->setSessionToken(QByteArray());
+            probe->deleteLater();
+
+            if (!error.isEmpty()) {
+                connection_->setText(
+                    "Connection test failed: " +
+                    error
+                );
+
+                return;
+            }
+
+            const auto obj =
+                value.toObject();
+
+            const QString mode =
+                DesktopRpc::isRemoteEndpoint(endpoint)
+                    ? "Remote Node"
+                    : "Local Node";
+
+            connection_->setText(
+                "Connection test passed · " +
+                mode +
+                " · TRU Mainnet · height " +
+                readable(obj.value("blocks"))
+            );
+        }
+    );
+}
+
+
+void DesktopPanel::applyConnection() {
+
+    const QUrl endpoint(
+        endpoint_->text().trimmed()
+    );
+
+    if (remoteMode_->isChecked() &&
+        sessionToken_->text()
+            .trimmed()
+            .isEmpty()) {
+
+        connection_->setText(
+            "Remote Node requires a session access token."
+        );
+
+        return;
+    }
+
+    QString error;
+
+    if (!rpc_.configure(
+            endpoint,
+            remoteMode_->isChecked()
+                ? QString()
+                : cookie_->text().trimmed(),
+            error)) {
+
+        connection_->setText(error);
+        return;
+    }
+
+    rpc_.setSessionToken(
+        sessionToken_->text().toUtf8()
+    );
+
+    // The visible secret is removed immediately.
+    // It is never persisted in QSettings.
+    sessionToken_->clear();
+
+    QSettings settings(
+        "TRUBlockchain",
+        "CoreDesktop"
+    );
+
+    if (remoteMode_->isChecked()) {
+        settings.setValue(
+            "connectionMode",
+            "remote"
+        );
+
+        settings.setValue(
+            "remoteEndpoint",
+            endpoint_->text()
+        );
+
+    } else {
+        settings.setValue(
+            "connectionMode",
+            "local"
+        );
+
+        settings.setValue(
+            "localEndpoint",
+            endpoint_->text()
+        );
+
+        settings.setValue(
+            "cookie",
+            cookie_->text()
+        );
+    }
+
     refresh_->start();
     refreshOverview();
 }
+
 
 void DesktopPanel::refreshOverview() {
     if (overviewPending_) return;
@@ -249,7 +1045,22 @@ void DesktopPanel::refreshOverview() {
         height_->setText(readable(obj.value("blocks")));
         peers_->setText(readable(obj.value("connections")));
         tip_->setText("Best tip: " + obj.value("bestblockhash").toString());
-        connection_->setText("Connected  ·  " + rpc_.endpoint().toString() + "  ·  " + QDateTime::currentDateTime().toString("HH:mm:ss"));
+        const QString connectionMode =
+            DesktopRpc::isRemoteEndpoint(
+                rpc_.endpoint()
+            )
+                ? "Remote Node"
+                : "Local Node";
+
+        connection_->setText(
+            "Connected · " +
+            connectionMode +
+            " · TRU Mainnet · " +
+            rpc_.endpoint().toString() +
+            " · " +
+            QDateTime::currentDateTime()
+                .toString("HH:mm:ss")
+        );
         rpc_.call("getallminers", "{}", [this](const QJsonValue& v, const QByteArray&, const QString& err) {
             overviewPending_ = false;
             miners_->setRowCount(0);

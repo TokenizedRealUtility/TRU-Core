@@ -19,9 +19,71 @@ static void check(bool condition, const char* message) {
 int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
     try {
-        check(DesktopRpc::validEndpoint(QUrl("http://127.0.0.1:21832/rpc")), "loopback should be allowed");
-        for (const auto& bad : {"http://example.com:21832/rpc", "http://127.0.0.1:21832/other", "http://user:pass@127.0.0.1:21832/rpc", "http://127.0.0.1:21832/rpc?token=secret", "http://127.0.0.1:21832/rpc#fragment"})
-            check(!DesktopRpc::validEndpoint(QUrl(bad)), "noncanonical endpoint accepted");
+        check(
+            DesktopRpc::validEndpoint(
+                QUrl(
+                    "http://127.0.0.1:21832/rpc"
+                )
+            ),
+            "loopback should be allowed"
+        );
+
+        check(
+            DesktopRpc::validEndpoint(
+                QUrl(
+                    "https://node.tokenizedrealutility.com/rpc"
+                )
+            ),
+            "HTTPS remote endpoint should be allowed"
+        );
+
+        check(
+            DesktopRpc::validEndpoint(
+                QUrl(
+                    "https://example.com:443/rpc"
+                )
+            ),
+            "explicit HTTPS remote port should be allowed"
+        );
+
+        check(
+            DesktopRpc::isRemoteEndpoint(
+                QUrl(
+                    "https://node.tokenizedrealutility.com/rpc"
+                )
+            ),
+            "remote endpoint classification failed"
+        );
+
+        check(
+            !DesktopRpc::isRemoteEndpoint(
+                QUrl(
+                    "http://127.0.0.1:21832/rpc"
+                )
+            ),
+            "loopback classified as remote"
+        );
+
+        for (const auto& bad : {
+                 "http://example.com:21832/rpc",
+                 "https://example.com/other",
+                 "https://user:pass@example.com/rpc",
+                 "https://example.com/rpc?token=secret",
+                 "https://example.com/rpc#fragment",
+                 "http://127.0.0.1:21832/other",
+                 "http://user:pass@127.0.0.1:21832/rpc",
+                 "http://127.0.0.1:21832/rpc?token=secret",
+                 "http://127.0.0.1:21832/rpc#fragment"
+             }) {
+
+            check(
+                !DesktopRpc::validEndpoint(
+                    QUrl(bad)
+                ),
+                "noncanonical endpoint accepted"
+            );
+        }
+
         std::uint64_t value = 0;
         check(tru_desktop::positiveUnits("18446744073709551615", value) && value == UINT64_MAX, "uint64 maximum parse failed");
         for (const auto& bad : {"", "-1", "1.5", "1e6", "+1", "0", "18446744073709551616"})
@@ -101,7 +163,42 @@ int main(int argc, char** argv) {
         bool rejected = false;
         rpc.call("test", "[]", [&](const QJsonValue&, const QByteArray&, const QString& e) { rejected = !e.isEmpty(); });
         check(rejected, "array parameters accepted");
-        std::cout << "PASS: exact uint64 values; amount/endian guards; cookie auth; RPC errors; response ids; remote endpoint rejection; no redirect/retry; JSON object validation\n";
+
+        DesktopRpc remoteRpc;
+        QString remoteError;
+
+        check(
+            remoteRpc.configure(
+                QUrl(
+                    "https://node.tokenizedrealutility.com/rpc"
+                ),
+                QString(),
+                remoteError
+            ),
+            "remote HTTPS configuration rejected"
+        );
+
+        bool remoteTokenRejected = false;
+
+        remoteRpc.call(
+            "getinfo",
+            "{}",
+            [&](const QJsonValue&,
+                const QByteArray&,
+                const QString& e) {
+
+                remoteTokenRejected =
+                    e.contains(
+                        "session access token"
+                    );
+            }
+        );
+
+        check(
+            remoteTokenRejected,
+            "remote RPC proceeded without explicit session token"
+        );
+        std::cout << "PASS: exact uint64 values; amount/endian guards; cookie auth; RPC errors; response ids; HTTPS remote endpoint policy; remote token gate; no redirect/retry; JSON object validation\n";
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "FAIL: " << e.what() << '\n'; return 1;

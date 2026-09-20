@@ -5,6 +5,7 @@
 class QComboBox;
 class QLabel;
 class QLineEdit;
+class QRadioButton;
 class QPlainTextEdit;
 class QTableWidget;
 class QPushButton;
@@ -22,10 +23,14 @@ private:
     void selectOperation();
     void runOperation();
     void applyConnection();
+    void testConnection();
+    void updateConnectionMode();
     DesktopRpc rpc_;
     QTabWidget* pages_;
     QLineEdit *endpoint_, *cookie_, *sessionToken_;
-    QLabel *connection_, *height_, *peers_, *rate_, *tip_, *operationHelp_;
+    QRadioButton *localMode_, *remoteMode_;
+    QPushButton *browseCookie_, *testConnection_, *connectButton_;
+    QLabel *connection_, *height_, *peers_, *rate_, *tip_, *operationHelp_, *modeBadge_, *securityBadge_;
     QComboBox *category_, *operation_;
     QPlainTextEdit *params_, *output_;
     QPushButton *run_;

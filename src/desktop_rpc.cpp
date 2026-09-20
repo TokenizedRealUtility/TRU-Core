@@ -27,23 +27,73 @@ QString DesktopRpc::defaultCookiePath(int port) {
 #endif
 }
 
-bool DesktopRpc::validEndpoint(const QUrl& url) {
-    // Deliberately exclude DNS names other than localhost and all remote hosts.
-    // A local SSH forward can be used without exposing the privileged RPC.
-    return url.isValid() && url.scheme() == "http" &&
-        (url.host() == "127.0.0.1" || url.host() == "::1" || url.host() == "localhost") &&
-        url.port() >= 1 && url.port() <= 65535 && url.path() == "/rpc" &&
-        url.userInfo().isEmpty() && !url.hasQuery() && !url.hasFragment();
+bool DesktopRpc::isRemoteEndpoint(const QUrl& url) {
+    const QString host = url.host().toLower();
+
+    return url.isValid() &&
+        host != "127.0.0.1" &&
+        host != "::1" &&
+        host != "localhost";
 }
 
-bool DesktopRpc::configure(const QUrl& endpoint, const QString& cookieFile, QString& error) {
-    if (pending_) { error = "Wait for the current requests to finish."; return false; }
-    if (!validEndpoint(endpoint)) {
-        error = "Use a loopback HTTP endpoint, for example http://127.0.0.1:8332/rpc.";
+bool DesktopRpc::validEndpoint(const QUrl& url) {
+    if (!url.isValid() ||
+        url.host().isEmpty() ||
+        url.path() != "/rpc" ||
+        !url.userInfo().isEmpty() ||
+        url.hasQuery() ||
+        url.hasFragment()) {
         return false;
     }
+
+    const int explicitPort = url.port(-1);
+
+    if (explicitPort != -1 &&
+        (explicitPort < 1 || explicitPort > 65535)) {
+        return false;
+    }
+
+    const QString host = url.host().toLower();
+
+    const bool loopback =
+        host == "127.0.0.1" ||
+        host == "::1" ||
+        host == "localhost";
+
+    // Local Core preserves the existing HTTP + loopback boundary.
+    if (loopback)
+        return url.scheme() == "http" &&
+               explicitPort >= 1;
+
+    // Remote Desktop RPC is TLS-only.
+    // Standard HTTPS may use implicit port 443.
+    return url.scheme() == "https";
+}
+
+bool DesktopRpc::configure(const QUrl& endpoint,
+                           const QString& cookieFile,
+                           QString& error) {
+    if (pending_) {
+        error = "Wait for the current requests to finish.";
+        return false;
+    }
+
+    if (!validEndpoint(endpoint)) {
+        error =
+            "Local nodes must use "
+            "http://127.0.0.1:<port>/rpc. "
+            "Remote nodes must use "
+            "https://<host>/rpc.";
+        return false;
+    }
+
     endpoint_ = endpoint;
-    cookieFile_ = cookieFile;
+
+    // Filesystem RPC cookies are local-Core credentials only.
+    cookieFile_ = isRemoteEndpoint(endpoint)
+        ? QString()
+        : cookieFile;
+
     error.clear();
     return true;
 }
@@ -64,7 +114,7 @@ QByteArray DesktopRpc::requestBody(int id, const QString& method, const QByteArr
 
 void DesktopRpc::call(const QString& method, const QByteArray& params, Callback callback) {
     auto fail = [&](const QString& e) { callback({}, {}, e); };
-    if (!validEndpoint(endpoint_)) { fail("Configure the local node connection first."); return; }
+    if (!validEndpoint(endpoint_)) { fail("Configure the node connection first."); return; }
     if (pending_ >= 8) { fail("Too many requests in progress. Try again shortly."); return; }
     QJsonParseError parseError;
     const auto parsed = QJsonDocument::fromJson(params, &parseError);
@@ -72,15 +122,38 @@ void DesktopRpc::call(const QString& method, const QByteArray& params, Callback 
         fail("Parameters must be a JSON object of at most 8 MiB."); return;
     }
     QByteArray token = token_;
-    if (token.isEmpty()) token = qgetenv("TRU_RPC_TOKEN").trimmed();
-    if (token.isEmpty()) {
-        QFileInfo info(cookieFile_);
-        QFile cookie(cookieFile_);
-        if (!info.isFile() || info.isSymLink() || info.size() > 514 || !cookie.open(QIODevice::ReadOnly)) {
-            fail("Cannot read the RPC cookie. Start the node as this user, or select its cookie in Connection."); return;
+
+    // Environment and cookie fallback remain local-only.
+    // Remote RPC requires an explicit in-memory session token.
+    if (!isRemoteEndpoint(endpoint_)) {
+        if (token.isEmpty())
+            token = qgetenv("TRU_RPC_TOKEN").trimmed();
+
+        if (token.isEmpty()) {
+            QFileInfo info(cookieFile_);
+            QFile cookie(cookieFile_);
+
+            if (!info.isFile() ||
+                info.isSymLink() ||
+                info.size() > 514 ||
+                !cookie.open(QIODevice::ReadOnly)) {
+
+                fail(
+                    "Cannot read the RPC cookie. "
+                    "Start the node as this user, "
+                    "or select its cookie in Connection."
+                );
+
+                return;
+            }
+
+            token = cookie.readAll().trimmed();
         }
-        token = cookie.readAll().trimmed();
+    } else if (token.isEmpty()) {
+        fail("Remote RPC requires a session access token.");
+        return;
     }
+
     if (token.size() < 32 || token.size() > 512 || token.contains('\r') || token.contains('\n')) {
         fail("RPC token must be 32–512 characters without line breaks."); return;
     }
