@@ -1,4 +1,7 @@
 #include "desktop_panel.h"
+#include "desktop_assets_widget.h"
+#include "desktop_ai_widget.h"
+#include "desktop_wallet_widget.h"
 #include "tru_network_params.h"
 #include <QComboBox>
 #include <QDateTime>
@@ -12,9 +15,12 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QLabel>
+#include <QLocale>
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPlainTextEdit>
+#include <QPixmap>
+#include <QIcon>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QSettings>
@@ -24,6 +30,8 @@
 #include <QTimer>
 #include <QVariant>
 #include <QVBoxLayout>
+#include <cmath>
+#include <cstdint>
 
 namespace {
 struct Operation { const char* group; const char* title; const char* method; const char* params; bool write; const char* help; };
@@ -86,6 +94,42 @@ QLabel* makeMetric(QHBoxLayout* row, const QString& title) {
 
     return value;
 }
+
+double difficultyFromCompactBits(std::uint32_t bits) {
+    if (bits == 0) return 0.0;
+
+    constexpr std::uint32_t powLimitBits = 0x1e00ffffU;
+    const int exponent = static_cast<int>(bits >> 24);
+    const std::uint32_t mantissa = bits & 0x00ffffffU;
+    const int limitExponent = static_cast<int>(powLimitBits >> 24);
+    const std::uint32_t limitMantissa = powLimitBits & 0x00ffffffU;
+
+    if (mantissa == 0 || exponent < 3 || exponent > 32) return 0.0;
+
+    long double ratio =
+        static_cast<long double>(limitMantissa) /
+        static_cast<long double>(mantissa);
+
+    const int exponentDelta = limitExponent - exponent;
+    ratio *= std::pow(256.0L, static_cast<long double>(exponentDelta));
+
+    return ratio > 0.0L ? static_cast<double>(ratio) : 0.0;
+}
+
+QString formatDifficulty(std::uint32_t bits) {
+    const double d = difficultyFromCompactBits(bits);
+    if (!(d > 0.0) || !std::isfinite(d)) return "—";
+
+    QLocale english(QLocale::English);
+    return english.toString(d, 'f', 4);
+}
+
+QString formatCoreVersion(QString version) {
+    version = version.trimmed();
+    if (version.isEmpty() || version == "TRU-node") return "—";
+    if (!version.startsWith('v', Qt::CaseInsensitive)) version.prepend('v');
+    return version;
+}
 }
 
 DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
@@ -94,110 +138,101 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
     // Presentation only: no RPC, wallet, consensus or P2P semantics.
     setStyleSheet(R"TRUQSS(
         QWidget {
-            background-color: #05111e;
-            color: #d9e9f5;
+            background-color: #040d18;
+            color: #dcecf6;
             font-size: 13px;
         }
 
         QTabWidget::pane {
-            border: 1px solid #1b4562;
-            border-radius: 8px;
-            background-color: #061522;
+            border: 1px solid #163d57;
+            border-radius: 10px;
+            background-color: #06131f;
             top: -1px;
         }
 
         QTabBar::tab {
-            background-color: #0a1c2d;
-            color: #8eaec4;
-            border: 1px solid #173c56;
+            background-color: #081a2a;
+            color: #809fb4;
+            border: 1px solid #15374f;
             border-bottom: none;
-            padding: 10px 18px;
-            min-width: 86px;
+            padding: 11px 20px;
+            min-width: 92px;
         }
-
         QTabBar::tab:selected {
-            background-color: #0d3549;
-            color: #70f0e1;
-            border-color: #2b7792;
+            background-color: #0b3144;
+            color: #78f5e5;
+            border-color: #277b94;
         }
-
         QTabBar::tab:hover {
-            color: #9df8ef;
-            background-color: #0c2a3d;
+            color: #a7fff6;
+            background-color: #0a2638;
         }
 
         QGroupBox {
-            background-color: #071827;
-            border: 1px solid #1a4764;
-            border-radius: 11px;
+            background-color: #071725;
+            border: 1px solid #19445f;
+            border-radius: 12px;
             margin-top: 13px;
-            padding: 17px 10px 10px 10px;
-            color: #8fbbd2;
+            padding: 18px 12px 12px 12px;
+            color: #91bdd2;
             font-weight: 700;
         }
-
         QGroupBox::title {
             subcontrol-origin: margin;
-            left: 13px;
+            left: 14px;
             padding: 0 7px;
-            color: #9ccbe2;
+            color: #a1cde1;
         }
-
         QGroupBox[truMetric="true"] {
             background: qlineargradient(
                 x1:0, y1:0, x2:1, y2:1,
-                stop:0 #071827,
-                stop:0.55 #081c2c,
-                stop:1 #092338
-            );
-            border: 1px solid #245875;
-            min-height: 92px;
+                stop:0 #071927,
+                stop:0.55 #082033,
+                stop:1 #092a40);
+            border: 1px solid #245d7a;
+            min-height: 100px;
         }
 
         QLabel#truMetricValue {
             color: #67f4df;
-            font-size: 29px;
+            font-size: 31px;
             font-weight: 800;
-            padding: 7px;
+            padding: 8px;
         }
-
+        QLabel#truLogo {
+            background: transparent;
+            padding: 0px;
+        }
         QLabel#truBrand {
-            color: #69eaff;
+            color: #73ecff;
             font-size: 25px;
             font-weight: 800;
             padding: 0px;
         }
-
         QLabel#truSubtitle {
-            color: #688da5;
+            color: #6f91a8;
             font-size: 11px;
             font-weight: 700;
             padding-top: 2px;
         }
-
         QLabel#truModeBadge,
         QLabel#truSecurityBadge,
         QLabel#truMainnetBadge {
             background-color: #092238;
             color: #77eadf;
             border: 1px solid #246680;
-            border-radius: 10px;
-            padding: 5px 10px;
+            border-radius: 11px;
+            padding: 6px 11px;
             font-size: 10px;
             font-weight: 800;
         }
-
-        QLabel#truSecurityBadge {
-            color: #71caff;
-        }
-
+        QLabel#truSecurityBadge { color: #71caff; }
         QLabel#truMainnetBadge {
-            color: #c09aff;
-            border-color: #594b85;
+            color: #c5a2ff;
+            border-color: #65528f;
         }
-
         QLabel#truSignalRail {
-            background-color: #061723;
+            background-color: #061520;
             color: #4c819f;
             border-top: 1px solid #12344b;
             border-bottom: 1px solid #12344b;
@@ -205,132 +240,287 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
             font-size: 10px;
             font-weight: 700;
         }
-
         QLabel#truConnectionBanner {
             background: qlineargradient(
                 x1:0, y1:0, x2:1, y2:0,
                 stop:0 #082137,
                 stop:0.55 #09283a,
-                stop:1 #071b2b
-            );
+                stop:1 #071b2b);
             color: #8ee9de;
             border: 1px solid #215b74;
             border-left: 3px solid #49dccd;
-            border-radius: 7px;
-            padding: 9px 12px;
+            border-radius: 8px;
+            padding: 10px 13px;
             font-weight: 700;
         }
-
         QLabel#truTip {
             background-color: #061521;
             color: #7ea6bd;
             border: 1px solid #173b52;
-            border-radius: 6px;
-            padding: 8px 10px;
+            border-radius: 7px;
+            padding: 9px 11px;
             font-family: "DejaVu Sans Mono", "Menlo", "Consolas";
         }
-
-        QLabel#truSectionTitle {
-            color: #e4f3fb;
-            font-size: 18px;
+        QLabel#truSectionTitle,
+        QLabel#truAssetSectionTitle {
+            color: #e8f6fc;
+            font-size: 17px;
             font-weight: 800;
-            padding: 8px 0px 4px 1px;
+            padding: 7px 0px 4px 1px;
         }
-
         QLabel#truSecurityNote {
             background-color: #071a2a;
-            color: #89aabc;
+            color: #8caec0;
             border: 1px solid #19445e;
-            border-radius: 7px;
-            padding: 10px;
+            border-radius: 8px;
+            padding: 11px;
         }
-
         QLabel#truSourceNote {
             color: #668aa1;
             padding: 5px 2px;
         }
 
-        QPushButton {
-            background-color: #0c3047;
-            color: #d9f7fb;
-            border: 1px solid #24708d;
+        QFrame#truWalletHero,
+        QFrame#truAssetsHero {
+            background: qlineargradient(
+                x1:0, y1:0, x2:1, y2:0,
+                stop:0 #071a2b,
+                stop:0.55 #0a2c40,
+                stop:1 #081a2d);
+            border: 1px solid #286882;
+            border-radius: 13px;
+        }
+        QLabel#truWalletEyebrow,
+        QLabel#truAssetEyebrow {
+            color: #62a6c4;
+            font-size: 10px;
+            font-weight: 800;
+        }
+        QLabel#truWalletTitle,
+        QLabel#truAssetTitle {
+            color: #f1fbff;
+            font-size: 22px;
+            font-weight: 800;
+        }
+        QLabel#truAssetSubtitle {
+            color: #91adbd;
+            max-width: 760px;
+        }
+        QLabel#truWalletState {
+            background-color: #0b2637;
+            color: #8ab0c3;
+            border: 1px solid #28536a;
+            border-radius: 10px;
+            padding: 4px 10px;
+            font-size: 10px;
+            font-weight: 800;
+        }
+        QLabel#truWalletState[walletState="unlocked"] {
+            color: #6ff4c6;
+            border-color: #2a8c73;
+            background-color: #092c2d;
+        }
+        QLabel#truWalletState[walletState="locked"] {
+            color: #8fc7ff;
+            border-color: #356f9e;
+        }
+        QLabel#truWalletState[walletState="missing"] {
+            color: #d5b57c;
+            border-color: #7d633b;
+        }
+        QLabel#truWalletBalanceCaption {
+            color: #6c9db7;
+            font-size: 10px;
+            font-weight: 800;
+        }
+        QLabel#truWalletBalanceValue {
+            color: #75f6df;
+            font-size: 30px;
+            font-weight: 800;
+        }
+        QLabel#truWalletBoundary,
+        QLabel#truAssetPrivacy {
+            background-color: #061824;
+            color: #789caf;
+            border: 1px solid #15394e;
+            border-radius: 8px;
+            padding: 9px 11px;
+        }
+        QFrame#truReceiveCard {
+            background-color: #071827;
+            border: 1px solid #1d4a64;
+            border-radius: 11px;
+        }
+        QLabel#truWalletAddress {
+            color: #dff8ff;
+            font-size: 15px;
+            font-weight: 700;
+            font-family: "DejaVu Sans Mono", "Menlo", "Consolas";
+        }
+        QLabel#truWalletMeta,
+        QLabel#truAssetMeta {
+            color: #6f91a5;
+            font-size: 11px;
+        }
+        QPlainTextEdit#truWalletActivity {
+            background-color: #05131f;
+            color: #b7d7e5;
+            border: 1px solid #173e56;
+            border-radius: 9px;
+            padding: 9px;
+            font-family: "DejaVu Sans Mono", "Menlo", "Consolas";
+            font-size: 12px;
+        }
+
+        QFrame#truAssetCard {
+            background: qlineargradient(
+                x1:0, y1:0, x2:1, y2:1,
+                stop:0 #071725,
+                stop:1 #0a2133);
+            border: 1px solid #1e516d;
+            border-radius: 12px;
+        }
+        QLabel#truAssetImage {
+            background-color: #03101b;
+            color: #4d809a;
+            border: 1px solid #173f58;
+            border-radius: 9px;
+            font-size: 14px;
+            font-weight: 800;
+        }
+        QLabel#truScriptGlyph {
+            background-color: #06131f;
+            color: #63e7dc;
+            border: 1px solid #1e536d;
+            border-radius: 9px;
+            font-family: "DejaVu Sans Mono", "Menlo", "Consolas";
+            font-size: 17px;
+            font-weight: 800;
+        }
+        QLabel#truAssetCardTitle {
+            color: #ecf9ff;
+            font-size: 15px;
+            font-weight: 800;
+        }
+        QLabel#truAssetTypeBadge,
+        QLabel#truAssetCountBadge {
+            background-color: #0b3141;
+            color: #71eadf;
+            border: 1px solid #28667b;
+            border-radius: 9px;
+            padding: 4px 8px;
+            font-size: 10px;
+            font-weight: 800;
+        }
+        QLabel#truAssetAmount {
+            color: #74f2d9;
+            font-size: 17px;
+            font-weight: 800;
+        }
+        QLabel#truScriptPreview {
+            color: #b8d3df;
+            background-color: #05131f;
+            border: 1px solid #15394f;
             border-radius: 7px;
+            padding: 8px;
+        }
+        QLabel#truAssetStatus {
+            color: #8fb1c2;
+            padding: 3px 5px;
+        }
+        QLabel#truAssetEmpty {
+            background-color: #061522;
+            color: #64879a;
+            border: 1px dashed #1d455b;
+            border-radius: 10px;
+            padding: 42px;
+            min-height: 80px;
+        }
+        QScrollArea#truAssetScroll,
+        QWidget#truAssetHost {
+            background: transparent;
+            border: none;
+        }
+
+        QPushButton {
+            background-color: #0b2b41;
+            color: #dcf6fb;
+            border: 1px solid #256783;
+            border-radius: 8px;
             padding: 9px 15px;
             font-weight: 700;
         }
-
         QPushButton:hover {
-            background-color: #10435c;
-            border-color: #47cce8;
+            background-color: #10445d;
+            border-color: #48d1ea;
             color: #ffffff;
         }
-
-        QPushButton:pressed {
-            background-color: #09283b;
-        }
-
+        QPushButton:pressed { background-color: #09283b; }
         QPushButton:disabled {
             background-color: #081927;
             color: #496273;
             border-color: #173346;
         }
-
         QPushButton#truPrimaryAction {
             background: qlineargradient(
                 x1:0, y1:0, x2:1, y2:0,
                 stop:0 #0d4b62,
-                stop:1 #0b6670
-            );
-            color: #eaffff;
+                stop:1 #08706f);
+            color: #efffff;
             border-color: #43d8d0;
         }
-
         QPushButton#truSecondaryAction {
-            background-color: #0b273d;
-            border-color: #29617e;
+            background-color: #0a2437;
+            border-color: #285a73;
+        }
+        QPushButton#truSensitiveAction {
+            background-color: #211c31;
+            color: #dcc9ff;
+            border-color: #604d83;
         }
 
         QLineEdit,
         QPlainTextEdit,
         QComboBox {
-            background-color: #091a2b;
-            color: #d9edf7;
+            background-color: #081a2a;
+            color: #daedf7;
             border: 1px solid #294b63;
-            border-radius: 6px;
+            border-radius: 7px;
             padding: 8px;
             selection-background-color: #17697b;
         }
-
         QLineEdit:focus,
         QPlainTextEdit:focus,
         QComboBox:focus {
             border: 1px solid #43cfe1;
             background-color: #0a2032;
         }
-
         QLineEdit:disabled {
             background-color: #061420;
             color: #5d7484;
             border-color: #173347;
         }
-
         QLineEdit#truEndpoint,
         QLineEdit#truCookie {
             font-family: "DejaVu Sans Mono", "Menlo", "Consolas";
         }
+        QPlainTextEdit#rpcParameters,
+        QPlainTextEdit#rpcResult {
+            font-family: "DejaVu Sans Mono", "Menlo", "Consolas";
+            font-size: 12px;
+        }
 
         QTableWidget {
-            background-color: #071625;
-            alternate-background-color: #091c2d;
+            background-color: #061522;
+            alternate-background-color: #081b2b;
             border: 1px solid #1d4964;
-            border-radius: 7px;
+            border-radius: 8px;
             gridline-color: #15384f;
             selection-background-color: #113d56;
             selection-color: #e9ffff;
         }
-
         QHeaderView::section {
-            background-color: #0b2235;
+            background-color: #0a2133;
             color: #8fb9d0;
             border: none;
             border-right: 1px solid #183d55;
@@ -338,23 +528,19 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
             padding: 9px;
             font-weight: 700;
         }
-
         QRadioButton {
             color: #c3dbe8;
             spacing: 7px;
             padding: 3px;
         }
-
         QRadioButton:checked {
             color: #7ef2e6;
             font-weight: 700;
         }
-
         QSplitter::handle {
             background-color: #173a50;
             height: 2px;
         }
-
         QToolTip {
             background-color: #071827;
             color: #d9f5fa;
@@ -363,22 +549,157 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
         }
     )TRUQSS");
 
-    auto root = new QVBoxLayout(this);
-    auto brandRow = new QHBoxLayout;
+    const QString darkThemeSheet = styleSheet();
+    const QString lightThemeOverrides = R"TRULIGHT(
+        QWidget { background-color:#f4f7fb; color:#16283a; }
+        QTabWidget::pane { border-color:#9bb5c7; background-color:#ffffff; }
+        QTabBar::tab {
+            background-color:#e8f0f6; color:#587186;
+            border-color:#b8cad7;
+        }
+        QTabBar::tab:selected {
+            background-color:#d5f4f1; color:#0b625f;
+            border-color:#4baaa6;
+        }
+        QTabBar::tab:hover { color:#084f58; background-color:#dff1f4; }
+        QGroupBox {
+            background-color:#ffffff; border-color:#a8c2d1;
+            color:#365c72;
+        }
+        QGroupBox::title { color:#31596e; }
+        QGroupBox[truMetric="true"] {
+            background:#ffffff; border-color:#8fb8c8;
+        }
+        QLabel#truMetricValue { color:#087a70; }
+        QLabel#truBrand { color:#08758a; }
+        QLabel#truWalletAddress {
+            color:#17384a;
+            background-color:#ffffff;
+            border:1px solid #b5cbd7;
+            border-radius:6px;
+            padding:7px 9px;
+        }
+        QLabel#truWalletBalanceCaption { color:#4f7184; }
+        QLabel#truWalletBalanceValue { color:#087a70; }
+        QLabel#truWalletMeta { color:#59768a; }
+        QLabel#truSubtitle, QLabel#truSourceNote { color:#607b8d; }
+        QLabel#truModeBadge, QLabel#truSecurityBadge {
+            background-color:#edf6f8; color:#176967;
+            border-color:#86afb9;
+        }
+        QLabel#truMainnetBadge {
+            color:#6c4c97; border-color:#b7a8d0;
+            background-color:#f3eff9;
+        }
+        QLabel#truConnectionBanner {
+            background:#e7f7f5; color:#155d5a;
+            border-color:#63aaa6;
+        }
+        QLabel#truTip {
+            background-color:#ffffff; color:#1c3547;
+            border-color:#aec4d0;
+        }
+        QLabel#truSectionTitle, QLabel#truAssetSectionTitle {
+            color:#173c51;
+        }
+        QPushButton {
+            background-color:#e9f2f7; color:#17394c;
+            border-color:#8aaec0;
+        }
+        QPushButton:hover {
+            background-color:#d9edf2; border-color:#398da0;
+        }
+        QPushButton#truPrimaryAction {
+            background-color:#148a87; color:#ffffff;
+            border-color:#0b6f6c;
+        }
+        QPushButton#truSecondaryAction {
+            background-color:#e5f0f5; color:#244b60;
+            border-color:#86aebe;
+        }
+        QPushButton#truSensitiveAction {
+            background-color:#f3eaf7; color:#6b4781;
+            border-color:#b69ac6;
+        }
+        QPushButton#truThemeToggle {
+            background-color:#fff8e7; color:#705716;
+            border:1px solid #ccb970; border-radius:11px;
+            padding:6px 11px; font-size:10px; font-weight:800;
+        }
+        QLineEdit, QPlainTextEdit, QComboBox {
+            background-color:#ffffff; color:#1b3142;
+            border-color:#9cb7c6;
+            selection-background-color:#bde6e3;
+        }
+        QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus {
+            border-color:#318f9a; background-color:#ffffff;
+        }
+        QLineEdit:disabled {
+            background-color:#eef2f5; color:#8798a3;
+        }
+        QTableWidget {
+            background-color:#ffffff;
+            alternate-background-color:#f2f6f9;
+            border-color:#9db7c6; gridline-color:#c7d7e0;
+            selection-background-color:#cceae7;
+            selection-color:#15313d;
+        }
+        QHeaderView::section {
+            background-color:#dfeaf0; color:#36566a;
+            border-right-color:#b7cbd6;
+            border-bottom-color:#a9bfcb;
+        }
+        QRadioButton { color:#29495b; }
+        QRadioButton:checked { color:#0a7169; }
+        QScrollArea { background:transparent; }
+        QToolTip {
+            background-color:#ffffff; color:#183443;
+            border-color:#7ca7b5;
+        }
+    )TRULIGHT";
 
-    auto brandStack = new QVBoxLayout;
+    QSettings themeSettings("TRUBlockchain", "CoreDesktop");
+    QString initialTheme =
+        themeSettings.value("theme", "dark").toString().trimmed().toLower();
+    if (initialTheme != "light") initialTheme = "dark";
+    setProperty("truTheme", initialTheme);
+    if (initialTheme == "light")
+        setStyleSheet(darkThemeSheet + lightThemeOverrides);
+
+
+    setObjectName("truAppRoot");
+    QTimer::singleShot(0, this, [this] {
+        if (window()) {
+            window()->setWindowTitle("TRU Desktop");
+            window()->setWindowIcon(QIcon(":/tru/assets/tru_logo.png"));
+        }
+    });
+    auto root = new QVBoxLayout(this);
+    root->setContentsMargins(18, 14, 18, 14);
+    root->setSpacing(9);
+    auto brandRow = new QHBoxLayout;
+    brandRow->setSpacing(12);
+
+    auto logo = new QLabel;
+    logo->setObjectName("truLogo");
+    logo->setFixedSize(58, 58);
+    const QPixmap logoPixmap(":/tru/assets/tru_logo.png");
+    if (!logoPixmap.isNull()) {
+        logo->setPixmap(logoPixmap.scaled(
+            logo->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    } else {
+        // Fail visibly instead of silently leaving an empty logo slot.
+        logo->setText("TRU");
+        logo->setAlignment(Qt::AlignCenter);
+        logo->setStyleSheet(
+            "font-size:18px;font-weight:900;color:#6debf3;"
+            "border:1px solid #246680;border-radius:10px;");
+    }
+    brandRow->addWidget(logo, 0, Qt::AlignVCenter);
 
     auto brand = new QLabel("TRU  /  CORE DESKTOP");
     brand->setObjectName("truBrand");
-
-    auto subtitle =
-        new QLabel("MAINNET RPC CONTROL PLANE  //  LOCAL + REMOTE");
-    subtitle->setObjectName("truSubtitle");
-
-    brandStack->addWidget(brand);
-    brandStack->addWidget(subtitle);
-
-    brandRow->addLayout(brandStack);
+    brandRow->addWidget(brand, 0, Qt::AlignVCenter);
     brandRow->addStretch();
 
     auto mainnetBadge = new QLabel("TRU MAINNET");
@@ -390,17 +711,19 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
     securityBadge_ = new QLabel("LOOPBACK / COOKIE");
     securityBadge_->setObjectName("truSecurityBadge");
 
+    auto* themeToggle = new QPushButton(
+        initialTheme == "light" ? "DARK THEME" : "LIGHT THEME");
+    themeToggle->setObjectName("truThemeToggle");
+    themeToggle->setToolTip(
+        "Switch TRU Desktop between dark and light appearance. "
+        "The preference is saved on this computer.");
+
     brandRow->addWidget(mainnetBadge, 0, Qt::AlignVCenter);
     brandRow->addWidget(modeBadge_, 0, Qt::AlignVCenter);
     brandRow->addWidget(securityBadge_, 0, Qt::AlignVCenter);
+    brandRow->addWidget(themeToggle, 0, Qt::AlignVCenter);
 
     root->addLayout(brandRow);
-
-    auto signalRail = new QLabel(
-        "BLOCKCHAIN TELEMETRY  //  PEER MESH  //  MINER NETWORK  //  SECURE RPC"
-    );
-    signalRail->setObjectName("truSignalRail");
-    root->addWidget(signalRail);
 
     connection_ = new QLabel(
         "Configure a local or secure remote TRU node connection."
@@ -420,6 +743,24 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
     peers_ = makeMetric(metrics, "CONNECTED PEERS");
     rate_ = makeMetric(metrics, "REPORTED HASH RATE");
     overviewLayout->addLayout(metrics);
+
+    // UI-08: dashboard-style chain details that are relevant to a wallet user.
+    // These are read-only observations from the connected Core.
+    auto networkMetrics = new QHBoxLayout;
+
+    auto* difficultyValue =
+        makeMetric(networkMetrics, "DIFFICULTY");
+    difficultyValue->setObjectName("truDifficultyValue");
+    difficultyValue->setToolTip(
+        "Current proof-of-work difficulty derived from the connected Core's compact nBits value.");
+
+    auto* coreVersionValue =
+        makeMetric(networkMetrics, "CONNECTED CORE VERSION");
+    coreVersionValue->setObjectName("truCoreVersionValue");
+    coreVersionValue->setToolTip(
+        "Release version reported by the connected TRU Core node.");
+
+    overviewLayout->addLayout(networkMetrics);
     tip_ = new QLabel("Best tip: —");
     tip_->setObjectName("truTip");
     tip_->setTextFormat(Qt::PlainText);
@@ -448,6 +789,14 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
 
     auto tools = new QWidget;
     auto toolsLayout = new QVBoxLayout(tools);
+    auto advancedTitle = new QLabel("ADVANCED CORE TOOLS");
+    advancedTitle->setObjectName("truSectionTitle");
+    auto advancedNote = new QLabel(
+        "Direct RPC workspace for operators and developers. Standard wallet use does not require this panel.");
+    advancedNote->setObjectName("truSourceNote");
+    advancedNote->setWordWrap(true);
+    toolsLayout->addWidget(advancedTitle);
+    toolsLayout->addWidget(advancedNote);
     auto selectors = new QHBoxLayout;
     category_ = new QComboBox;
     operation_ = new QComboBox;
@@ -477,7 +826,7 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
     actions->addStretch();
     actions->addWidget(clear);
     toolsLayout->addLayout(actions);
-    pages_->addTab(tools, "Core tools");
+    pages_->addTab(tools, "Advanced");
     connect(clear, &QPushButton::clicked, output_, &QPlainTextEdit::clear);
     connect(run_, &QPushButton::clicked, this, [this]{ runOperation(); });
     connect(category_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this] {
@@ -507,35 +856,60 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
     remoteMode_ = new QRadioButton("Remote Node");
 
     const QString savedMode =
-        settings.value("connectionMode", "local").toString();
+        settings.value("connectionMode", "remote").toString();
 
     remoteMode_->setChecked(savedMode == "remote");
     localMode_->setChecked(!remoteMode_->isChecked());
+
+    remoteProfile_ = new QComboBox;
+    remoteProfile_->setObjectName("truRemoteProfile");
+    remoteProfile_->addItem(
+        "TRU Public Network (No Core Required)",
+        "public");
+    remoteProfile_->addItem(
+        "Custom Remote Core",
+        "custom");
+
+    const QString savedRemoteProfile =
+        settings.value("remoteProfile", "public").toString();
+    remoteProfile_->setCurrentIndex(
+        savedRemoteProfile == "custom" ? 1 : 0);
 
     modeLayout->addWidget(localMode_);
     modeLayout->addWidget(remoteMode_);
     modeLayout->addStretch();
 
     form->addRow("CONNECTION MODE", modeRow);
+    form->addRow("REMOTE PROFILE", remoteProfile_);
 
     const QString localDefault =
         QString("http://127.0.0.1:%1/rpc")
             .arg(tru_network::MAINNET_RPC_PORT);
 
-    const QString remoteDefault =
+    const QString publicGatewayDefault =
+        QStringLiteral(
+            "https://tokenizedrealutility.com/api/wallet/rpc"
+        );
+
+    const QString customRemoteDefault =
         QStringLiteral(
             "https://node.tokenizedrealutility.com/rpc"
         );
 
+    const bool publicRemoteSelected =
+        remoteMode_->isChecked() &&
+        remoteProfile_->currentData().toString() == "public";
+
     endpoint_ = new QLineEdit(
-        settings.value(
-            remoteMode_->isChecked()
-                ? "remoteEndpoint"
-                : "localEndpoint",
-            remoteMode_->isChecked()
-                ? remoteDefault
-                : localDefault
-        ).toString()
+        remoteMode_->isChecked()
+            ? (publicRemoteSelected
+                ? publicGatewayDefault
+                : settings.value(
+                    "remoteEndpoint",
+                    customRemoteDefault).toString())
+            : settings.value(
+                "localEndpoint",
+                localDefault).toString()
     );
 
     endpoint_->setObjectName("truEndpoint");
@@ -599,9 +973,12 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
         "Local Node connects directly to TRU Core on this "
         "computer using loopback HTTP and may authenticate "
         "with the local RPC cookie or an in-memory token. "
-        "Remote Node requires HTTPS and an explicit session "
-        "access token. Remote cookie files are never used. "
-        "Connection mode and endpoint may be remembered; "
+        "Remote Node can use the fixed TRU Public Network gateway "
+        "without running Core, or an authenticated Custom Remote Core. "
+        "The public gateway is HTTPS, server-allowlisted and never receives "
+        "a Core cookie/session credential. Custom Remote Core requires HTTPS "
+        "and an explicit session access token. Remote cookie files are never used. "
+        "Connection mode/profile and endpoint may be remembered; "
         "access tokens are never written to QSettings. "
         "Wallet passphrases and private keys are never "
         "requested by this Desktop RPC client."
@@ -612,6 +989,46 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
     form->addRow(help);
 
     pages_->addTab(config, "Connection");
+
+    // DESKTOP-WALLET-01: independent local-key wallet.
+    // UI-02 adds only presentation and read-only asset discovery.
+    auto* walletPage = new DesktopWalletWidget(&rpc_, pages_);
+    pages_->insertTab(1, walletPage, "Wallet");
+
+    auto* assetsPage =
+        new DesktopAssetsWidget(&rpc_, walletPage, pages_);
+    pages_->insertTab(2, assetsPage, "Assets");
+
+    auto* aiPage =
+        new DesktopAIWidget(&rpc_, walletPage, pages_);
+    pages_->insertTab(3, aiPage, "AI");
+    aiPage->applyTheme(initialTheme);
+
+    connect(themeToggle, &QPushButton::clicked, this,
+            [this, themeToggle, aiPage, darkThemeSheet, lightThemeOverrides] {
+        const bool currentlyLight =
+            property("truTheme").toString() == "light";
+        const QString next = currentlyLight ? "dark" : "light";
+        setProperty("truTheme", next);
+        setStyleSheet(
+            next == "light"
+                ? darkThemeSheet + lightThemeOverrides
+                : darkThemeSheet);
+        aiPage->applyTheme(next);
+        themeToggle->setText(
+            next == "light" ? "DARK THEME" : "LIGHT THEME");
+        QSettings settings("TRUBlockchain", "CoreDesktop");
+        settings.setValue("theme", next);
+        settings.sync();
+    });
+
+    // Keep consumer-facing pages first; direct RPC remains available
+    // as the Advanced workspace rather than defining the wallet UI.
+    const int configIndex = pages_->indexOf(config);
+    if (configIndex >= 0) {
+        pages_->removeTab(configIndex);
+        pages_->insertTab(4, config, "Connection");
+    }
 
     connect(
         browseCookie_,
@@ -656,6 +1073,16 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
     );
 
     connect(
+        remoteProfile_,
+        QOverload<int>::of(&QComboBox::currentIndexChanged),
+        this,
+        [this](int) {
+            if (remoteMode_->isChecked())
+                updateConnectionMode();
+        }
+    );
+
+    connect(
         testConnection_,
         &QPushButton::clicked,
         this,
@@ -682,8 +1109,21 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
     });
     QString error;
     rpc_.configure(QUrl(endpoint_->text()), cookie_->text(), error);
-    // No automatic connection in constructor: integrated mode supplies its
-    // actual port/token after construction, before the first request.
+
+    // NET-01: a fresh standalone Desktop defaults to the restricted public
+    // gateway so ordinary users can read chain state and use the self-custody
+    // wallet without installing Core. Integrated Core mode immediately calls
+    // useLocalNode() after construction and replaces this transport.
+    if (DesktopRpc::isPublicGatewayEndpoint(rpc_.endpoint())) {
+        refresh_->start();
+        QTimer::singleShot(
+            500,
+            this,
+            [this] {
+                refreshOverview();
+            }
+        );
+    }
 }
 
 void DesktopPanel::useLocalNode(
@@ -721,7 +1161,12 @@ void DesktopPanel::useLocalNode(
 
     // Integrated mode cannot accidentally switch
     // the wallet UI to another Core.
-    pages_->setTabEnabled(2, false);
+    for (int i = 0; i < pages_->count(); ++i) {
+        if (pages_->tabText(i) == "Connection") {
+            pages_->setTabEnabled(i, false);
+            break;
+        }
+    }
 
     refresh_->start();
 
@@ -745,37 +1190,33 @@ void DesktopPanel::updateConnectionMode() {
     const bool remote =
         remoteMode_->isChecked();
 
+    const bool publicGateway =
+        remote &&
+        remoteProfile_->currentData().toString() == "public";
+
     const QString localDefault =
         QString("http://127.0.0.1:%1/rpc")
             .arg(tru_network::MAINNET_RPC_PORT);
 
-    const QString remoteDefault =
+    const QString publicGatewayDefault =
+        QStringLiteral(
+            "https://tokenizedrealutility.com/api/wallet/rpc"
+        );
+
+    const QString customRemoteDefault =
         QStringLiteral(
             "https://node.tokenizedrealutility.com/rpc"
         );
 
-    // Authentication material never crosses connection modes.
+    remoteProfile_->setEnabled(remote);
+
+    // Authentication material never crosses connection profiles.
     rpc_.setSessionToken(QByteArray());
     sessionToken_->clear();
 
     if (remote) {
-        const QString current =
-            endpoint_->text().trimmed();
-
-        if (current.startsWith("http://127.0.0.1") ||
-            current.startsWith("http://localhost") ||
-            current.startsWith("http://[::1]")) {
-
-            endpoint_->setText(
-                settings.value(
-                    "remoteEndpoint",
-                    remoteDefault
-                ).toString()
-            );
-        }
-
         // Preserve the real local cookie path in memory, but make it
-        // visually explicit that remote mode cannot consume it.
+        // visually explicit that remote modes cannot consume it.
         if (cookie_->text() !=
             "Not used in Remote Node mode") {
 
@@ -792,24 +1233,67 @@ void DesktopPanel::updateConnectionMode() {
         cookie_->setEnabled(false);
         browseCookie_->setEnabled(false);
 
-        sessionToken_->setPlaceholderText(
-            "Paste session access token here — session only"
-        );
-
         modeBadge_->setText("REMOTE NODE");
-        securityBadge_->setText(
-            "HTTPS / SESSION TOKEN"
-        );
 
-        connection_->setText(
-            "Remote Node mode  //  TLS transport armed  //  "
-            "session access token required."
-        );
+        if (publicGateway) {
+            endpoint_->setText(publicGatewayDefault);
+            endpoint_->setReadOnly(true);
+
+            sessionToken_->clear();
+            sessionToken_->setEnabled(false);
+            sessionToken_->setPlaceholderText(
+                "Not used — public gateway is server-allowlisted"
+            );
+
+            securityBadge_->setText(
+                "PUBLIC GATEWAY"
+            );
+
+            connection_->setText(
+                "Remote Node · TRU Public Network · "
+                "restricted self-custody gateway · no local Core required."
+            );
+        } else {
+            const QString current =
+                endpoint_->text().trimmed();
+
+            if (current.isEmpty() ||
+                DesktopRpc::isPublicGatewayEndpoint(QUrl(current)) ||
+                current.startsWith("http://127.0.0.1") ||
+                current.startsWith("http://localhost") ||
+                current.startsWith("http://[::1]")) {
+
+                endpoint_->setText(
+                    settings.value(
+                        "remoteEndpoint",
+                        customRemoteDefault
+                    ).toString()
+                );
+            }
+
+            endpoint_->setReadOnly(false);
+
+            sessionToken_->setEnabled(true);
+            sessionToken_->setPlaceholderText(
+                "Paste session access token here — session only"
+            );
+
+            securityBadge_->setText(
+                "HTTPS / SESSION TOKEN"
+            );
+
+            connection_->setText(
+                "Remote Node · Custom Remote Core · "
+                "TLS transport · session access token required."
+            );
+        }
 
     } else {
-        if (endpoint_->text()
-                .trimmed()
-                .startsWith("https://")) {
+        const QString current =
+            endpoint_->text().trimmed();
+
+        if (current.startsWith("https://") ||
+            current.isEmpty()) {
 
             endpoint_->setText(
                 settings.value(
@@ -818,6 +1302,8 @@ void DesktopPanel::updateConnectionMode() {
                 ).toString()
             );
         }
+
+        endpoint_->setReadOnly(false);
 
         QString localCookie =
             cookie_->property(
@@ -846,6 +1332,7 @@ void DesktopPanel::updateConnectionMode() {
         cookie_->setEnabled(true);
         browseCookie_->setEnabled(true);
 
+        sessionToken_->setEnabled(true);
         sessionToken_->setPlaceholderText(
             "Optional — local cookie may authenticate instead"
         );
@@ -856,9 +1343,24 @@ void DesktopPanel::updateConnectionMode() {
         );
 
         connection_->setText(
-            "Local Node mode  //  loopback transport  //  "
+            "Local Node mode · loopback transport · "
             "TRU Core on this computer."
         );
+    }
+
+    // Public gateway exposes only the reviewed self-custody wallet surface.
+    // Operator RPC workspace remains available for Local Node and authenticated
+    // Custom Remote Core connections.
+    for (int i = 0; i < pages_->count(); ++i) {
+        if (pages_->tabText(i) == "Advanced") {
+            pages_->setTabEnabled(i, !publicGateway);
+            pages_->setTabToolTip(
+                i,
+                publicGateway
+                    ? "Advanced Core Tools are unavailable through the restricted TRU Public Network gateway."
+                    : QString());
+            break;
+        }
     }
 }
 
@@ -869,13 +1371,16 @@ void DesktopPanel::testConnection() {
         endpoint_->text().trimmed()
     );
 
-    if (remoteMode_->isChecked() &&
+    const bool publicGateway =
+        DesktopRpc::isPublicGatewayEndpoint(endpoint);
+
+    if (DesktopRpc::requiresSessionToken(endpoint) &&
         sessionToken_->text()
             .trimmed()
             .isEmpty()) {
 
         connection_->setText(
-            "Remote Node requires a session access token."
+            "Custom Remote Core requires a session access token."
         );
 
         return;
@@ -889,7 +1394,7 @@ void DesktopPanel::testConnection() {
 
     if (!probe->configure(
             endpoint,
-            remoteMode_->isChecked()
+            DesktopRpc::isRemoteEndpoint(endpoint)
                 ? QString()
                 : cookie_->text().trimmed(),
             error)) {
@@ -900,7 +1405,9 @@ void DesktopPanel::testConnection() {
     }
 
     probe->setSessionToken(
-        sessionToken_->text().toUtf8()
+        publicGateway
+            ? QByteArray()
+            : sessionToken_->text().toUtf8()
     );
 
     connection_->setText(
@@ -911,9 +1418,9 @@ void DesktopPanel::testConnection() {
     connectButton_->setEnabled(false);
 
     probe->call(
-        "getinfo",
+        "getdesktopinfo",
         "{}",
-        [this, probe, endpoint](
+        [this, probe, endpoint, publicGateway](
             const QJsonValue& value,
             const QByteArray&,
             const QString& error) {
@@ -921,7 +1428,7 @@ void DesktopPanel::testConnection() {
             testConnection_->setEnabled(true);
             connectButton_->setEnabled(true);
 
-            // Explicitly erase the probe token before disposal.
+            // Explicitly erase any probe token before disposal.
             probe->setSessionToken(QByteArray());
             probe->deleteLater();
 
@@ -938,9 +1445,11 @@ void DesktopPanel::testConnection() {
                 value.toObject();
 
             const QString mode =
-                DesktopRpc::isRemoteEndpoint(endpoint)
-                    ? "Remote Node"
-                    : "Local Node";
+                publicGateway
+                    ? "TRU Public Network"
+                    : (DesktopRpc::isRemoteEndpoint(endpoint)
+                        ? "Custom Remote Core"
+                        : "Local Node");
 
             connection_->setText(
                 "Connection test passed · " +
@@ -959,13 +1468,16 @@ void DesktopPanel::applyConnection() {
         endpoint_->text().trimmed()
     );
 
-    if (remoteMode_->isChecked() &&
+    const bool publicGateway =
+        DesktopRpc::isPublicGatewayEndpoint(endpoint);
+
+    if (DesktopRpc::requiresSessionToken(endpoint) &&
         sessionToken_->text()
             .trimmed()
             .isEmpty()) {
 
         connection_->setText(
-            "Remote Node requires a session access token."
+            "Custom Remote Core requires a session access token."
         );
 
         return;
@@ -975,7 +1487,7 @@ void DesktopPanel::applyConnection() {
 
     if (!rpc_.configure(
             endpoint,
-            remoteMode_->isChecked()
+            DesktopRpc::isRemoteEndpoint(endpoint)
                 ? QString()
                 : cookie_->text().trimmed(),
             error)) {
@@ -985,7 +1497,9 @@ void DesktopPanel::applyConnection() {
     }
 
     rpc_.setSessionToken(
-        sessionToken_->text().toUtf8()
+        publicGateway
+            ? QByteArray()
+            : sessionToken_->text().toUtf8()
     );
 
     // The visible secret is removed immediately.
@@ -1003,10 +1517,20 @@ void DesktopPanel::applyConnection() {
             "remote"
         );
 
+        const QString profile =
+            publicGateway ? "public" : "custom";
+
         settings.setValue(
-            "remoteEndpoint",
-            endpoint_->text()
+            "remoteProfile",
+            profile
         );
+
+        if (!publicGateway) {
+            settings.setValue(
+                "remoteEndpoint",
+                endpoint_->text()
+            );
+        }
 
     } else {
         settings.setValue(
@@ -1033,24 +1557,54 @@ void DesktopPanel::applyConnection() {
 void DesktopPanel::refreshOverview() {
     if (overviewPending_) return;
     overviewPending_ = true;
-    rpc_.call("getinfo", "{}", [this](const QJsonValue& value, const QByteArray&, const QString& error) {
+    rpc_.call("getdesktopinfo", "{}", [this](const QJsonValue& value, const QByteArray&, const QString& error) {
         if (!error.isEmpty()) {
             overviewPending_ = false;
             connection_->setText("Disconnected / stale: " + error);
             height_->setText("—"); peers_->setText("—"); rate_->setText("—");
+            if (auto* difficulty =
+                    findChild<QLabel*>("truDifficultyValue")) {
+                difficulty->setText("—");
+            }
+            if (auto* coreVersion =
+                    findChild<QLabel*>("truCoreVersionValue")) {
+                coreVersion->setText("—");
+            }
             tip_->setText("Best tip: unavailable"); miners_->setRowCount(0);
             return;
         }
         auto obj = value.toObject();
         height_->setText(readable(obj.value("blocks")));
         peers_->setText(readable(obj.value("connections")));
+
+        if (auto* difficulty =
+                findChild<QLabel*>("truDifficultyValue")) {
+            const std::uint32_t bits =
+                static_cast<std::uint32_t>(
+                    obj.value("difficulty").toVariant().toULongLong());
+            difficulty->setText(formatDifficulty(bits));
+            difficulty->setToolTip(
+                "Compact target: " +
+                obj.value("difficultyhex").toString("—"));
+        }
+
+        if (auto* coreVersion =
+                findChild<QLabel*>("truCoreVersionValue")) {
+            coreVersion->setText(
+                formatCoreVersion(
+                    obj.value("version").toString()));
+        }
+
         tip_->setText("Best tip: " + obj.value("bestblockhash").toString());
         const QString connectionMode =
-            DesktopRpc::isRemoteEndpoint(
+            DesktopRpc::isPublicGatewayEndpoint(
                 rpc_.endpoint()
             )
-                ? "Remote Node"
-                : "Local Node";
+                ? "TRU Public Network"
+                : (DesktopRpc::isRemoteEndpoint(
+                        rpc_.endpoint())
+                    ? "Custom Remote Core"
+                    : "Local Node");
 
         connection_->setText(
             "Connected · " +

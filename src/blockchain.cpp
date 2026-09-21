@@ -22879,15 +22879,34 @@ void Blockchain::startExplorerServer(int port, int rpcPort) {
     };
 
     const std::unordered_set<std::string> walletGatewayMethods = {
-        "getblockcount", "getchaininfo", "listunspentWeb", "getaddresstransactions",
-        "gettransaction", "gettxout", "getrawmempool", "getmempooltransactions",
-        "listtransactions", "listmempooltransactions", "gettokenmetadata", "gettokenutxo", "getcontracts",
-        "getDIDMapping", "registerDIDSigned",
-        "listmagiclocks", "verifytokenmetadata", "verifytokenevolution", "decoderawtransaction",
-        "getpeerinfo", "getminingleaderboard",
-        "createrawtransaction", "createsendtokentransaction", "createburntokentransaction", "createcontracttransaction",
-        "createTransferTRUScriptTransaction", "sendrawtransaction", "sendrawtransactionWeb",
+        // Desktop/public chain + wallet observation. getdesktopinfo is the
+        // wallet-safe replacement for getinfo: it contains no Core-wallet
+        // address or Core-wallet balance.
+        "getdesktopinfo", "getblockcount", "getchaininfo", "getallminers",
+        "listunspentWeb", "getaddresstransactions", "gettransaction", "gettxout",
+        "getrawmempool", "getmempooltransactions", "listtransactions",
+        "listmempooltransactions", "decoderawtransaction",
+
+        // Self-custody token / TRUScript / DID reads and unsigned builders.
+        "tokenmetadisplay", "gettokenmetadata", "gettokenutxo", "getTRUScripts",
+        "getTRUScriptDetails", "getcontracts", "getDIDMapping", "registerDIDSigned",
+        "listmagiclocks", "verifytokenmetadata", "verifytokenevolution",
+        "createrawtransaction", "createsendtokentransaction",
+        "createburntokentransaction", "createcontracttransaction",
+        "createTransferTRUScriptTransaction",
+
+        // The public gateway accepts only already-signed transaction/asset
+        // submissions for Desktop self-custody flows.
+        "sendrawtransaction", "sendrawtransactionWeb",
         "issuetokensigned", "inscribeTRUScriptSigned",
+
+        // AI/Living Token read, provider test, preview and signed owner commit.
+        // Provider configuration itself is intentionally NOT public.
+        "getAIProviders", "getAITokenState", "testAIProvider",
+        "previewtokenevolution", "committokenevolutionsigned",
+
+        // Existing public mining compatibility.
+        "getpeerinfo", "getminingleaderboard",
         "getblocktemplate", "submitblock", "reportmineractivity"
     };
 
@@ -22897,9 +22916,11 @@ void Blockchain::startExplorerServer(int port, int rpcPort) {
     };
 
     const std::unordered_set<std::string> highCostGatewayMethods = {
-        "submitblock", "sendrawtransaction", "sendrawtransactionWeb", "issuetokensigned",
-        "registerDIDSigned", "inscribeTRUScriptSigned", "createcontracttransaction", "createsendtokentransaction",
-        "createburntokentransaction", "createTransferTRUScriptTransaction"
+        "submitblock", "sendrawtransaction", "sendrawtransactionWeb",
+        "issuetokensigned", "registerDIDSigned", "inscribeTRUScriptSigned",
+        "createcontracttransaction", "createsendtokentransaction",
+        "createburntokentransaction", "createTransferTRUScriptTransaction",
+        "testAIProvider", "previewtokenevolution", "committokenevolutionsigned"
     };
 
     const auto gatewayForward = [rpcPort, consumeGatewayBudget, highCostGatewayMethods](

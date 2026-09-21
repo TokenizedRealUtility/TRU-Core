@@ -304,6 +304,18 @@ add_executable(tru_advanced
     ${COMMON_HEADERS}
 )
 
+
+# TRU Core v0.06 desktop widget link closure
+# DesktopPanel instantiates these widgets only in Qt-enabled Core builds.
+if(BUILD_WITH_QT)
+    target_sources(tru_advanced PRIVATE
+        src/desktop_assets_widget.cpp
+        src/desktop_assets_widget.h
+        src/desktop_ai_widget.cpp
+        src/desktop_ai_widget.h
+    )
+endif()
+
 if(TRU_08B3T_TEST_HOOKS)
     target_compile_definitions(tru_advanced PRIVATE TRU_08B3T_TEST_HOOKS=1)
     message(STATUS "TRU 08B.3T local test hooks: COMPILED IN (development build)")

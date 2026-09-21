@@ -18,6 +18,8 @@ public:
     static QString defaultCookiePath(int port);
     static bool validEndpoint(const QUrl& endpoint);
     static bool isRemoteEndpoint(const QUrl& endpoint);
+    static bool isPublicGatewayEndpoint(const QUrl& endpoint);
+    static bool requiresSessionToken(const QUrl& endpoint);
     static QByteArray requestBody(int id, const QString& method, const QByteArray& params);
 private:
     QNetworkAccessManager network_;

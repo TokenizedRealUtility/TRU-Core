@@ -36,15 +36,40 @@ bool DesktopRpc::isRemoteEndpoint(const QUrl& url) {
         host != "localhost";
 }
 
-bool DesktopRpc::validEndpoint(const QUrl& url) {
+bool DesktopRpc::isPublicGatewayEndpoint(const QUrl& url) {
     if (!url.isValid() ||
-        url.host().isEmpty() ||
-        url.path() != "/rpc" ||
+        url.scheme().toLower() != "https" ||
+        url.host().toLower() != "tokenizedrealutility.com" ||
+        url.path() != "/api/wallet/rpc" ||
         !url.userInfo().isEmpty() ||
         url.hasQuery() ||
         url.hasFragment()) {
         return false;
     }
+
+    const int port = url.port(-1);
+    return port == -1 || port == 443;
+}
+
+bool DesktopRpc::requiresSessionToken(const QUrl& url) {
+    return isRemoteEndpoint(url) &&
+           !isPublicGatewayEndpoint(url);
+}
+
+bool DesktopRpc::validEndpoint(const QUrl& url) {
+    if (!url.isValid() ||
+        url.host().isEmpty() ||
+        !url.userInfo().isEmpty() ||
+        url.hasQuery() ||
+        url.hasFragment()) {
+        return false;
+    }
+
+    if (isPublicGatewayEndpoint(url))
+        return true;
+
+    if (url.path() != "/rpc")
+        return false;
 
     const int explicitPort = url.port(-1);
 
@@ -65,8 +90,8 @@ bool DesktopRpc::validEndpoint(const QUrl& url) {
         return url.scheme() == "http" &&
                explicitPort >= 1;
 
-    // Remote Desktop RPC is TLS-only.
-    // Standard HTTPS may use implicit port 443.
+    // Custom Remote Core is TLS-only and retains the explicit
+    // in-memory session-token requirement.
     return url.scheme() == "https";
 }
 
@@ -82,12 +107,19 @@ bool DesktopRpc::configure(const QUrl& endpoint,
         error =
             "Local nodes must use "
             "http://127.0.0.1:<port>/rpc. "
-            "Remote nodes must use "
-            "https://<host>/rpc.";
+            "Custom remote nodes must use "
+            "https://<host>/rpc. "
+            "The TRU Public Network uses the fixed "
+            "https://tokenizedrealutility.com/api/wallet/rpc gateway.";
         return false;
     }
 
     endpoint_ = endpoint;
+
+    if (isPublicGatewayEndpoint(endpoint_)) {
+        token_.fill('\0');
+        token_.clear();
+    }
 
     // Filesystem RPC cookies are local-Core credentials only.
     cookieFile_ = isRemoteEndpoint(endpoint)
@@ -121,10 +153,15 @@ void DesktopRpc::call(const QString& method, const QByteArray& params, Callback 
     if (params.size() > 8 * 1024 * 1024 || parseError.error != QJsonParseError::NoError || !parsed.isObject()) {
         fail("Parameters must be a JSON object of at most 8 MiB."); return;
     }
-    QByteArray token = token_;
+    const bool publicGateway =
+        isPublicGatewayEndpoint(endpoint_);
+    QByteArray token =
+        publicGateway ? QByteArray() : token_;
 
     // Environment and cookie fallback remain local-only.
-    // Remote RPC requires an explicit in-memory session token.
+    // Custom Remote Core retains explicit in-memory session-token auth.
+    // The fixed TRU Public Network gateway intentionally receives NO Core
+    // credential; its server-side allowlist is the authorization boundary.
     if (!isRemoteEndpoint(endpoint_)) {
         if (token.isEmpty())
             token = qgetenv("TRU_RPC_TOKEN").trimmed();
@@ -149,19 +186,26 @@ void DesktopRpc::call(const QString& method, const QByteArray& params, Callback 
 
             token = cookie.readAll().trimmed();
         }
-    } else if (token.isEmpty()) {
-        fail("Remote RPC requires a session access token.");
+    } else if (requiresSessionToken(endpoint_) &&
+               token.isEmpty()) {
+        fail("Custom Remote Core requires a session access token.");
         return;
     }
 
-    if (token.size() < 32 || token.size() > 512 || token.contains('\r') || token.contains('\n')) {
-        fail("RPC token must be 32–512 characters without line breaks."); return;
+    if (!token.isEmpty() &&
+        (token.size() < 32 ||
+         token.size() > 512 ||
+         token.contains('\r') ||
+         token.contains('\n'))) {
+        fail("RPC token must be 32–512 characters without line breaks.");
+        return;
     }
     if (nextId_ == INT_MAX) nextId_ = 1;
     const int id = nextId_++;
     QNetworkRequest request(endpoint_);
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
-    request.setRawHeader("Authorization", "Bearer " + token);
+    if (!token.isEmpty())
+        request.setRawHeader("Authorization", "Bearer " + token);
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
     auto reply = network_.post(request, requestBody(id, method, params));
     token.fill('\0');
@@ -178,7 +222,7 @@ void DesktopRpc::call(const QString& method, const QByteArray& params, Callback 
             reply->setProperty("truOversize", true); reply->abort();
         }
     });
-    connect(reply, &QNetworkReply::finished, this, [this, reply, timer, body, callback, id] {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, timer, body, callback, id, publicGateway] {
         timer->stop();
         --pending_;
         body->append(reply->readAll());
@@ -189,7 +233,10 @@ void DesktopRpc::call(const QString& method, const QByteArray& params, Callback 
         const auto doc = QJsonDocument::fromJson(*body, &pe);
         if (reply->property("truTimeout").toBool()) error = "Request timed out. A submitted operation may have completed; inspect the node before retrying.";
         else if (reply->property("truOversize").toBool()) error = "Response exceeded 20 MiB; narrow the query.";
-        else if (status == 401 || status == 403) error = "RPC authentication refused. Verify the selected cookie or session token.";
+        else if ((status == 401 || status == 403) && publicGateway)
+            error = "TRU Public Network refused this RPC method or request.";
+        else if (status == 401 || status == 403)
+            error = "RPC authentication refused. Verify the selected cookie or session token.";
         else if (status == 429) error = "Node is rate limiting requests. Wait before retrying.";
         else if (status != 200 || reply->error() != QNetworkReply::NoError)
             error = QString("RPC transport failed (HTTP %1): %2. Submission outcome may be unknown.").arg(status).arg(reply->errorString());

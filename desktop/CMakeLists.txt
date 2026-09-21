@@ -15,14 +15,51 @@ else()
     message(FATAL_ERROR "TRU_DESKTOP_QT_MAJOR must be 5 or 6")
 endif()
 set(_tru_qt "Qt${TRU_DESKTOP_QT_MAJOR}")
+
+# DESKTOP-WALLET-01 crypto/storage dependencies.
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+find_path(TRU_SODIUM_INCLUDE_DIR NAMES sodium.h)
+find_library(TRU_SODIUM_LIBRARY NAMES sodium libsodium)
+find_path(TRU_WALLY_INCLUDE_DIR NAMES wally_bip32.h)
+find_library(TRU_WALLY_LIBRARY NAMES wallycore wally)
+find_path(TRU_QRENCODE_INCLUDE_DIR NAMES qrencode.h)
+find_library(TRU_QRENCODE_LIBRARY NAMES qrencode libqrencode)
+
+if(NOT TRU_SODIUM_INCLUDE_DIR OR NOT TRU_SODIUM_LIBRARY)
+    message(FATAL_ERROR "DESKTOP-WALLET-01 requires libsodium headers/library")
+endif()
+if(NOT TRU_WALLY_INCLUDE_DIR OR NOT TRU_WALLY_LIBRARY)
+    message(FATAL_ERROR "DESKTOP-WALLET-01 requires libwally-core headers/library")
+endif()
+if(NOT TRU_QRENCODE_INCLUDE_DIR OR NOT TRU_QRENCODE_LIBRARY)
+    message(FATAL_ERROR "TRU Desktop QR support requires libqrencode headers/library")
+endif()
 get_filename_component(TRU_DESKTOP_SRC "${CMAKE_CURRENT_LIST_DIR}/../src" ABSOLUTE)
 add_executable(tru_desktop WIN32
     "${TRU_DESKTOP_SRC}/desktop_main.cpp"
     "${TRU_DESKTOP_SRC}/desktop_panel.cpp"
-    "${TRU_DESKTOP_SRC}/desktop_rpc.cpp")
-target_include_directories(tru_desktop PRIVATE "${TRU_DESKTOP_SRC}")
-target_link_libraries(tru_desktop PRIVATE ${_tru_qt}::Widgets ${_tru_qt}::Network)
+    "${TRU_DESKTOP_SRC}/desktop_rpc.cpp"
+    "${TRU_DESKTOP_SRC}/desktop_wallet_core.cpp"
+    "${TRU_DESKTOP_SRC}/desktop_wallet_widget.cpp"
+    "${TRU_DESKTOP_SRC}/desktop_assets_widget.cpp"
+    "${TRU_DESKTOP_SRC}/desktop_ai_widget.cpp"
+    "${TRU_DESKTOP_SRC}/wallet_encryption_v1.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/assets/tru_desktop.qrc")
+target_include_directories(tru_desktop PRIVATE
+    "${TRU_DESKTOP_SRC}"
+    "${TRU_SODIUM_INCLUDE_DIR}"
+    "${TRU_WALLY_INCLUDE_DIR}"
+    "${TRU_QRENCODE_INCLUDE_DIR}")
+target_link_libraries(tru_desktop PRIVATE
+    ${_tru_qt}::Widgets
+    ${_tru_qt}::Network
+    OpenSSL::Crypto
+    "${TRU_SODIUM_LIBRARY}"
+    "${TRU_WALLY_LIBRARY}"
+    "${TRU_QRENCODE_LIBRARY}")
 set_target_properties(tru_desktop PROPERTIES
+    AUTOMOC ON
+    AUTORCC ON
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 if(MINGW)
     target_compile_definitions(tru_desktop PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
@@ -63,4 +100,18 @@ if(TRU_DESKTOP_TESTS)
     target_link_libraries(tru_desktop_transport_test PRIVATE ${_tru_qt}::Network ${_tru_qt}::Test)
     target_include_directories(tru_desktop_transport_test PRIVATE "${TRU_DESKTOP_SRC}")
     add_test(NAME desktop_transport COMMAND tru_desktop_transport_test)
+
+    add_executable(tru_desktop_wallet_test
+        "${TRU_DESKTOP_SRC}/desktop_wallet_test.cpp"
+        "${TRU_DESKTOP_SRC}/desktop_wallet_core.cpp"
+        "${TRU_DESKTOP_SRC}/wallet_encryption_v1.cpp")
+    target_include_directories(tru_desktop_wallet_test PRIVATE
+        "${TRU_DESKTOP_SRC}"
+        "${TRU_SODIUM_INCLUDE_DIR}"
+        "${TRU_WALLY_INCLUDE_DIR}")
+    target_link_libraries(tru_desktop_wallet_test PRIVATE
+        OpenSSL::Crypto
+        "${TRU_SODIUM_LIBRARY}"
+        "${TRU_WALLY_LIBRARY}")
+    add_test(NAME desktop_wallet COMMAND tru_desktop_wallet_test)
 endif()

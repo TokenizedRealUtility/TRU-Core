@@ -31,7 +31,7 @@ private:
     QRadioButton *localMode_, *remoteMode_;
     QPushButton *browseCookie_, *testConnection_, *connectButton_;
     QLabel *connection_, *height_, *peers_, *rate_, *tip_, *operationHelp_, *modeBadge_, *securityBadge_;
-    QComboBox *category_, *operation_;
+    QComboBox *category_, *operation_, *remoteProfile_;
     QPlainTextEdit *params_, *output_;
     QPushButton *run_;
     QTableWidget *miners_;

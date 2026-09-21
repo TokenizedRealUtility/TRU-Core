@@ -34,13 +34,14 @@
 #include <sstream>  // WEB-MINER-01 canonical browser coinbase tag
 #include <limits>
 #include <unordered_map>
-#include <unordered_set>   // template double-spend guard
+#include <unordered_set>   // FIX(patch48): template double-spend guard
 #include <chrono>
 #include "ai_provider_interface.h"
 #include "ai_oracle_service.h"
 #include "token_evolution.h"  // TOKEN-AI-02D live provenance verifier
 #include "tru_network_params.h"
 #include "tru_amount.h"
+#include "tru_version.h"  // UI-08 connected Core release version
 
 using json = nlohmann::json;
 httplib::Server g_rpcServer;
@@ -1290,7 +1291,24 @@ static json handleCreateSendTokenTransaction(Blockchain &chain, const json &para
 
     try {
         std::string tokenID = params["tokenID"].get<std::string>();
-        const uint64_t amount = params["amount"].get<uint64_t>();
+        uint64_t amount = 0;
+        if (params["amount"].is_string()) {
+            const std::string raw = params["amount"].get<std::string>();
+            if (raw.empty() ||
+                !std::all_of(
+                    raw.begin(), raw.end(),
+                    [](unsigned char c) { return std::isdigit(c) != 0; }))
+                return makeError(-32602, "Token amount must be unsigned integer text");
+            try {
+                amount = std::stoull(raw);
+            } catch (...) {
+                return makeError(-32602, "Token amount is outside uint64 range");
+            }
+        } else if (params["amount"].is_number_unsigned()) {
+            amount = params["amount"].get<uint64_t>();
+        } else {
+            return makeError(-32602, "Token amount must be exact unsigned integer units");
+        }
         const std::string recipient = params["recipient"].get<std::string>();
         const std::string sender = params["senderAddress"].get<std::string>();
         const json feeJson = params["feeUtxo"];
@@ -1527,15 +1545,40 @@ static json handleCreateSendTokenTransaction(Blockchain &chain, const json &para
             "[handleCreateSendTokenTransaction][WEB2B] metadata attached BEFORE signing: " +
             tx.txid);
 
+        UTXO tokenControl;
+        if (!chain.utxoSet.getUTXO(tokenTxid, tokenVout, tokenControl))
+            return makeError(
+                -32000,
+                "Selected token control disappeared before unsigned build response");
+
+        const json signingInputs = json::array({
+            json{
+                {"txid", tokenTxid},
+                {"vout", tokenVout},
+                {"amount_atoms", std::to_string(tokenControl.amount)},
+                {"scriptPubKey", tokenControl.scriptPubKey}
+            },
+            json{
+                {"txid", feeTxid},
+                {"vout", feeVout},
+                {"amount_atoms", std::to_string(feeUtxo.amount)},
+                {"scriptPubKey", feeUtxo.scriptPubKey}
+            }
+        });
+
         return makeResult(id, json{
             {"success", true},
             {"unsignedTxHex", bytesToHex(tx.serializeBinary())},
+            {"txid", tx.txid},
             {"tokenID", tokenID},
+            {"from", sender},
+            {"to", recipient},
             {"selectedTokenTxid", tokenTxid},
             {"selectedTokenVout", tokenVout},
-            {"selectedTokenAmount", tokenAmount},
-            {"transferAmount", amount},
-            {"remainder", remainder},
+            {"selectedTokenAmount", std::to_string(tokenAmount)},
+            {"transferAmount", std::to_string(amount)},
+            {"remainder", std::to_string(remainder)},
+            {"signingInputs", signingInputs},
             {"metadataAttachedBeforeSigning", true}
         });
     } catch (const std::exception& e) {
@@ -3127,12 +3170,23 @@ static json handleCreateTransferTRUScriptTransaction(
 
         tx.computeTxId();
 
+        const json signingInputs = json::array({
+            json{
+                {"txid", feeTxid},
+                {"vout", feeVout},
+                {"amount_atoms", std::to_string(feeUtxo.amount)},
+                {"scriptPubKey", feeUtxo.scriptPubKey}
+            }
+        });
+
         return makeResult(id, json{
             {"success", true},
             {"unsignedTxHex", bytesToHex(tx.serializeBinary())},
+            {"txid", tx.txid},
             {"inscriptionTxid", inscriptionTxid},
             {"from", sender},
-            {"to", recipient}
+            {"to", recipient},
+            {"signingInputs", signingInputs}
         });
     } catch (const std::exception& e) {
         Logger::log(
@@ -3445,28 +3499,90 @@ static json handleTokenMetadataDisplay(Blockchain& chain, const json& params, in
                 return;
             }
 
-            // Fetch metadata
-            std::string metaKey = "tokenMetadata:" + txid;
-            std::string metaValue;
-            if (!storage->getWithDataChecksum(metaKey, metaValue)) {
-                Logger::log("[handleTokenMetadataDisplay] No metadata for " + metaKey);
-                return;
+            // TRU DESKTOP-ASSETS-01 — resolve current token state separately
+            // from display metadata. A transfer may create a new tokenUTXO
+            // without creating tokenMetadata:<transfer-txid>. The explorer
+            // already resolves metadata current-first and issuance-second.
+            // Keep token ownership/state visible even when display metadata
+            // is absent.
+            json tokenState = json::object();
+            {
+                std::string tokenStateRaw;
+                const std::string tokenStateKey =
+                    "tokenUTXO:" + txid + ":" + voutStr;
+                if (storage->getWithDataChecksum(tokenStateKey, tokenStateRaw)) {
+                    try {
+                        tokenState = json::parse(tokenStateRaw);
+                    } catch (const std::exception& e) {
+                        Logger::log(
+                            "[handleTokenMetadataDisplay] Error parsing current token state for " +
+                            tokenStateKey + ": " + e.what());
+                    }
+                } else {
+                    Logger::log(
+                        "[handleTokenMetadataDisplay] No current token state for " +
+                        tokenStateKey + "; continuing with ownership index");
+                }
             }
 
-            try {
-                json metaJson = json::parse(metaValue);
-                result.push_back({
-                    {"tokenID", tokenID},
-                    {"type", metaJson.value("type", "Unknown")},
-                    {"amount", metaJson.value("amount", "0")},
-                    {"owner", owner},
-                    {"txid", txid},
-                    {"vout", vout},
-                    {"meta", metaJson.value("meta", json::object())}
-                });
-            } catch (const std::exception& e) {
-                Logger::log("[handleTokenMetadataDisplay] Error parsing metadata for " + metaKey + ": " + e.what());
+            json metaJson = json::object();
+            std::string metaValue;
+            std::string metaKey = "tokenMetadata:" + txid;
+            bool haveMeta =
+                storage->getWithDataChecksum(metaKey, metaValue);
+
+            if (!haveMeta) {
+                std::string issuanceTxid;
+                if (storage->getWithDataChecksum(
+                        "tokenIssuance:" + tokenID, issuanceTxid) &&
+                    !issuanceTxid.empty()) {
+                    metaKey = "tokenMetadata:" + issuanceTxid;
+                    haveMeta =
+                        storage->getWithDataChecksum(metaKey, metaValue);
+                    if (haveMeta) {
+                        Logger::log(
+                            "[handleTokenMetadataDisplay] Resolved metadata via issuance for token " +
+                            tokenID + " using " + metaKey);
+                    }
+                }
             }
+
+            if (haveMeta) {
+                try {
+                    metaJson = json::parse(metaValue);
+                } catch (const std::exception& e) {
+                    Logger::log(
+                        "[handleTokenMetadataDisplay] Error parsing metadata for " +
+                        metaKey + ": " + e.what());
+                    metaJson = json::object();
+                }
+            } else {
+                Logger::log(
+                    "[handleTokenMetadataDisplay] No metadata found for token " +
+                    tokenID + "; returning current holding without display metadata");
+            }
+
+            std::string displayType =
+                tokenState.value(
+                    "type",
+                    metaJson.value("type", std::string("Unknown")));
+
+            json displayAmount = "0";
+            if (tokenState.contains("amount")) {
+                displayAmount = tokenState["amount"];
+            } else if (metaJson.contains("amount")) {
+                displayAmount = metaJson["amount"];
+            }
+
+            result.push_back({
+                {"tokenID", tokenID},
+                {"type", displayType},
+                {"amount", displayAmount},
+                {"owner", owner},
+                {"txid", txid},
+                {"vout", vout},
+                {"meta", metaJson.value("meta", json::object())}
+            });
         });
 
         // Handle TRUScript inscriptions
@@ -5230,6 +5346,8 @@ static json handleListUnspent(Blockchain &chain, const json &p, int id) {
             {"address", addr},
             {"scriptPubKey", scr},
             {"amount", amt},
+            {"amount_tru", tru_amount::formatNumeric(amount)},
+            {"amount_atoms", amount},
             {"confirmations", conf},
             {"spendable", spendable}
         });
@@ -7648,10 +7766,588 @@ static json handleVerifyTokenEvolution(
 }
 
 //========================================================================
+//         Desktop signed token-evolution preview / exact commit
+//========================================================================
+// UI-06 exposes the already-hardened TokenEvolutionEngine to a standalone
+// Desktop wallet without giving Core any wallet private key.
+//
+// Preview is read/provider work only. Commit requires a signature from the
+// current confirmed owner over the exact preview record hash. The commit path
+// then re-checks parent state, confirmed anchor state, ownership and no-op
+// status before calling persistPreview() on that exact record.
+
+static std::string desktopEvolutionSha256Hex(const std::string& text) {
+    unsigned char digest[SHA256_DIGEST_LENGTH];
+    SHA256(
+        reinterpret_cast<const unsigned char*>(text.data()),
+        text.size(),
+        digest);
+    return bytesToHex(std::vector<unsigned char>(
+        digest, digest + SHA256_DIGEST_LENGTH));
+}
+
+static std::string desktopEvolutionCommitMessage(
+    const std::string& tokenID,
+    const std::string& owner,
+    const std::string& recordJson)
+{
+    return std::string("TRU-TOKEN-EVOLUTION-COMMIT-V1\n") +
+        "network=TRUMain\n" +
+        "tokenID=" + tokenID + "\n" +
+        "owner=" + owner + "\n" +
+        "record_sha256=" + desktopEvolutionSha256Hex(recordJson) + "\n";
+}
+
+static bool desktopEvolutionConfirmedOwner(
+    Blockchain& chain,
+    LevelDBStorage& db,
+    const std::string& tokenID,
+    const std::string& owner,
+    std::string& reason)
+{
+    reason.clear();
+    bool found = false;
+    const std::string prefix =
+        "tokenOwnerUTXO:" + tokenID + ":" + owner + ":";
+
+    db.iteratePrefix(
+        prefix,
+        [&](const std::string& suffix, const std::string&) {
+            if (found) return;
+            try {
+                const std::size_t colon = suffix.rfind(':');
+                if (colon == std::string::npos) return;
+                const std::string txid = suffix.substr(0, colon);
+                const uint32_t vout = static_cast<uint32_t>(
+                    std::stoul(suffix.substr(colon + 1)));
+
+                UTXO control;
+                if (!chain.utxoSet.getUTXO(txid, vout, control))
+                    return;
+                if (chain.mempool &&
+                    chain.mempool->isUTXOSpentInMempool(txid, vout))
+                    return;
+
+                std::string raw;
+                if (!db.getWithDataChecksum(
+                        "tokenUTXO:" + txid + ":" +
+                            std::to_string(vout),
+                        raw))
+                    return;
+
+                const json state = json::parse(raw);
+                if (state.value("tokenID", "") != tokenID ||
+                    state.value("owner", "") != owner)
+                    return;
+
+                uint64_t amount = 0;
+                if (state.contains("amount") &&
+                    state["amount"].is_string()) {
+                    amount =
+                        std::stoull(state["amount"].get<std::string>());
+                } else if (state.contains("amount")) {
+                    amount = state["amount"].get<uint64_t>();
+                }
+                if (amount == 0) return;
+                found = true;
+            } catch (const std::exception& e) {
+                Logger::log(
+                    "[DesktopEvolution] ownership candidate skipped: " +
+                    std::string(e.what()));
+            }
+        });
+
+    if (!found)
+        reason =
+            "wallet address is not the current confirmed owner, or its "
+            "control output is already spent/pending";
+    return found;
+}
+
+static bool desktopEvolutionParentStillCurrent(
+    TokenEvolutionEngine& engine,
+    const json& record,
+    std::string& reason)
+{
+    reason.clear();
+    if (!record.is_object()) {
+        reason = "preview record is malformed";
+        return false;
+    }
+
+    uint64_t parentEpoch = 0;
+    try {
+        parentEpoch =
+            record.at("epoch_before").get<uint64_t>();
+    } catch (...) {
+        reason = "preview parent epoch is malformed";
+        return false;
+    }
+
+    const std::string tokenID = record.value("tokenID", "");
+    const std::string expectedHash =
+        record.value("previous_metadata_hash", "");
+    const json latest = engine.loadLatest(tokenID);
+
+    if (parentEpoch == 0U) {
+        if (!latest.empty()) {
+            reason =
+                "persisted evolution state now exists for the issuance root";
+            return false;
+        }
+        return true;
+    }
+
+    if (!latest.is_object() || latest.empty()) {
+        reason = "persisted parent evolution record is missing";
+        return false;
+    }
+
+    uint64_t currentEpoch = 0;
+    try {
+        currentEpoch =
+            latest.at("epoch_after").get<uint64_t>();
+    } catch (...) {
+        reason = "persisted parent epoch is malformed";
+        return false;
+    }
+
+    const std::string currentHash =
+        latest.value("new_metadata_hash", "");
+    if (currentEpoch != parentEpoch ||
+        currentHash != expectedHash) {
+        reason = "persisted parent epoch/hash changed";
+        return false;
+    }
+    return true;
+}
+
+static bool desktopEvolutionPreviousAnchorConfirmed(
+    Blockchain& chain,
+    const std::string& tokenID,
+    uint64_t parentEpoch,
+    std::string& reason)
+{
+    reason.clear();
+    if (parentEpoch == 0U)
+        return true;
+
+    const json verifyParams = {
+        {"tokenID", tokenID},
+        {"require_confirmed", true}
+    };
+    const json wrapped =
+        handleVerifyTokenEvolution(
+            chain, verifyParams, 0);
+
+    if (!wrapped.contains("result") ||
+        !wrapped["result"].is_object()) {
+        reason =
+            "runtime provenance verification did not return a result";
+        return false;
+    }
+
+    const json result = wrapped["result"];
+    if (!result.value("runtime_ok", false)) {
+        reason =
+            "previous evolution epoch is not fully confirmed/verified";
+        return false;
+    }
+    return true;
+}
+
+static json handlePreviewTokenEvolution(
+    Blockchain& chain,
+    const json& params,
+    int id)
+{
+    for (const char* field :
+         {"tokenID", "owner", "provider", "trigger"}) {
+        if (!params.contains(field) ||
+            !params[field].is_string()) {
+            return makeError(
+                -32602,
+                std::string("Missing or invalid ") + field);
+        }
+    }
+
+    const std::string tokenID =
+        normalizeTokenIDForLookupV2(
+            params["tokenID"].get<std::string>());
+    const std::string owner =
+        params["owner"].get<std::string>();
+    const std::string providerName =
+        params["provider"].get<std::string>();
+    const std::string trigger =
+        params["trigger"].get<std::string>();
+
+    if ((tokenID.size() != 8U &&
+         tokenID.size() != 16U) ||
+        !isHex(tokenID))
+        return makeError(-32602, "Invalid tokenID");
+    if (!chain.isValidAddress(owner))
+        return makeError(-32602, "Invalid owner address");
+    if (trigger.empty() || trigger.size() > 1024U)
+        return makeError(
+            -32602,
+            "Evolution trigger must be 1..1024 characters");
+
+    auto& registry = AIProviderRegistry::getInstance();
+    bool knownProvider = false;
+    for (const auto& name :
+         registry.getAvailableProviders()) {
+        if (name == providerName) {
+            knownProvider = true;
+            break;
+        }
+    }
+    if (!knownProvider)
+        return makeError(
+            -32602,
+            "Unknown Core AI provider: " + providerName);
+
+    auto provider = registry.getProvider(providerName);
+    if (!provider || !provider->isConfigured())
+        return makeError(
+            -32000,
+            "Selected Core AI provider is not configured");
+
+    LevelDBStorage* db = chain.getStorage();
+    if (!db)
+        return makeError(
+            -32000, "Blockchain storage is unavailable");
+
+    std::string ownershipReason;
+    if (!desktopEvolutionConfirmedOwner(
+            chain, *db, tokenID, owner,
+            ownershipReason)) {
+        return makeError(
+            -32040,
+            "Evolution preview refused: " +
+            ownershipReason);
+    }
+
+    json issuanceMetadata;
+    std::string issuanceTxid;
+    std::string tokenType;
+    std::string loadReason;
+    if (!loadTokenEvolutionIssuanceMetadata(
+            *db,
+            tokenID,
+            issuanceMetadata,
+            issuanceTxid,
+            tokenType,
+            loadReason)) {
+        return makeError(
+            -32041,
+            "Evolution issuance metadata unavailable: " +
+            loadReason);
+    }
+
+    ContractStorage contractStorage(db);
+    TokenEvolutionEngine engine(&contractStorage);
+    const TokenEvolutionResult preview =
+        engine.evolvePreview(
+            tokenID,
+            tokenType,
+            issuanceMetadata,
+            providerName,
+            trigger);
+
+    if (!preview.ok) {
+        return makeError(
+            -32042,
+            preview.error.empty()
+                ? "Evolution provider did not produce a valid preview"
+                : preview.error);
+    }
+
+    const std::string recordJson =
+        preview.record.dump();
+    const std::string commitMessage =
+        desktopEvolutionCommitMessage(
+            tokenID, owner, recordJson);
+
+    Logger::log(
+        "[DesktopEvolution] preview generated token=" +
+        tokenID + " provider=" + providerName +
+        " owner=" + owner +
+        " record_sha256=" +
+        desktopEvolutionSha256Hex(recordJson));
+
+    return makeResult(id, json{
+        {"format", "TRU_DESKTOP_TOKEN_EVOLUTION_PREVIEW_V1"},
+        {"tokenID", tokenID},
+        {"type", tokenType},
+        {"owner", owner},
+        {"provider", providerName},
+        {"trigger", trigger},
+        {"record", preview.record},
+        {"record_json", recordJson},
+        {"commit_message", commitMessage},
+        {"persisted", false},
+        {"anchor_queued", false},
+        {"note",
+         "Preview only. Nothing is persisted until an exact signed COMMIT."}
+    });
+}
+
+static json handleCommitTokenEvolutionSigned(
+    Blockchain& chain,
+    const json& params,
+    int id)
+{
+    for (const char* field :
+         {"tokenID", "owner", "record_json",
+          "publicKey", "signature", "confirmation"}) {
+        if (!params.contains(field) ||
+            !params[field].is_string()) {
+            return makeError(
+                -32602,
+                std::string("Missing or invalid ") + field);
+        }
+    }
+
+    // Exact confirmation: no trimming, case folding or fuzzy acceptance.
+    if (params["confirmation"].get<std::string>() != "COMMIT")
+        return makeError(
+            -32602,
+            "Exact confirmation COMMIT is required");
+
+    const std::string tokenID =
+        normalizeTokenIDForLookupV2(
+            params["tokenID"].get<std::string>());
+    const std::string owner =
+        params["owner"].get<std::string>();
+    const std::string recordJson =
+        params["record_json"].get<std::string>();
+    std::string publicKeyHex =
+        params["publicKey"].get<std::string>();
+    const std::string signatureHex =
+        params["signature"].get<std::string>();
+
+    if ((tokenID.size() != 8U &&
+         tokenID.size() != 16U) ||
+        !isHex(tokenID))
+        return makeError(-32602, "Invalid tokenID");
+    if (!chain.isValidAddress(owner))
+        return makeError(-32602, "Invalid owner address");
+    if (recordJson.empty() ||
+        recordJson.size() > 4U * 1024U * 1024U)
+        return makeError(
+            -32602, "Evolution preview record size is invalid");
+
+    json record;
+    try {
+        record = json::parse(recordJson);
+    } catch (const std::exception&) {
+        return makeError(
+            -32602, "record_json is not valid JSON");
+    }
+
+    if (!record.is_object() ||
+        record.value("format", "") !=
+            "TRU_TOKEN_EVOLVE_V1" ||
+        record.value("status", "") != "preview" ||
+        record.value("tokenID", "") != tokenID) {
+        return makeError(
+            -32602,
+            "Evolution record identity/format mismatch");
+    }
+
+    const std::string tokenType =
+        record.value("type", "");
+    if (tokenType != "SFT" &&
+        tokenType != "NCFT") {
+        return makeError(
+            -32602,
+            "Only SFT/NCFT evolution may be committed");
+    }
+
+    uint64_t parentEpoch = 0;
+    uint64_t nextEpoch = 0;
+    try {
+        parentEpoch =
+            record.at("epoch_before").get<uint64_t>();
+        nextEpoch =
+            record.at("epoch_after").get<uint64_t>();
+    } catch (...) {
+        return makeError(
+            -32602, "Evolution epoch fields are invalid");
+    }
+    if (parentEpoch ==
+            std::numeric_limits<uint64_t>::max() ||
+        nextEpoch != parentEpoch + 1U) {
+        return makeError(
+            -32602,
+            "Evolution epoch transition is invalid");
+    }
+
+    const std::string previousHash =
+        record.value("previous_metadata_hash", "");
+    const std::string newHash =
+        record.value("new_metadata_hash", "");
+    if (previousHash.size() != 64U ||
+        newHash.size() != 64U ||
+        !isHex(previousHash) ||
+        !isHex(newHash) ||
+        previousHash == newHash) {
+        return makeError(
+            -32602,
+            "Evolution metadata hashes are invalid/no-op");
+    }
+    if (!record.contains("metadata") ||
+        !record["metadata"].is_object() ||
+        desktopEvolutionSha256Hex(
+            record["metadata"].dump()) != newHash) {
+        return makeError(
+            -32602,
+            "Evolution metadata does not match new_metadata_hash");
+    }
+    if (!record.contains("updated_fields") ||
+        !record["updated_fields"].is_object() ||
+        record["updated_fields"].empty()) {
+        return makeError(
+            -32602,
+            "Evolution preview has no permitted changes");
+    }
+
+    LevelDBStorage* db = chain.getStorage();
+    if (!db)
+        return makeError(
+            -32000, "Blockchain storage is unavailable");
+    ContractStorage contractStorage(db);
+    TokenEvolutionEngine engine(&contractStorage);
+
+    // UI-06 COMMIT ORDERING INVARIANT:
+    // exact COMMIT -> fresh latest -> parent epoch/hash -> confirmed parent
+    // anchor -> current ownership -> owner signature -> no-op/hash checks
+    // already above -> exact persistPreview. No provider call occurs here.
+    std::string parentReason;
+    if (!desktopEvolutionParentStillCurrent(
+            engine, record, parentReason)) {
+        return makeError(
+            -32043,
+            "State moved. Re-run preview. " +
+            parentReason);
+    }
+
+    std::string anchorReason;
+    if (!desktopEvolutionPreviousAnchorConfirmed(
+            chain,
+            tokenID,
+            parentEpoch,
+            anchorReason)) {
+        return makeError(
+            -32044,
+            "Previous evolution epoch is not yet confirmed "
+            "on-chain. Preview is allowed; commit is "
+            "temporarily unavailable. " + anchorReason);
+    }
+
+    std::string ownershipReason;
+    if (!desktopEvolutionConfirmedOwner(
+            chain, *db, tokenID, owner,
+            ownershipReason)) {
+        return makeError(
+            -32045,
+            "You no longer own this token. " +
+            ownershipReason);
+    }
+
+    std::transform(
+        publicKeyHex.begin(),
+        publicKeyHex.end(),
+        publicKeyHex.begin(),
+        [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+
+    if (publicKeyHex.size() != 66U ||
+        (publicKeyHex.rfind("02", 0) != 0 &&
+         publicKeyHex.rfind("03", 0) != 0) ||
+        !isHex(publicKeyHex)) {
+        return makeError(
+            -32602,
+            "publicKey must be compressed secp256k1 hex");
+    }
+    if (signatureHex.empty() ||
+        signatureHex.size() > 144U ||
+        (signatureHex.size() % 2U) != 0U ||
+        !isHex(signatureHex)) {
+        return makeError(
+            -32602, "signature must be strict DER hex");
+    }
+
+    std::vector<unsigned char> publicKey;
+    std::vector<unsigned char> signature;
+    try {
+        publicKey = hexDecode(publicKeyHex);
+        signature = hexDecode(signatureHex);
+    } catch (...) {
+        return makeError(
+            -32602,
+            "Malformed public key/signature encoding");
+    }
+
+    if (pubkeyToAddress(publicKey) != owner)
+        return makeError(
+            -32046,
+            "Evolution authorization key does not control owner address");
+
+    const std::string canonical =
+        desktopEvolutionCommitMessage(
+            tokenID, owner, recordJson);
+    unsigned char digest[SHA256_DIGEST_LENGTH];
+    SHA256(
+        reinterpret_cast<const unsigned char*>(
+            canonical.data()),
+        canonical.size(),
+        digest);
+    const std::string digestBytes(
+        reinterpret_cast<const char*>(digest),
+        SHA256_DIGEST_LENGTH);
+
+    if (!ECDSAKey::verifyCanonicalTransactionSignature(
+            publicKey, digestBytes, signature)) {
+        return makeError(
+            -32047,
+            "Invalid evolution owner authorization signature");
+    }
+
+    // TOKEN-AI-02A persistPreview() remains the final persistence authority
+    // and independently rejects stale/duplicate/broken-lineage records.
+    if (!engine.persistPreview(record)) {
+        return makeError(
+            -32048,
+            "Evolution persistence refused by canonical engine");
+    }
+
+    Logger::log(
+        "[DesktopEvolution] signed exact preview committed token=" +
+        tokenID + " epoch=" + std::to_string(nextEpoch) +
+        " owner=" + owner);
+
+    return makeResult(id, json{
+        {"format", "TRU_DESKTOP_TOKEN_EVOLUTION_COMMIT_V1"},
+        {"tokenID", tokenID},
+        {"owner", owner},
+        {"epoch", nextEpoch},
+        {"record_sha256",
+         desktopEvolutionSha256Hex(recordJson)},
+        {"persisted", true},
+        {"anchor_queued", true},
+        {"note",
+         "Exact preview persisted; canonical evolution anchor queue will "
+         "materialize the on-chain provenance anchor."}
+    });
+}
+
+//========================================================================
 //                      Configure AI Provider
 //========================================================================
 static json handleConfigureAIProvider(Blockchain& chain, const json& params, int id) {
-    Logger::log("[handleConfigureAIProvider] Received params: " + params.dump());
+    Logger::log("[handleConfigureAIProvider] Request received (parameters redacted)");
     
     if (!params.contains("address") || !params.contains("provider")) {
         return makeError(-32602, "Missing address or provider");
@@ -7740,6 +8436,38 @@ static json handleGetAIProviders(Blockchain& chain, const json& params, int id) 
     } catch (const std::exception& e) {
         Logger::log("[handleGetAIProviders] Exception: " + std::string(e.what()));
         return makeError(-32000, e.what());
+    }
+}
+
+//========================================================================
+//                      Test AI Provider
+//========================================================================
+static json handleTestAIProvider(Blockchain& chain, const json& params, int id) {
+    (void)chain;
+    if (!params.contains("provider") || !params["provider"].is_string())
+        return makeError(-32602, "Missing provider");
+    try {
+        const std::string providerName=params["provider"].get<std::string>();
+        auto& registry=AIProviderRegistry::getInstance();
+        bool known=false;
+        for (const auto& name: registry.getAvailableProviders()) if (name==providerName) { known=true; break; }
+        if (!known) return makeError(-32602, "Unknown provider: "+providerName);
+        auto provider=registry.getProvider(providerName);
+        if (!provider) return makeError(-32000, "Provider unavailable: "+providerName);
+        const bool configured=provider->isConfigured();
+        const std::string endpoint=provider->getEndpoint();
+        if (!configured) return makeResult(id, json{{"provider",providerName},{"configured",false},{"reachable",false},{"endpoint",endpoint},{"message","Provider is registered but not configured on this Core"}});
+        const json probe={{"messages",json::array({json{{"role","user"},{"content","Reply TRU_AI_OK"}}})},{"max_tokens",1},{"temperature",0.0}};
+        Logger::log("[handleTestAIProvider] Testing provider="+providerName+" endpoint="+endpoint+" credentials=CORE_MANAGED_REDACTED");
+        const json response=provider->sendRequest(probe);
+        bool reachable=true; std::string error;
+        if (response.is_object() && response.contains("error")) { reachable=false; error=response["error"].is_string()?response["error"].get<std::string>():response["error"].dump(); }
+        json result={{"provider",providerName},{"configured",configured},{"reachable",reachable},{"endpoint",endpoint},{"probe","minimal_inference"}};
+        if (!error.empty()) result["error"]=error;
+        return makeResult(id,result);
+    } catch (const std::exception& e) {
+        Logger::log(std::string("[handleTestAIProvider] Exception (credentials redacted): ")+e.what());
+        return makeError(-32000,e.what());
     }
 }
 
@@ -8236,7 +8964,7 @@ static json handleGetInfo(Blockchain &chain, Wallet &wallet, P2PNode &node, int 
         uint32_t diffForOut = chain.getDifficulty();
 
         json out = {
-            {"version",       std::string("TRU-node")},
+            {"version",       tru_version::coreReleaseVersion()},
             {"blocks",        height},
             {"bestblockhash", tip},
             {"chainsize",     csize},
@@ -8255,12 +8983,52 @@ static json handleGetInfo(Blockchain &chain, Wallet &wallet, P2PNode &node, int 
     }
 }
 
+//========================
+// getdesktopinfo  (safe Desktop/public snapshot)
+//========================
+static json handleGetDesktopInfo(Blockchain &chain, P2PNode &node, int id) {
+    try {
+        const int height = chain.getBestTipHeight();
+        const std::string tip = chain.getBestTipHash();
+        const uint32_t diff = chain.getDifficulty();
+        const bool valid = chain.isChainValid();
+        const int csize = chain.getChainSize();
+
+        size_t conns = 0;
+        try { conns = node.getPeersList().size(); }
+        catch (...) { conns = 0; }
+
+        static const char* HEXD = "0123456789abcdef";
+        std::string diffhex(8, '0');
+        uint32_t working = diff;
+        for (int i = 7; i >= 0; --i) {
+            diffhex[i] = HEXD[working & 0xF];
+            working >>= 4;
+        }
+
+        return makeResult(id, {
+            {"version",       tru_version::coreReleaseVersion()},
+            {"blocks",        height},
+            {"bestblockhash", tip},
+            {"chainsize",     csize},
+            {"difficulty",    diff},
+            {"difficultyhex", std::string("0x") + diffhex},
+            {"connections",   static_cast<uint64_t>(conns)},
+            {"chainvalid",    valid}
+        });
+    } catch (const std::exception& e) {
+        return makeError(
+            -32000,
+            std::string("getdesktopinfo failed: ") + e.what());
+    }
+}
+
 //=======================================================================
 // TRU-SWAP-A — AUTOMATION FOUNDATION
 // Frozen HTLC V1 wallet operations + durable coordinator record RPC.
 //=======================================================================
 static bool truSwapConstantTimeEqual(const std::string& a, const std::string& b) {
-    // use the transport helper's length-oblivious comparison so the
+    // Patch 05: use the transport helper's length-oblivious comparison so the
     // inner swap-token layer does not reintroduce an early length mismatch.
     return tru_rpc::constantTimeEqual(a, b);
 }
@@ -8995,6 +9763,8 @@ void startRPCServer(Blockchain &chain, Wallet &wallet, P2PNode &node, int port,
         else if (m=="gettokenutxo")        response=handleGetTokenUTXO(chain, params, id);
         else if (m=="gettokenmetadata")    response=handleGetTokenMetadata(chain, params, id);
         else if (m=="verifytokenevolution") response=handleVerifyTokenEvolution(chain, params, id);
+        else if (m=="previewtokenevolution") response=handlePreviewTokenEvolution(chain, params, id);
+        else if (m=="committokenevolutionsigned") response=handleCommitTokenEvolutionSigned(chain, params, id);
         else if (m == "inscribeTRUScript") response = handleInscribeTRUScript(chain, wallet, params, id);
         else if (m=="inscribeTRUScriptSigned") response=handleInscribeTRUScriptSigned(chain,params,id);
         else if (m == "createsocialpost")  response = handleCreateSocialPost(chain, wallet, params, id);
@@ -9038,8 +9808,10 @@ void startRPCServer(Blockchain &chain, Wallet &wallet, P2PNode &node, int port,
         else if (m=="listaddresses")       response=handleListAddresses(wallet,params,id);
         else if (m=="getbalance")          response=handleGetBalance(chain,wallet,params,id);
         else if (m=="getinfo")             response=handleGetInfo(chain,wallet,node,id);
+        else if (m=="getdesktopinfo")      response=handleGetDesktopInfo(chain,node,id);
         else if (m=="configureAIProvider") response=handleConfigureAIProvider(chain, params, id);
         else if (m=="getAIProviders")      response=handleGetAIProviders(chain, params, id);
+        else if (m=="testAIProvider")       response=handleTestAIProvider(chain,params,id);
         else if (m=="createAIToken")       response=handleCreateAIToken(chain, wallet, params, id);
         else if (m=="interactWithAIToken") response=handleInteractWithAIToken(chain, params, id);
         else if (m=="getAIResponse")       response=handleGetAIResponse(chain, params, id);

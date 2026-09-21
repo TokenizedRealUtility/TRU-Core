@@ -1,0 +1,5 @@
+<RCC>
+  <qresource prefix="/tru/assets">
+    <file alias="tru_logo.png">tru_logo.png</file>
+  </qresource>
+</RCC>

@@ -47,6 +47,42 @@ int main(int argc, char** argv) {
         );
 
         check(
+            DesktopRpc::validEndpoint(
+                QUrl(
+                    "https://tokenizedrealutility.com/api/wallet/rpc"
+                )
+            ),
+            "TRU public wallet gateway should be allowed"
+        );
+
+        check(
+            DesktopRpc::isPublicGatewayEndpoint(
+                QUrl(
+                    "https://tokenizedrealutility.com/api/wallet/rpc"
+                )
+            ),
+            "TRU public wallet gateway classification failed"
+        );
+
+        check(
+            !DesktopRpc::requiresSessionToken(
+                QUrl(
+                    "https://tokenizedrealutility.com/api/wallet/rpc"
+                )
+            ),
+            "public wallet gateway must not require a Core session token"
+        );
+
+        check(
+            DesktopRpc::requiresSessionToken(
+                QUrl(
+                    "https://node.tokenizedrealutility.com/rpc"
+                )
+            ),
+            "custom remote Core must require a session token"
+        );
+
+        check(
             DesktopRpc::isRemoteEndpoint(
                 QUrl(
                     "https://node.tokenizedrealutility.com/rpc"
@@ -70,6 +106,9 @@ int main(int argc, char** argv) {
                  "https://user:pass@example.com/rpc",
                  "https://example.com/rpc?token=secret",
                  "https://example.com/rpc#fragment",
+                 "https://tokenizedrealutility.com/api/wallet/rpc?token=secret",
+                 "https://tokenizedrealutility.com/api/wallet/other",
+                 "http://tokenizedrealutility.com/api/wallet/rpc",
                  "http://127.0.0.1:21832/other",
                  "http://user:pass@127.0.0.1:21832/rpc",
                  "http://127.0.0.1:21832/rpc?token=secret",
@@ -178,6 +217,23 @@ int main(int argc, char** argv) {
             "remote HTTPS configuration rejected"
         );
 
+        DesktopRpc publicRpc;
+        QString publicError;
+        check(
+            publicRpc.configure(
+                QUrl(
+                    "https://tokenizedrealutility.com/api/wallet/rpc"
+                ),
+                QString(),
+                publicError
+            ),
+            "public wallet gateway configuration rejected"
+        );
+        check(
+            !DesktopRpc::requiresSessionToken(publicRpc.endpoint()),
+            "public wallet gateway unexpectedly requires a token"
+        );
+
         bool remoteTokenRejected = false;
 
         remoteRpc.call(
@@ -198,7 +254,7 @@ int main(int argc, char** argv) {
             remoteTokenRejected,
             "remote RPC proceeded without explicit session token"
         );
-        std::cout << "PASS: exact uint64 values; amount/endian guards; cookie auth; RPC errors; response ids; HTTPS remote endpoint policy; remote token gate; no redirect/retry; JSON object validation\n";
+        std::cout << "PASS: exact uint64 values; amount/endian guards; cookie auth; RPC errors; response ids; HTTPS remote endpoint policy; fixed public wallet gateway policy; custom-remote token gate; no redirect/retry; JSON object validation\n";
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "FAIL: " << e.what() << '\n'; return 1;

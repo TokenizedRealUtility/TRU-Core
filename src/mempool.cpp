@@ -1494,14 +1494,56 @@ bool Mempool::isTransactionValidUnchecked(
             return false;
         }
 
-        // TRU AUDIT-HARDENING-01C / Track 04 — relay-only dust policy.
-        // Restrict the economic dust floor to ordinary spendable P2PKH
-        // outputs. TRU protocol outputs (OP_RETURN/token metadata and
-        // canonical contract/state anchors) retain their existing dedicated
-        // policy, including intentional zero/one-atom values. This is NOT a
-        // block-consensus rule and does not invalidate historical blocks.
+        // TRU AUDIT-HARDENING-01C1 / Track 04 — token-control repair.
+        //
+        // Ordinary spendable P2PKH outputs remain subject to the configured
+        // economic dust floor. TRU's established extended-token wire format,
+        // however, pairs a zero-value extended-token output with an immediate
+        // 1-atom P2PKH controlling output. Treat that 1-atom output as protocol
+        // control data ONLY when the preceding output:
+        //
+        //   * has zero native-TRU value,
+        //   * is a valid extended-token script,
+        //   * parses to a valid TRU owner address, and
+        //   * that owner deterministically regenerates this exact P2PKH script.
+        //
+        // A free-standing 1-atom P2PKH, a malformed/fake token predecessor, or
+        // an owner/script mismatch remains ordinary dust and is rejected.
+        //
+        // Relay/mempool policy only. No block-consensus or token-format change.
+        bool canonicalTokenControlOutput = false;
         if (isStandardPaymentScript(out.scriptPubKey) &&
-            out.amount < tru_limits::MIN_OUTPUT_DUST_ATOMS) {
+            out.amount == 1ULL &&
+            i > 0 &&
+            tx.vout[i - 1].amount == 0ULL &&
+            isExtendedTokenScript(tx.vout[i - 1].scriptPubKey)) {
+            ExtendedTokenData controlData;
+            std::string controlOwner;
+            try {
+                if (parseExtendedTokenScript(
+                        tx.vout[i - 1].scriptPubKey,
+                        tx.txid,
+                        controlData,
+                        controlOwner,
+                        blockchain) &&
+                    isValidAddress(controlOwner)) {
+                    canonicalTokenControlOutput =
+                        (out.scriptPubKey ==
+                         createP2PKHScriptHexFromAddress(controlOwner));
+                }
+            } catch (const std::exception& e) {
+                Logger::log(
+                    std::string(
+                        "[AUDIT-HARDENING-01C1] token-control classification "
+                        "failed closed: ") +
+                    e.what() + " => TX=" + tx.txid);
+                canonicalTokenControlOutput = false;
+            }
+        }
+
+        if (isStandardPaymentScript(out.scriptPubKey) &&
+            out.amount < tru_limits::MIN_OUTPUT_DUST_ATOMS &&
+            !canonicalTokenControlOutput) {
             Logger::log(
                 "[Mempool] Rejecting standard payment output below dust policy: output=" +
                 std::to_string(i) + " amount=" + std::to_string(out.amount) +
@@ -1509,6 +1551,14 @@ bool Mempool::isTransactionValidUnchecked(
                 std::to_string(tru_limits::MIN_OUTPUT_DUST_ATOMS) +
                 " txid=" + tx.txid);
             return false;
+        }
+
+        if (canonicalTokenControlOutput) {
+            Logger::log(
+                "[AUDIT-HARDENING-01C1] canonical token-control output exempt "
+                "from ordinary dust policy: output=" +
+                std::to_string(i) + " amount=" + std::to_string(out.amount) +
+                " txid=" + tx.txid);
         }
 
         if (isMagicLockScript(out.scriptPubKey)) {
