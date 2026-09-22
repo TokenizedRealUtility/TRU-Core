@@ -59,7 +59,6 @@
 #include "contract_storage.h"
 #include "tru_network_params.h"
 #include "tru_version.h"  // NETWORK-VERSION-01
-#include "peer_observability_v1.h"
 #include "script_context_builder.h"  // shared execution context
 #include "contract_call_policy.h"     // Patch 14D2/14D3B: state-anchor call policy
 #include "contract_state_runtime.h"    // confirmed state snapshot + scratch execution
@@ -2342,7 +2341,6 @@ void Blockchain::syncWithPeers(
     auto requestPeerBlock = [&](const std::shared_ptr<PeerConnection>& peer,
                                 uint64_t height,
                                 Block& out) -> bool {
-        const auto failed = [&]() { peer->noteSyncFailure(); return false; };
         try {
             auto future = peer->requestBlock(height);
             const auto status = future.wait_for(responseTimeout);
@@ -2351,27 +2349,27 @@ void Blockchain::syncWithPeers(
                 Logger::log(
                     "[MULTINODE-01B] Timeout requesting height " +
                     std::to_string(height) + " from " + peer->getIp());
-                return failed();
+                return false;
             }
             out = future.get();
             if (out.blockHash.empty() || out.height != height) {
                 Logger::log(
                     "[MULTINODE-01B] Invalid peer block identity at height " +
                     std::to_string(height) + " from " + peer->getIp());
-                return failed();
+                return false;
             }
             if (out.computeHash() != out.blockHash) {
                 Logger::log(
                     "[MULTINODE-01B] Peer block hash witness mismatch at height " +
                     std::to_string(height));
-                return failed();
+                return false;
             }
             return true;
         } catch (const std::exception& e) {
             Logger::log(
                 "[MULTINODE-01B] Exception requesting height " +
                 std::to_string(height) + ": " + e.what());
-            return failed();
+            return false;
         }
     };
 
@@ -2388,40 +2386,29 @@ void Blockchain::syncWithPeers(
                 continue;
             }
 
-            // PEER-COMMS-01: request fresh heights from ready, non-cooled-down
-            // sessions. One common deadline avoids N sequential 10s waits.
-            // These observations select a download source, NEVER a valid chain.
+            // Ask every connected peer for height. Height chooses a download source
+            // only; cumulative chainwork remains the sole reorganization authority.
             uint64_t highestPeerHeight = 0;
             std::shared_ptr<PeerConnection> bestPeer;
-            std::vector<std::pair<std::shared_ptr<PeerConnection>, uint64_t>> requested;
             for (const auto& peer : peers) {
                 if (!running.load(std::memory_order_acquire)) goto exit_sync;
-                if (!peer->isSyncEligible()) continue;
-                requested.emplace_back(peer, peer->getHeightRevision());
                 peer->requestHeight();
-            }
-            const auto heightDeadline = std::chrono::steady_clock::now() + responseTimeout;
-            while (std::chrono::steady_clock::now() < heightDeadline) {
-                if (!running.load(std::memory_order_acquire)) goto exit_sync;
-                bool pending = false;
-                for (const auto& item : requested) {
-                    if (item.first->isReady() && item.first->getHeightRevision() == item.second)
-                        pending = true;
-                }
-                if (!pending) break;
-                waitBriefly(100);
-            }
-            for (const auto& item : requested) {
-                const auto& peer = item.first;
-                if (!peer->isReady()) continue;
-                if (peer->getHeightRevision() == item.second || !peer->hasFreshHeight()) {
-                    peer->noteSyncFailure();
-                    continue;
-                }
-                const auto peerHeight = peer->getPeerHeight();
-                if (peerHeight > 0 && (!bestPeer || peerHeight > highestPeerHeight)) {
-                    highestPeerHeight = peerHeight;
-                    bestPeer = peer;
+                const auto start = std::chrono::steady_clock::now();
+                while (std::chrono::steady_clock::now() - start < responseTimeout) {
+                    if (!running.load(std::memory_order_acquire)) goto exit_sync;
+                    const uint64_t peerHeight = peer->getPeerHeight();
+                    if (peerHeight > 0) {
+                        Logger::log(
+                            "[MULTINODE-01B] Peer " + peer->getIp() + ":" +
+                            std::to_string(peer->getPort()) + " height=" +
+                            std::to_string(peerHeight));
+                        if (!bestPeer || peerHeight > highestPeerHeight) {
+                            highestPeerHeight = peerHeight;
+                            bestPeer = peer;
+                        }
+                        break;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 }
             }
 
@@ -2477,7 +2464,6 @@ void Blockchain::syncWithPeers(
                     }
 
                     if (!foundFork) {
-                        bestPeer->noteSyncFailure();
                         Logger::log(
                             "[MULTINODE-01B] FAIL-CLOSED: no common ancestor within " +
                             std::to_string(MAX_SIDE_FORK_DEPTH) +
@@ -2503,7 +2489,6 @@ void Blockchain::syncWithPeers(
             // we are synchronized with this peer. Equal height is not enough unless
             // the exact overlap block hash matched above.
             if (!diverged && highestPeerHeight <= localHeight) {
-                bestPeer->noteSyncSuccess();
                 consecutiveFailures = 0;
                 publishStatus("Fully synchronized at height " + std::to_string(localHeight));
                 if (coutMutex && !wasFullySynced) {
@@ -2548,7 +2533,6 @@ void Blockchain::syncWithPeers(
                     }
 
                     if (expectedPrev.empty() || block.header.prevHash != expectedPrev) {
-                        bestPeer->noteSyncFailure();
                         Logger::log(
                             "[MULTINODE-01B] FAIL-CLOSED: remote branch ancestry mismatch "
                             "at height " + std::to_string(h) + " expectedPrev=" +
@@ -2562,7 +2546,6 @@ void Blockchain::syncWithPeers(
                     // sole block-acceptance pipeline. Sync never mutates UTXO state
                     // directly and never invents a second reorg executor.
                     if (!submitBlockFromNetwork(block, "peer:" + bestPeer->getIp())) {
-                        bestPeer->noteSyncFailure();
                         Logger::log(
                             "[MULTINODE-01B] Authoritative block admission rejected height " +
                             std::to_string(h));
@@ -2571,7 +2554,6 @@ void Blockchain::syncWithPeers(
                     }
 
                     expectedPrev = block.blockHash;
-                    bestPeer->noteSyncSuccess();
                     ++processed;
                     consecutiveFailures = 0;
 
@@ -2604,8 +2586,9 @@ void Blockchain::syncWithPeers(
 sync_cycle_end:
             if (consecutiveFailures >= maxConsecutiveFailures) {
                 Logger::log(
-                    "[PEER-COMMS-01] Repeated remote sync failures; retaining local "
-                    "state and retrying eligible peers after transport cooldown");
+                    "[MULTINODE-01B] Repeated sync failures; rebuilding local indexes "
+                    "without changing active-chain selection");
+                rebuildChainState();
                 consecutiveFailures = 0;
                 waitBriefly(10000);
             } else {
@@ -23024,11 +23007,7 @@ g_explorerServer.Get("/api/stats", [&](const httplib::Request&, httplib::Respons
         cache.builtAt.time_since_epoch().count() != 0 &&
         requestNow - cache.builtAt < std::chrono::seconds(10)) {
         res.set_header("X-TRU-Explorer-Cache", "HIT");
-        auto payload = cache.payload;
-        payload["connectedPeerCount"] = node.getActivePeerCount();
-        payload["peerCount"] = node.getKnownPeers().size(); // legacy: known endpoints
-        payload["knownPeerCount"] = payload["peerCount"];
-        res.set_content(payload.dump(), "application/json");
+        res.set_content(cache.payload.dump(), "application/json");
         return;
     }
 
@@ -23082,8 +23061,6 @@ g_explorerServer.Get("/api/stats", [&](const httplib::Request&, httplib::Respons
     });
     j["truscriptsCount"] = truscriptCount;
     j["peerCount"] = node.getPeerManager()->getPeers().size();
-    j["knownPeerCount"] = j["peerCount"];
-    j["connectedPeerCount"] = node.getActivePeerCount();
 
     cache.payload = j;
     cache.tipHeight = j.value("height", currentTip);
@@ -23129,7 +23106,7 @@ g_explorerServer.Get("/api/blocks", [&](const httplib::Request&, httplib::Respon
     } catch (const std::exception& e) {
         Logger::log("[Explorer /api/blocks] Error: " + std::string(e.what()));
         res.status = 500;
-        res.set_content(tru_peer_observability::errorJson(e.what()), "application/json");
+        res.set_content("{\"error\":\"" + std::string(e.what()) + "\"}", "application/json");
     }
 });
 
@@ -23165,7 +23142,7 @@ g_explorerServer.Get(R"(/block/([a-fA-F0-9]+))", [&](const httplib::Request& req
     } catch (const std::exception& e) {
         Logger::log("[Explorer /block] Error: " + std::string(e.what()));
         res.status = 500;
-        res.set_content(tru_peer_observability::errorJson(e.what()), "application/json");
+        res.set_content("{\"error\":\"" + std::string(e.what()) + "\"}", "application/json");
     }
 });
 //===========================================================================================================
@@ -23511,7 +23488,7 @@ g_explorerServer.Get("/api/transactions", [&](const httplib::Request& req, httpl
     } catch (const std::exception& e) {
         Logger::log("[Explorer /api/transactions] Error => " + std::string(e.what()));
         res.status = 500;
-        res.set_content(tru_peer_observability::errorJson(e.what()), "application/json");
+        res.set_content("{\"error\":\"" + std::string(e.what()) + "\"}", "application/json");
     }
 });
 // -----------------------------------------------------------------------------------------------------------
@@ -23657,7 +23634,7 @@ g_explorerServer.Get(R"(/api/transaction/([a-fA-F0-9]{64}))", [&](const httplib:
         res.set_content(j.dump(), "application/json");
     } catch (const std::exception& e) {
         res.status = 500;
-        res.set_content(tru_peer_observability::errorJson(e.what()), "application/json");
+        res.set_content("{\"error\":\"" + std::string(e.what()) + "\"}", "application/json");
     }
 });
 
@@ -23857,7 +23834,7 @@ g_explorerServer.Get("/api/tokens", [this](const httplib::Request& req, httplib:
     } catch (const std::exception& e) {
         Logger::log("[Explorer /api/tokens] Error: " + std::string(e.what()));
         res.status = 500;
-        res.set_content(tru_peer_observability::errorJson(e.what()), "application/json");
+        res.set_content("{\"error\":\"" + std::string(e.what()) + "\"}", "application/json");
     }
 });
 // -----------------------------------------------------------------------------------------------------------
@@ -24540,7 +24517,7 @@ g_explorerServer.Get("/api/uptime", [&](const httplib::Request&, httplib::Respon
         } catch (const std::exception& e) {
             Logger::log("[Explorer /api/uptime] Error: " + std::string(e.what()));
             res.status = 500;
-            res.set_content(tru_peer_observability::errorJson(e.what()), "application/json");
+            res.set_content("{\"error\":\"" + std::string(e.what()) + "\"}", "application/json");
         }
     });
 // -----------------------------------------------------------------------------------------------------------
@@ -24548,17 +24525,82 @@ g_explorerServer.Get("/api/uptime", [&](const httplib::Request&, httplib::Respon
 // -----------------------------------------------------------------------------------------------------------
     g_explorerServer.Get("/api/peers", [&](const httplib::Request&, httplib::Response& res) {
         res.set_header("Access-Control-Allow-Origin", "*");
-        res.set_header("Cache-Control", "no-store");
         try {
             Logger::log("[Explorer /api/peers] Fetching peer information");
-            const auto response = tru_peer_observability::snapshot(node);
+            nlohmann::json peersJson = nlohmann::json::array();
+
+            auto peers = node.getPeerManager()->getPeers();
+            std::unordered_map<std::string, std::shared_ptr<PeerConnection>> activePeers;
+            std::unordered_map<std::string, std::shared_ptr<PeerConnection>> activeByIp;
+
+            auto activePeersList = node.getPeersList();
+            for (const auto& peer : activePeersList) {
+                std::string key = peer->getIp() + ":" + std::to_string(peer->getPort());
+                activePeers[key] = peer;
+                activeByIp[peer->getIp()] = peer;
+            }
+
+            std::map<std::string, std::size_t> versionCounts;
+            std::size_t connectedCount = 0;
+            std::size_t versionReportingCount = 0;
+
+            for (const auto& peerInfo : peers) {
+                std::string peerKey = peerInfo.ip + ":" + std::to_string(peerInfo.port);
+                std::shared_ptr<PeerConnection> active;
+                auto exact = activePeers.find(peerKey);
+                if (exact != activePeers.end()) active = exact->second;
+                else {
+                    auto byIp = activeByIp.find(peerInfo.ip);
+                    if (byIp != activeByIp.end()) active = byIp->second;
+                }
+
+                const bool isConnected = static_cast<bool>(active);
+                uint64_t peerHeight = 0;
+                std::string coreVersion = "legacy/unreported";
+                std::string userAgent;
+                if (active) {
+                    ++connectedCount;
+                    peerHeight = active->getPeerHeight();
+                    coreVersion = active->getPeerCoreVersion();
+                    userAgent = active->getPeerUserAgent();
+                    if (coreVersion.empty()) coreVersion = "legacy/unreported";
+                    if (coreVersion != "legacy/unreported") ++versionReportingCount;
+                    ++versionCounts[coreVersion];
+                }
+
+                nlohmann::json peerJson = {
+                    {"ip", peerInfo.ip},
+                    {"port", peerInfo.port},
+                    {"isConnected", isConnected},
+                    {"lastActive", peerInfo.lastActive},
+                    {"peerHeight", peerHeight},
+                    {"coreVersion", coreVersion},
+                    {"userAgent", userAgent}
+                };
+                peersJson.push_back(peerJson);
+            }
+
+            nlohmann::json versions = nlohmann::json::array();
+            for (const auto& [version, count] : versionCounts) {
+                versions.push_back({{"version", version}, {"count", count}});
+            }
+
+            nlohmann::json response = {
+                {"peers", peersJson},
+                {"total", peersJson.size()},
+                {"connected", connectedCount},
+                {"localCoreVersion", tru_version::coreReleaseVersion()},
+                {"versionReportingCount", versionReportingCount},
+                {"versionSummary", versions},
+                {"versionScope", "local node + directly connected peers only"}
+            };
             res.set_content(response.dump(2), "application/json");
-            Logger::log("[Explorer /api/peers] Returned " + std::to_string(response.at("peers").size()) +
+            Logger::log("[Explorer /api/peers] Returned " + std::to_string(peersJson.size()) +
                         " peers; localCoreVersion=" + tru_version::coreReleaseVersion());
         } catch (const std::exception& e) {
             Logger::log("[Explorer /api/peers] Error: " + std::string(e.what()));
             res.status = 500;
-            res.set_content(tru_peer_observability::errorJson(e.what()), "application/json");
+            res.set_content("{\"error\":\"" + std::string(e.what()) + "\"}", "application/json");
         }
     });
 // -----------------------------------------------------------------------------------------------------------
@@ -24566,7 +24608,6 @@ g_explorerServer.Get("/api/uptime", [&](const httplib::Request&, httplib::Respon
 // -----------------------------------------------------------------------------------------------------------
     g_explorerServer.Get(R"(/api/peer/([0-9.]+)/([0-9]+))", [&](const httplib::Request& req, httplib::Response& res) {
         res.set_header("Access-Control-Allow-Origin", "*");
-        res.set_header("Cache-Control", "no-store");
         std::string ip = req.matches[1];
         int port;
         try {
@@ -24580,13 +24621,10 @@ g_explorerServer.Get("/api/uptime", [&](const httplib::Request&, httplib::Respon
         
         Logger::log("[Explorer /api/peer] Request for peer: " + ip + ":" + std::to_string(port));
         try {
-            const auto snapshot = tru_peer_observability::snapshot(node);
-            const auto& peers = snapshot.at("peers");
-            const std::string session = req.has_param("session") ? req.get_param_value("session") : "";
-            auto it = std::find_if(peers.begin(), peers.end(), [&](const nlohmann::json& p) {
-                return p.value("ip", "") == ip && p.value("port", 0) == port &&
-                    (session.empty() || p.value("sessionId", "") == session);
-            });
+            auto peers = node.getPeerManager()->getPeers();
+            auto it = std::find_if(peers.begin(), peers.end(), 
+                [&](const PeerInfo& p) { return p.ip == ip && p.port == port; });
+            
             if (it == peers.end()) {
                 Logger::log("[Explorer /api/peer] Peer not found: " + ip + ":" + std::to_string(port));
                 res.status = 404;
@@ -24594,14 +24632,38 @@ g_explorerServer.Get("/api/uptime", [&](const httplib::Request&, httplib::Respon
                 return;
             }
             
-            auto peerJson = *it;
-            peerJson["localCoreVersion"] = tru_version::coreReleaseVersion();
+            bool isConnected = false;
+            uint64_t peerHeight = 0;
+            std::string coreVersion = "legacy/unreported";
+            std::string userAgent;
+            auto activePeersList = node.getPeersList();
+            for (const auto& peer : activePeersList) {
+                if (peer->getIp() == ip && (peer->getPort() == port || !isConnected)) {
+                    isConnected = true;
+                    peerHeight = peer->getPeerHeight();
+                    coreVersion = peer->getPeerCoreVersion();
+                    userAgent = peer->getPeerUserAgent();
+                    if (peer->getPort() == port) break;
+                }
+            }
+            
+            nlohmann::json peerJson = {
+                {"ip", ip},
+                {"port", port},
+                {"isConnected", isConnected},
+                {"lastActive", it->lastActive},
+                {"peerHeight", peerHeight},
+                {"coreVersion", coreVersion.empty() ? "legacy/unreported" : coreVersion},
+                {"userAgent", userAgent},
+                {"localCoreVersion", tru_version::coreReleaseVersion()}
+            };
+            
             res.set_content(peerJson.dump(2), "application/json");
             Logger::log("[Explorer /api/peer] Response sent for peer: " + ip + ":" + std::to_string(port));
         } catch (const std::exception& e) {
             Logger::log("[Explorer /api/peer] Error: " + std::string(e.what()));
             res.status = 500;
-            res.set_content(tru_peer_observability::errorJson(e.what()), "application/json");
+            res.set_content("{\"error\":\"" + std::string(e.what()) + "\"}", "application/json");
         }
     });
 
@@ -25286,7 +25348,7 @@ g_explorerServer.Get("/api/hashrate", [&](const httplib::Request&, httplib::Resp
     } catch (const std::exception& e) {
         Logger::log("[Explorer /api/hashrate] Error: " + std::string(e.what()));
         res.status = 500;
-        res.set_content(tru_peer_observability::errorJson(e.what()), "application/json");
+        res.set_content("{\"error\":\"" + std::string(e.what()) + "\"}", "application/json");
     }
 });
 
@@ -25341,7 +25403,7 @@ g_explorerServer.Post("/api/submitblock", [&](const httplib::Request& req, httpl
         } catch (const std::exception& e) {
             Logger::log("[Explorer /api/submitblock] Block deserialization failed: " + std::string(e.what()));
             res.status = 400;
-            res.set_content(tru_peer_observability::errorJson("Invalid block format: " + std::string(e.what())), "application/json");
+            res.set_content("{\"error\":\"Invalid block format: " + std::string(e.what()) + "\"}", "application/json");
             return;
         }
         

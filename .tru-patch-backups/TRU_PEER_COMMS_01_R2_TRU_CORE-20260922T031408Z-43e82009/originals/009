@@ -9,14 +9,6 @@
 PeerManager::PeerManager() {}
 PeerManager::~PeerManager() {}
 
-namespace {
-std::string endpointKey(const std::string& ip, int port) {
-    return ip + ":" + std::to_string(port);
-}
-constexpr std::size_t MAX_VERIFIED_ENDPOINTS = 4096;
-constexpr std::size_t MAX_CONFIGURED_ENDPOINTS = 1024;
-}
-
 void PeerManager::addPeer(const std::string& ip, int port) {
     // PEER-ENDPOINT-02: only syntactically valid endpoint ports enter the book.
     // Do not guess whether a port is "ephemeral" from its numeric range; NATs
@@ -32,33 +24,38 @@ void PeerManager::addPeer(const std::string& ip, int port) {
 
     // PEER-REDIAL-01: a valid VERSION handshake is the authority that clears
     // reconnect backoff. A mere TCP connect never reaches addPeer().
-    const std::string key = endpointKey(ip, port);
-    auto it = std::find_if(peers.begin(), peers.end(), [&](const PeerInfo& p) {
-        return p.ip == ip && p.port == port;
-    });
-    if (it == peers.end() && peers.size() >= MAX_VERIFIED_ENDPOINTS) {
-        Logger::log("[PEER-COMMS-01] Verified endpoint book full; session remains usable");
-        return;
-    }
-    auto& reconnectState = reconnect_[key];
+    auto& reconnectState = reconnect_[ip];
     reconnectState.consecutiveFailures = 0;
     reconnectState.nextAttempt = TimePoint{};
 
-    // Called once per accepted VERSION, never for an unverified TCP session.
-    // Connection/abuse quotas stay IP-scoped; identity and redial are endpoints.
-    ++verifiedEndpoints_[key];
+    // The rest of this PeerManager is deliberately IP-keyed: connection slots,
+    // connected state, abuse state, and peers.dat persistence all operate per
+    // observed IP. Keep the book consistent with that model by retaining one
+    // reconnect/gossip endpoint per IP. A newly VERIFIED endpoint replaces the
+    // old endpoint for that same IP; it does not create source-port clutter.
+    auto it = std::find_if(peers.begin(), peers.end(), [&](const PeerInfo& p) {
+        return p.ip == ip;
+    });
 
     if (it == peers.end()) {
         peers.push_back(PeerInfo{
             ip,
             port,
-            true,
+            activeConnections_.find(ip) != activeConnections_.end(),
             time(nullptr)});
         Logger::log(
             "[PeerManager] Added verified peer endpoint: " +
             ip + ":" + std::to_string(port));
     } else {
-        it->isConnected = true;
+        if (it->port != port) {
+            Logger::log(
+                "[PEER-ENDPOINT-02] Replacing peer endpoint for " + ip +
+                " from :" + std::to_string(it->port) +
+                " to :" + std::to_string(port));
+            it->port = port;
+        }
+        it->isConnected =
+            activeConnections_.find(ip) != activeConnections_.end();
         it->lastActive = time(nullptr);
     }
 }
@@ -73,11 +70,13 @@ void PeerManager::removePeer(const std::string& ip, int port) {
             }),
         peers.end());
 
-    const auto key = endpointKey(ip, port);
-    verifiedEndpoints_.erase(key);
-    if (std::none_of(configuredPeers_.begin(), configuredPeers_.end(), [&](const PeerInfo& p) {
-            return p.ip == ip && p.port == port;
-        })) reconnect_.erase(key);
+    const bool stillKnown = std::any_of(
+        peers.begin(), peers.end(), [&](const PeerInfo& p) {
+            return p.ip == ip;
+        });
+    if (!stillKnown) {
+        reconnect_.erase(ip);
+    }
 }
 
 std::vector<PeerInfo> PeerManager::getPeers() const {
@@ -93,33 +92,6 @@ void PeerManager::updatePeerActivity(const std::string& ip, int port) {
             break;
         }
     }
-}
-
-void PeerManager::rememberConfiguredPeer(const std::string& ip, int port) {
-    if (ip.empty() || port <= 0 || port > 65535) return;
-    std::lock_guard<std::mutex> lock(mtx);
-    if (std::any_of(configuredPeers_.begin(), configuredPeers_.end(), [&](const PeerInfo& p) {
-            return p.ip == ip && p.port == port;
-        })) return;
-    if (configuredPeers_.size() >= MAX_CONFIGURED_ENDPOINTS) return;
-    configuredPeers_.push_back({ip, port, false, 0});
-    // Let the explicit startup dial finish before maintenance retries it.
-    auto& state = reconnect_[endpointKey(ip, port)];
-    state.nextAttempt = Clock::now() + std::chrono::seconds(20);
-}
-
-void PeerManager::releaseVerifiedEndpoint(const std::string& ip, int port) {
-    std::lock_guard<std::mutex> lock(mtx);
-    const auto key = endpointKey(ip, port);
-    auto active = verifiedEndpoints_.find(key);
-    if (active == verifiedEndpoints_.end()) return;
-    if (--active->second != 0) return;
-    verifiedEndpoints_.erase(active);
-    for (auto& peer : peers) {
-        if (peer.ip == ip && peer.port == port) peer.isConnected = false;
-    }
-    std::uint32_t jitter = 0;
-    scheduleReconnectFailureLocked(key, Clock::now(), jitter);
 }
 
 void PeerManager::expireStateLocked(AbuseState& state, TimePoint now) {
@@ -284,6 +256,13 @@ bool PeerManager::tryAcquireConnectionSlot(
     state->lastTouched = now;
     rejectionReason.clear();
 
+    for (auto& peer : peers) {
+        if (peer.ip == ip) {
+            peer.isConnected = true;
+            peer.lastActive = time(nullptr);
+        }
+    }
+
     return true;
 }
 
@@ -332,7 +311,31 @@ void PeerManager::releaseConnectionSlot(const std::string& ip) {
         --totalActiveConnections_;
     }
 
-    // Socket quota release is not evidence about any other endpoint on this IP.
+    const bool connected =
+        activeConnections_.find(ip) != activeConnections_.end();
+    bool knownPeer = false;
+    for (auto& peer : peers) {
+        if (peer.ip == ip) {
+            knownPeer = true;
+            peer.isConnected = connected;
+            peer.lastActive = time(nullptr);
+        }
+    }
+
+    if (!connected && knownPeer) {
+        // A previously VERIFIED session disappeared. Treat that as the first
+        // reconnect failure. Because addPeer() resets this counter after every
+        // successful VERSION handshake, normal long-lived sessions always begin
+        // recovery at ~5s, while repeated failures back off to a 60s ceiling.
+        std::uint32_t jitterMillis = 0;
+        const std::uint32_t baseSeconds =
+            scheduleReconnectFailureLocked(ip, Clock::now(), jitterMillis);
+        Logger::log(
+            "[PEER-REDIAL-01] Verified peer disconnected " + ip +
+            "; retryInMs=" +
+            std::to_string(baseSeconds * 1000U + jitterMillis));
+    }
+
     pruneStateLocked(Clock::now());
 }
 
@@ -346,18 +349,16 @@ std::vector<PeerInfo> PeerManager::claimReconnectCandidates(
     }
 
     const TimePoint now = Clock::now();
-    result.reserve(std::min(maxCandidates, peers.size() + configuredPeers_.size()));
-    std::vector<PeerInfo> candidates = peers;
-    candidates.insert(candidates.end(), configuredPeers_.begin(), configuredPeers_.end());
-    for (const auto& peer : candidates) {
+    result.reserve(std::min(maxCandidates, peers.size()));
+
+    for (const auto& peer : peers) {
         if (result.size() >= maxCandidates) {
             break;
         }
         if (peer.ip.empty() || peer.port <= 0 || peer.port > 65535) {
             continue;
         }
-        const auto key = endpointKey(peer.ip, peer.port);
-        if (verifiedEndpoints_.find(key) != verifiedEndpoints_.end()) {
+        if (activeConnections_.find(peer.ip) != activeConnections_.end()) {
             continue;
         }
 
@@ -368,7 +369,7 @@ std::vector<PeerInfo> PeerManager::claimReconnectCandidates(
             continue;
         }
 
-        auto& state = reconnect_[key];
+        auto& state = reconnect_[peer.ip];
         if (state.nextAttempt != TimePoint{} && now < state.nextAttempt) {
             continue;
         }
@@ -376,33 +377,31 @@ std::vector<PeerInfo> PeerManager::claimReconnectCandidates(
         // Attempt lease: longer than the 5s redial connect timeout. If TCP
         // succeeds but VERSION never validates, releaseConnectionSlot() will
         // schedule the next exponentially-backed-off attempt.
-        state.nextAttempt = now + std::chrono::seconds(20);
+        state.nextAttempt = now + std::chrono::seconds(8);
         result.push_back(peer);
     }
 
     return result;
 }
 
-void PeerManager::noteReconnectFailure(const std::string& ip, int port) {
+void PeerManager::noteReconnectFailure(const std::string& ip) {
     std::uint32_t failures = 0;
     std::uint32_t baseSeconds = 0;
     std::uint32_t jitterMillis = 0;
 
     {
         std::lock_guard<std::mutex> lock(mtx);
-        const auto matches = [&](const PeerInfo& peer) {
-            return peer.ip == ip && peer.port == port;
-        };
-        const bool knownPeer = std::any_of(peers.begin(), peers.end(), matches) ||
-            std::any_of(configuredPeers_.begin(), configuredPeers_.end(), matches);
+        const bool knownPeer = std::any_of(
+            peers.begin(), peers.end(), [&](const PeerInfo& peer) {
+                return peer.ip == ip;
+            });
         if (!knownPeer) {
             return;
         }
-        const auto key = endpointKey(ip, port);
-        if (verifiedEndpoints_.count(key)) return;
+
         baseSeconds =
-            scheduleReconnectFailureLocked(key, Clock::now(), jitterMillis);
-        failures = reconnect_[key].consecutiveFailures;
+            scheduleReconnectFailureLocked(ip, Clock::now(), jitterMillis);
+        failures = reconnect_[ip].consecutiveFailures;
     }
 
     Logger::log(

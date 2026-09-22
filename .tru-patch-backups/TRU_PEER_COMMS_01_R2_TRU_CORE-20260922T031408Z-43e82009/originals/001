@@ -10522,18 +10522,13 @@ std::vector<std::pair<std::string, int>> loadPeers(
     if (!file.is_open()) return peers;
 
     std::string line;
-    bool verifiedEndpointFormat = false;
     while (std::getline(file, line)) {
-        if (line == "# TRU_PEER_ENDPOINTS_V2") { verifiedEndpointFormat = true; continue; }
         const auto colonPos = line.rfind(':');
         if (colonPos == std::string::npos) continue;
         const std::string ip = line.substr(0, colonPos);
         int storedPort = 0;
         try {
-            std::size_t used = 0;
-            const auto portText = line.substr(colonPos + 1);
-            storedPort = std::stoi(portText, &used);
-            if (used != portText.size() || storedPort <= 0 || storedPort > 65535) continue;
+            storedPort = std::stoi(line.substr(colonPos + 1));
         } catch (...) {
             Logger::log("[MULTINODE-01A] Ignoring malformed saved peer: " + line);
             continue;
@@ -10542,14 +10537,14 @@ std::vector<std::pair<std::string, int>> loadPeers(
         // Old releases persisted inbound TCP source ports (ephemeral 5xxxx/6xxxx
         // values). Only a peer explicitly stored at this network's canonical P2P
         // service port is reconnectable authority.
-        if ((!verifiedEndpointFormat && storedPort != canonicalP2PPort) ||
+        if (storedPort != canonicalP2PPort ||
             !persistablePeerIp(ip, externalIp)) {
             Logger::log(
                 "[MULTINODE-01A] Ignoring non-canonical saved peer: " + line);
             continue;
         }
 
-        const std::pair<std::string, int> candidate{ip, storedPort};
+        const std::pair<std::string, int> candidate{ip, canonicalP2PPort};
         if (std::find(peers.begin(), peers.end(), candidate) == peers.end()) {
             peers.push_back(candidate);
         }
@@ -10567,21 +10562,20 @@ void savePeers(const std::vector<PeerInfo>& peers,
         return;
     }
 
-    file << "# TRU_PEER_ENDPOINTS_V2\n";
     std::vector<std::string> written;
     for (const auto& peer : peers) {
         if (!persistablePeerIp(peer.ip, externalIp)) continue;
-        if (peer.port <= 0 || peer.port > 65535) continue;
-        const auto endpoint = peer.ip + ":" + std::to_string(peer.port);
-        if (std::find(written.begin(), written.end(), endpoint) != written.end()) continue;
-        // Only VERSION-verified service endpoints enter this book; source ports
-        // never do. Legacy files without the marker still get strict filtering.
-        file << endpoint << "\n";
-        written.push_back(endpoint);
+        if (std::find(written.begin(), written.end(), peer.ip) != written.end()) continue;
+
+        // Never persist peer.port for inbound peers: it is commonly the remote
+        // socket's ephemeral source port, not that node's service endpoint.
+        file << peer.ip << ":" << canonicalP2PPort << "\n";
+        written.push_back(peer.ip);
     }
     Logger::log(
         "[MULTINODE-01A] Saved " + std::to_string(written.size()) +
-        " verified service endpoint(s)");
+        " canonical peer endpoint(s) on service port " +
+        std::to_string(canonicalP2PPort));
 }
 //======================================================================================
 //			Main Ini
@@ -10770,9 +10764,7 @@ int main(int argc, char *argv[]) {
 
         bool cliMode = result["cli"].as<bool>();
         bool guiMode = result["gui"].as<bool>();
-        // Resolve the selected config once; bootstrap helpers use this same file.
-        std::string cfgFile = std::filesystem::absolute(
-            result["conf"].as<std::string>()).lexically_normal().string();
+        std::string cfgFile = result["conf"].as<std::string>();
 
         std::string rpcBind = result["rpcbind"].as<std::string>();
         int rpcPort = result["rpcport"].as<int>();
@@ -11072,7 +11064,7 @@ int main(int argc, char *argv[]) {
         }
 
         // Initialize node and chain (previously these were declared here)
-        node = std::make_unique<P2PNode>(cfgFile);
+        node = std::make_unique<P2PNode>();
         chain = std::make_unique<Blockchain>(dbPath, std::string(tru_network::GENESIS_ADDRESS), *node, noSeeds);
 
         // install fail-stop plumbing before the node is exposed
@@ -11143,8 +11135,6 @@ int main(int argc, char *argv[]) {
         }
 
         if (!noSeeds && !seedNodes.empty()) {
-            for (const auto& seed : seedNodes)
-                node->rememberPeerForReconnect(seed.first, seed.second);
             bool connectedToSeed = false;
             for (int attempt = 1; attempt <= maxConnectionRetries && !connectedToSeed && g_running; ++attempt) {
                 Logger::log("[main] Connection attempt " + std::to_string(attempt));
@@ -11174,7 +11164,6 @@ int main(int argc, char *argv[]) {
         auto savedPeers = loadPeers(
             dbPath + "/peers.dat", p2pPort, externalIp);
         for (const auto& peer : savedPeers) {
-            node->rememberPeerForReconnect(peer.first, peer.second);
             Logger::log("[main] Connecting to saved peer: " + peer.first + ":" + std::to_string(peer.second));
             node->connectToPeer(peer.first, peer.second, 10);
         }
@@ -11188,7 +11177,6 @@ int main(int argc, char *argv[]) {
                     std::string ip = peer.substr(0, colonPos);
                     try {
                         int port = std::stoi(peer.substr(colonPos + 1));
-                        node->rememberPeerForReconnect(ip, port);
                         Logger::log("[main] Connecting to CLI peer: " + ip + ":" + std::to_string(port));
                         node->connectToPeer(ip, port, 10);
                     } catch (const std::exception& e) {

@@ -91,11 +91,7 @@ inline std::string parseCoreVersionFromUserAgent(const std::string& ua) {
         return "legacy/unreported";
     }
     const std::string v=ua.substr(prefix.size(), ua.size()-prefix.size()-1);
-    return validRelease(v) && v != "unreported" ? v : std::string("legacy/unreported");
-}
-
-inline bool isReportedVersion(const std::string& v) {
-    return !v.empty() && v != "unreported" && v != "legacy/unreported";
+    return validRelease(v) ? v : std::string("legacy/unreported");
 }
 
 inline std::string boundedUserAgent(const std::string& ua) {

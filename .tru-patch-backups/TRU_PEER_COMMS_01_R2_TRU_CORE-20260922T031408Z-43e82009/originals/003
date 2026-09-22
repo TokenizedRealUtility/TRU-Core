@@ -10,7 +10,6 @@
 
 // Forward declaration of P2PNode to avoid circular dependencies
 class P2PNode;
-class PeerConnection;
 
 #pragma once
 
@@ -28,7 +27,7 @@ public:
     static size_t deserializeMessage(const std::string& data, blockchain::BaseMessage& msg);
 
     // Create specific messages
-    static blockchain::BaseMessage createVersionMessage(int servicePort = 0, uint64_t height = 0);
+    static blockchain::BaseMessage createVersionMessage();
     static blockchain::BaseMessage createVerAckMessage();
     static blockchain::BaseMessage createPingMessage();
     static blockchain::BaseMessage createPongMessage(uint64_t nonce);
@@ -41,8 +40,7 @@ public:
     // per-connection fail-closed network handshake validation.
     static bool validateVersionMessage(const blockchain::Version& version);
     // Handle received messages
-    static void handleMessage(const blockchain::BaseMessage& msg, Blockchain* chain,
-                              P2PNode* node, PeerConnection* sender = nullptr);
+    static void handleMessage(const blockchain::BaseMessage& msg, Blockchain* chain, P2PNode* node);
 
 private:
     // Compute SHA-256 checksum of data

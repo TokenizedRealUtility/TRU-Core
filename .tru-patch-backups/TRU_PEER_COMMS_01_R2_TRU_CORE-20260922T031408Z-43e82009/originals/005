@@ -5,7 +5,6 @@
 #include "miner_telemetry_v1.h"
 #include "peer_manager.h"
 #include "peer_connection.h"
-#include "peer_discovery_queue_v1.h"
 #include "logging.h"
 #include <string>
 #include <vector>
@@ -18,12 +17,11 @@
 
 class P2PNode {
 public:
-    explicit P2PNode(const std::string& configPath = "tru.conf");
+    P2PNode();
     ~P2PNode();
 
     void startListening(int port, Blockchain* chain);
     bool connectToPeer(const std::string& ip, int port, int timeoutSec = 5);
-    bool queueDiscoveredPeer(const std::string& ip, int port);
     void broadcastBlock(const Block& block);
     void broadcastTransaction(const Transaction& tx);
     void broadcastMessage(const blockchain::BaseMessage& msg);
@@ -45,16 +43,14 @@ public:
     void listPeers();  // Removed const
     void sendMessageToPeer(const std::string& ip, int port, const std::string& message);
     void setExternalIp(const std::string& ip);
-    int advertisedServicePort() const { return running_.load() && !stopping_.load() ? listenPort_ : 0; }
-    void rememberPeerForReconnect(const std::string& ip, int port);
     // MULTINODE-01E: connectToPeer already rejects self before opening a
     // socket, but the ADDR handler admitted the address to the peer book
     // first. Expose the same predicate so gossip can skip it outright.
     bool isSelfEndpoint(const std::string& ip, int port) const;
     std::vector<PeerInfo> getKnownPeers() const;
-    int getActivePeerCount() const;
+    int getActivePeerCount() const { return activePeerCount_.load(); }
     bool isNetworkConnected() const { 
-        return getActivePeerCount() > 0;
+        return activePeerCount_.load() > 0; 
     }
     void announceBlock(const Block& block);
     bool isRunning() const { return running_.load(); }
@@ -71,12 +67,10 @@ private:
     void cleanupPeers();
 
     Blockchain* blockchain_;
-    const std::string configPath_;
-    tru_peer_discovery::Queue discoveryQueue_;
     int listenPort_;
     int listenSock_;
     std::vector<std::shared_ptr<PeerConnection>> peers_;
-    mutable std::mutex peersMutex_;
+    std::mutex peersMutex_;
     std::mutex reconnectStartMutex_;
     std::thread acceptThread_;
     std::thread reconnectThread_;

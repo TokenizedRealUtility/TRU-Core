@@ -1,0 +1,179 @@
+{
+  "patch": "TRU_PEER_COMMS_01_R2_TRU_CORE",
+  "bundle_sha256": "259c7579467e870310661d599a292a8b34dcbce4eddb0fcf1d1197670478b4d4",
+  "roots": {
+    "core": "/home/gw878/TRU-Core"
+  },
+  "status": "applied",
+  "files": [
+    {
+      "root": "core",
+      "path": "src/blockchain.cpp",
+      "before": "4c058701939f42575e9a1008d89459252a88ebe2e00f4d04634d30bf6bf5ad6c",
+      "after": "07be5f3c44c20517a855d682b03af3110a777d25fe7f3287f987012dc5559403",
+      "backup": "000",
+      "metadata": {
+        "mode": 436,
+        "uid": 1000,
+        "gid": 1000
+      }
+    },
+    {
+      "root": "core",
+      "path": "src/main.cpp",
+      "before": "9f1b561eeb322a82cae41a91584175e0085b260db4be4f8c19d22d0b67f67ba6",
+      "after": "4c39a91357ddbe3326ac82f9707388373f89f4f79e49b705d7634d77833e4fb2",
+      "backup": "001",
+      "metadata": {
+        "mode": 436,
+        "uid": 1000,
+        "gid": 1000
+      }
+    },
+    {
+      "root": "core",
+      "path": "src/message_handler.cpp",
+      "before": "4e9df614189b8c207f003f7596e58d792313b348b20e630044700145c32a9f4c",
+      "after": "f55f1fd444cf80a140541d681f4ff10f7730210b9b5fbb72623f2042c4c9b84a",
+      "backup": "002",
+      "metadata": {
+        "mode": 436,
+        "uid": 1000,
+        "gid": 1000
+      }
+    },
+    {
+      "root": "core",
+      "path": "src/message_handler.h",
+      "before": "1c4e039720c104cc8683ae1495c7ddc1f281ec16c60cc4af88657ce478ffcb12",
+      "after": "5a22d36a59a138dd2a2fd620ea40e975d446c9c3bb2ea907f2cc82db87460538",
+      "backup": "003",
+      "metadata": {
+        "mode": 436,
+        "uid": 1000,
+        "gid": 1000
+      }
+    },
+    {
+      "root": "core",
+      "path": "src/p2p.cpp",
+      "before": "5f98fd1c11b47f1a6592dc56d67cc512c9b923db74513763f500540f1602e8ed",
+      "after": "56a19a7e7c8cdceb791f01b405dce7a89cffd5af25a909c6467b77b263e07154",
+      "backup": "004",
+      "metadata": {
+        "mode": 436,
+        "uid": 1000,
+        "gid": 1000
+      }
+    },
+    {
+      "root": "core",
+      "path": "src/p2p.h",
+      "before": "14fc5e06e03aa9dd2e2ebd55f18212258f5c20932b85213b1d6b8b47ad86a6cc",
+      "after": "ecc7ffe44c06010ef9d9e94bd3a776b639609624788c6809f152d99ef95e8598",
+      "backup": "005",
+      "metadata": {
+        "mode": 436,
+        "uid": 1000,
+        "gid": 1000
+      }
+    },
+    {
+      "root": "core",
+      "path": "src/peer_connection.cpp",
+      "before": "24ed59b92cd91fb6d72a8fc191687ba2691c18b040fdf4e9b2e91028e82c2b90",
+      "after": "aa67457815402529f05a8b4b5d325ba21c10e7f5a5751328a33aff14c3a80679",
+      "backup": "006",
+      "metadata": {
+        "mode": 436,
+        "uid": 1000,
+        "gid": 1000
+      }
+    },
+    {
+      "root": "core",
+      "path": "src/peer_connection.h",
+      "before": "fc92e8688fbcd7234f191827bb873dea9829066ce68245943734e17cdfe08212",
+      "after": "a74e14a4d4443d72043b1a26b7b1014a23120fcc00436387dd6eca0076e88f13",
+      "backup": "007",
+      "metadata": {
+        "mode": 436,
+        "uid": 1000,
+        "gid": 1000
+      }
+    },
+    {
+      "root": "core",
+      "path": "src/peer_discovery_queue_v1.h",
+      "before": null,
+      "after": "83d0092cab581a7ba9c645116956bb62856a54b86e1f44581931566b8be6174f",
+      "backup": "008",
+      "metadata": null
+    },
+    {
+      "root": "core",
+      "path": "src/peer_manager.cpp",
+      "before": "c992754a6da3433c6abb5595c0df8b1795d49bf4d34997204cc685aeab73c458",
+      "after": "2e6fd20683d448277fd959f1112472ec809e4737f463928a5e85d393bcd42521",
+      "backup": "009",
+      "metadata": {
+        "mode": 436,
+        "uid": 1000,
+        "gid": 1000
+      }
+    },
+    {
+      "root": "core",
+      "path": "src/peer_manager.h",
+      "before": "d2a14e8b2b98f1f187031b650e332b9ac17e3116119af6902ea0a0563e574adf",
+      "after": "d1ec6cbdc5ded7c624348fcf74bd3cef7b8660ee4042f6561fa06050d16bb7db",
+      "backup": "010",
+      "metadata": {
+        "mode": 436,
+        "uid": 1000,
+        "gid": 1000
+      }
+    },
+    {
+      "root": "core",
+      "path": "src/peer_observability_v1.h",
+      "before": null,
+      "after": "3a30d32376554b00ed7b2cd698101e511e55640a2ca765c909ba85d546dbcf4f",
+      "backup": "011",
+      "metadata": null
+    },
+    {
+      "root": "core",
+      "path": "src/peer_transport_state_v1.h",
+      "before": null,
+      "after": "d8e5390dc89d029b37f5f2bd92b675e65f187bb10173dc03ec0ddc6663197cd0",
+      "backup": "012",
+      "metadata": null
+    },
+    {
+      "root": "core",
+      "path": "src/rpc_server.cpp",
+      "before": "cd24173e6aeb7ea4dda0127326d00ed83b701ab6711d761de0c82c41af86eac9",
+      "after": "1559ec65041b9b169f8175e77911501ca68ed029c86cb4edcc27dddc958af22f",
+      "backup": "013",
+      "metadata": {
+        "mode": 436,
+        "uid": 1000,
+        "gid": 1000
+      }
+    },
+    {
+      "root": "core",
+      "path": "src/tru_version.h",
+      "before": "4a8a63b10e00716c9d61ebe377efa0b9bc64d7d32f0d68934c975069cc339631",
+      "after": "f038671e2a3373fb31ca13c5349681e21e3e18b2f8b34e3583f83fcc55ed3a2c",
+      "backup": "014",
+      "metadata": {
+        "mode": 436,
+        "uid": 1000,
+        "gid": 1000
+      }
+    }
+  ],
+  "binary": null
+}

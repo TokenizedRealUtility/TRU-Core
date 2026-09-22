@@ -42,7 +42,6 @@
 #include "tru_network_params.h"
 #include "tru_amount.h"
 #include "tru_version.h"  // UI-08 connected Core release version
-#include "peer_observability_v1.h"
 
 using json = nlohmann::json;
 httplib::Server g_rpcServer;
@@ -3433,9 +3432,15 @@ json handleGetPeerInfo(P2PNode& node, const json& params, int id) {
     response["id"] = id;
     json peerArray = json::array();
 
-    const auto snapshot = tru_peer_observability::snapshot(node);
-    for (const auto& peer : snapshot.at("peers"))
-        if (peer.value("peerKind", "") == "session") peerArray.push_back(peer);
+    // Use getPeersList() to safely access the peers
+    auto peers = node.getPeersList();
+    for (const auto& peer : peers) {
+        json peerInfo;
+        peerInfo["ip"] = peer->getIp();
+        peerInfo["port"] = peer->getPort();
+        peerInfo["height"] = peer->getPeerHeight();
+        peerArray.push_back(peerInfo);
+    }
     response["result"] = peerArray;
     return response;
 }

@@ -33,9 +33,6 @@ public:
     void removePeer(const std::string& ip, int port);
     std::vector<PeerInfo> getPeers() const;
     void updatePeerActivity(const std::string& ip, int port);
-    // Verified endpoints are distinct from IP-scoped abuse/connection quotas.
-    void releaseVerifiedEndpoint(const std::string& ip, int port);
-    void rememberConfiguredPeer(const std::string& ip, int port);
 
     // connection admission/abuse controls.
     // Acquire before PeerConnection/thread creation and release exactly once.
@@ -55,7 +52,7 @@ public:
     // gossip. claimReconnectCandidates() places a short attempt lease on each
     // returned endpoint so a maintenance loop cannot hammer the same peer.
     std::vector<PeerInfo> claimReconnectCandidates(std::size_t maxCandidates);
-    void noteReconnectFailure(const std::string& ip, int port);
+    void noteReconnectFailure(const std::string& ip);
 
     // Add IP-scoped abuse score. Returns true if banned afterward.
     bool recordViolation(
@@ -97,8 +94,6 @@ private:
     std::size_t totalActiveConnections_{0};
     std::unordered_map<std::string, AbuseState> abuse_;
     std::unordered_map<std::string, ReconnectState> reconnect_;
-    std::unordered_map<std::string, std::size_t> verifiedEndpoints_;
-    std::vector<PeerInfo> configuredPeers_; // operator input only, never ADDR gossip
 };
 
 #endif // PEER_MANAGER_H

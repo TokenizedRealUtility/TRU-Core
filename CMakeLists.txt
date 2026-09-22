@@ -262,6 +262,9 @@ set(COMMON_HEADERS
     src/token_evolution.h
     src/animated_background.h
     src/wallet_styles.h
+    src/peer_discovery_queue_v1.h
+    src/peer_observability_v1.h
+    src/peer_transport_state_v1.h
 )
 
 # Executable: Living Token Evolution test CLI (Patch 20)

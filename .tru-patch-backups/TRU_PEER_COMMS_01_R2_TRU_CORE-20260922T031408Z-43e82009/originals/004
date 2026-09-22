@@ -11,13 +11,8 @@
 #include <random>
 #include <sstream>
 #include <algorithm>
-#include <filesystem>
 
-P2PNode::P2PNode(const std::string& configPath)
-    : blockchain_(nullptr),
-      configPath_(std::filesystem::absolute(configPath).lexically_normal().string()),
-      listenPort_(0), listenSock_(-1), running_(false), stopping_(false),
-      acceptLoopExited_(true), externalIp_("") {}
+P2PNode::P2PNode() : blockchain_(nullptr), listenPort_(0), listenSock_(-1), running_(false), stopping_(false), acceptLoopExited_(true), externalIp_("") {}
 
 P2PNode::~P2PNode() {
     stop();
@@ -90,22 +85,6 @@ void P2PNode::reconnectLoop() {
     while (!stopping_.load()) {
         cleanupPeers();
 
-        // ADDR readers never dial. This existing maintenance thread drains a
-        // bounded queue outside both the queue and peer-list mutexes. Discovery
-        // has its own 6/minute budget and cannot consume configured-peer retries.
-        for (unsigned i = 0; i < tru_peer_discovery::Queue::maxPerMessage && !stopping_.load(); ++i) {
-            tru_peer_discovery::Queue::Endpoint endpoint;
-            if (!discoveryQueue_.take(endpoint)) break;
-            bool connected = false;
-            try {
-                connected = connectToPeer(endpoint.ip, endpoint.port,
-                    tru_peer_discovery::Queue::dialTimeoutSeconds);
-            } catch (const std::exception& e) {
-                Logger::log("[PEER-COMMS-01] Discovery dial failed: " + std::string(e.what()));
-            }
-            discoveryQueue_.complete(endpoint, connected);
-        }
-
         const auto candidates = peerManager_.claimReconnectCandidates(2);
         for (const auto& peer : candidates) {
             if (stopping_.load()) {
@@ -116,7 +95,7 @@ void P2PNode::reconnectLoop() {
                 Logger::log(
                     "[PEER-REDIAL-01] Skipping self endpoint " + peer.ip + ":" +
                     std::to_string(peer.port));
-                peerManager_.noteReconnectFailure(peer.ip, peer.port);
+                peerManager_.noteReconnectFailure(peer.ip);
                 continue;
             }
 
@@ -125,7 +104,7 @@ void P2PNode::reconnectLoop() {
                 peer.ip + ":" + std::to_string(peer.port));
 
             if (!connectToPeer(peer.ip, peer.port, 5)) {
-                peerManager_.noteReconnectFailure(peer.ip, peer.port);
+                peerManager_.noteReconnectFailure(peer.ip);
             } else {
                 Logger::log(
                     "[PEER-REDIAL-01] TCP redial established to " + peer.ip + ":" +
@@ -321,6 +300,8 @@ bool P2PNode::connectToPeer(const std::string& ip, int port, int timeoutSec) {
     }
 
     Logger::log("[P2PNode] Connecting to " + ip + ":" + std::to_string(port));
+    cleanupPeers();
+
     if (stopping_.load()) {
         Logger::log(
             "[P2PNode] Outbound connection cancelled after peer cleanup: " +
@@ -545,22 +526,28 @@ bool P2PNode::connectToPeer(const std::string& ip, int port, int timeoutSec) {
     return true;
 }
 void P2PNode::broadcastBlock(const Block& block) {
-    // Announce once. A peer missing the block requests it with the existing
-    // GETDATA protocol and receives a connection-local BLOCK response.
     announceBlock(block);
+    std::lock_guard<std::mutex> lock(peersMutex_);
+    for (auto& peer : peers_) {
+        peer->sendBlock(block);
+    }
 }
 
 void P2PNode::broadcastTransaction(const Transaction& tx) {
-    for (const auto& peer : getPeersList()) {
-        if (peer->isReady()) peer->sendTransaction(tx);
+    std::lock_guard<std::mutex> lock(peersMutex_);
+    for (auto& peer : peers_) {
+        peer->sendTransaction(tx);
     }
 }
 
 void P2PNode::broadcastMessage(const blockchain::BaseMessage& msg) {
+    cleanupPeers();
+
     std::string serialized;
     if (MessageHandler::serializeMessage(msg, serialized) > 0) {
-        for (const auto& peer : getPeersList()) {
-            if (peer->isReady()) peer->sendData(serialized);
+        std::lock_guard<std::mutex> lock(peersMutex_);
+        for (auto& peer : peers_) {
+            peer->sendData(serialized);
         }
         Logger::log("[P2PNode] Broadcasted message type: " + std::to_string(msg.type()));
     } else {
@@ -576,7 +563,6 @@ void P2PNode::stop() {
 
     stopping_.store(true);
     running_.store(false);
-    discoveryQueue_.close(); // reject reader enqueues and discard pending work
     Logger::log("[P2PNode] Set stopping_=true and running_=false");
 
     if (reconnectThread_.joinable()) {
@@ -671,42 +657,26 @@ void P2PNode::stop() {
 
 
 void P2PNode::updatePeerHeights() {
-    for (const auto& peer : getPeersList()) {
+    std::lock_guard<std::mutex> lock(peersMutex_);
+    for (auto& peer : peers_) {
         peer->requestHeight();
     }
 }
 
 std::vector<std::shared_ptr<PeerConnection>> P2PNode::getPeersList() {
+    cleanupPeers();
     std::lock_guard<std::mutex> lock(peersMutex_);
-    std::vector<std::shared_ptr<PeerConnection>> result;
+
+    // Count active peers
+    int activeCount = 0;
     for (const auto& peer : peers_) {
-        if (peer->isRunning()) result.push_back(peer);
+        if (peer->isRunning() && peer->isConnectionAlive()) {
+            activeCount++;
+        }
     }
-    return result;
-}
+    activePeerCount_.store(activeCount);
 
-int P2PNode::getActivePeerCount() const {
-    std::lock_guard<std::mutex> lock(peersMutex_);
-    int count = 0;
-    for (const auto& peer : peers_) if (peer->isReady()) ++count;
-    return count;
-}
-
-void P2PNode::rememberPeerForReconnect(const std::string& ip, int port) {
-    in_addr parsed{};
-    if (port <= 0 || port > 65535 || inet_pton(AF_INET, ip.c_str(), &parsed) != 1 ||
-        isSelfEndpoint(ip, port)) return;
-    peerManager_.rememberConfiguredPeer(ip, port);
-}
-
-bool P2PNode::queueDiscoveredPeer(const std::string& ip, int port) {
-    in_addr parsed{};
-    if (stopping_.load() || port <= 0 || port > 65535 ||
-        inet_pton(AF_INET, ip.c_str(), &parsed) != 1 || isSelfEndpoint(ip, port))
-        return false;
-    // Maintenance starts before either an inbound or outbound reader starts.
-    // Queue admission performs no socket writes, connections, or thread joins.
-    return discoveryQueue_.enqueue(ip, port);
+    return peers_;
 }
 
 PeerManager* P2PNode::getPeerManager() {
@@ -714,7 +684,7 @@ PeerManager* P2PNode::getPeerManager() {
 }
 
 std::vector<std::pair<std::string, int>> P2PNode::getSeedsFromConfig() const {
-    ConfigReader config(configPath_);
+    ConfigReader config("tru.conf");
     std::vector<std::pair<std::string, int>> seeds;
     
     std::string seedsStr = config.getValue("network", "seeds");
@@ -767,7 +737,6 @@ void P2PNode::bootstrapFromSeeds() {
         return;
     }
     for (const auto& [ip, port] : seeds) {
-        rememberPeerForReconnect(ip, port);
         Logger::log("[P2PNode] Bootstrapping with seed: " + ip + ":" + std::to_string(port));
         connectToPeer(ip, port);
     }
@@ -785,7 +754,7 @@ Block P2PNode::requestBlock(uint64_t height) {
     {
         std::lock_guard<std::mutex> lock(peersMutex_);
         for (const auto& peer : peers_) {
-            if (peer->isSyncEligible() && peer->hasFreshHeight() && peer->getPeerHeight() >= height) {
+            if (peer->getPeerHeight() >= height) {
                 eligiblePeers.push_back(peer);
             }
         }
@@ -856,8 +825,7 @@ uint64_t P2PNode::getHighestPeerHeight() {
     uint64_t maxHeight = 0;
     std::lock_guard<std::mutex> lock(peersMutex_);
     for (const auto& peer : peers_) {
-        if (peer->isReady() && peer->hasFreshHeight())
-            maxHeight = std::max(maxHeight, peer->getPeerHeight());
+        maxHeight = std::max(maxHeight, peer->getPeerHeight());
     }
     return maxHeight;
 }
@@ -875,8 +843,9 @@ void P2PNode::setBlockchain(Blockchain* chain) {
 }
 
 void P2PNode::sendMessageToPeer(const std::string& ip, int port, const std::string& message) {
-    for (const auto& peer : getPeersList()) {
-        if (peer->isReady() && peer->getIp() == ip && peer->getPort() == port) {
+    std::lock_guard<std::mutex> lock(peersMutex_);
+    for (auto& peer : peers_) {
+        if (peer->getIp() == ip && peer->getPort() == port) {
             peer->sendChatMessage(message);
             Logger::log("[P2PNode] Sent message to peer: " + ip + ":" + std::to_string(port));
             return;
@@ -921,7 +890,7 @@ void P2PNode::cleanupPeers() {
         std::lock_guard<std::mutex> lock(peersMutex_);
         auto it = peers_.begin();
         while (it != peers_.end()) {
-            if (!(*it)->isRunning() && (*it)->readLoopExited()) {
+            if (!(*it)->isRunning()) {
                 retired.push_back(std::move(*it));
                 it = peers_.erase(it);
             } else {

@@ -3,7 +3,6 @@
 
 #include "blockchain.h"
 #include "message_handler.h"
-#include "peer_transport_state_v1.h"
 #include <string>
 #include <thread>
 #include <mutex>
@@ -25,7 +24,6 @@ public:
     void start();
     void stop();
     void sendData(const std::string &data);
-    void sendMessage(const blockchain::BaseMessage& msg);
     void sendMinerReport(const std::string& data);
     bool supportsMinerIPReports() const { return supportsMinerReports() && minerIPReportsSupported_.load(); }
     bool supportsMinerReports() const { return minerReportsSupported_.load() && networkHandshakeComplete_.load(); }
@@ -37,19 +35,7 @@ public:
     void sendBlock(const Block &block);
     std::string getIp() const { return ip_; }
     int getPort() const { return port_; }
-    uint64_t getPeerHeight() const { return observations_.height.load(); }
-    uint64_t getHeightRevision() const { return observations_.heightRevision.load(std::memory_order_acquire); }
-    bool hasFreshHeight() const { return observations_.freshHeight(); }
-    std::int64_t getHeightUpdatedAt() const { return observations_.heightUnix.load(); }
-    std::int64_t getLastReceivedAt() const { return observations_.receivedUnix.load(); }
-    std::uint64_t getSessionId() const { return observations_.sessionId; }
-    bool isInbound() const { return inbound_; }
-    int getServicePort() const { return servicePort_.load(); }
-    bool isReady() const { return isRunning() && networkHandshakeComplete() && isConnectionAlive(); }
-    bool readLoopExited() const { return readLoopExited_.load(); }
-    bool isSyncEligible() const { return isReady() && observations_.syncAllowed(); }
-    void noteSyncFailure() { observations_.syncFailed(); }
-    void noteSyncSuccess() { observations_.syncSucceeded(); }
+    uint64_t getPeerHeight() const { return peerHeight_; }
     std::string getPeerCoreVersion() const {
         std::lock_guard<std::mutex> lock(peerMetadataMutex_);
         return peerCoreVersion_;
@@ -61,11 +47,11 @@ public:
     bool networkHandshakeComplete() const { return networkHandshakeComplete_.load(); }
     bool isRunning() const { return running_; }
     void updateLastActivity() {
-        observations_.received();
+        lastActivity = std::chrono::steady_clock::now();
     }
 
     bool isConnectionAlive() const {
-        return observations_.alive();
+        return std::chrono::steady_clock::now() - lastActivity < CONNECTION_TIMEOUT;
     }
 
     void sendPing();
@@ -97,13 +83,10 @@ private:
     std::map<uint64_t, std::promise<Block>> blockPromises_;
     std::string buffer_;
     std::atomic<bool> running_{false};
-    std::atomic<bool> readLoopExited_{true};
-    std::atomic<int> servicePort_{0};
-    bool bookEndpointHeld_{false}; // owned by the reader; released after it exits
     // application messages are forbidden until this peer
     // proves the exact TRU mainnet VERSION identity.
     std::atomic<bool> networkHandshakeComplete_{false};
-    tru_peer_transport::Observations observations_;
+    uint64_t peerHeight_;
     // NETWORK-VERSION-01: observational metadata learned from the validated
     // VERSION message. Never consulted by consensus or connection admission.
     mutable std::mutex peerMetadataMutex_;
@@ -111,6 +94,7 @@ private:
     std::string peerUserAgent_;
     int pipeFds_[2];
     void sendBlockNotFoundResponse(uint64_t height);
+    std::chrono::steady_clock::time_point lastActivity;
     std::chrono::steady_clock::time_point lastPing;
     static constexpr std::chrono::seconds PING_INTERVAL{30};
     static constexpr std::chrono::seconds CONNECTION_TIMEOUT{90};
