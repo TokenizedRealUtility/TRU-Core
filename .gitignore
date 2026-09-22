@@ -1,0 +1,100 @@
+# Build output
+build/
+build-*/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*_autogen/
+*.o
+*.obj
+*.a
+*.so
+*.so.*
+*.dll
+*.dylib
+*.exe
+
+# Dependency environments and caches
+node_modules/
+.venv/
+venv/
+/swap/agent/swap_agent/
+__pycache__/
+*.py[cod]
+
+# Private configuration and credentials
+.env
+.env.*
+tru.conf
+tru.conf.private
+.rpc-cookie*
+*.pem
+*.key
+*.wif
+
+# Chain, wallet, and Agent runtime data
+data/
+/swap/runtime/
+/market/data/
+/wallet*/
+*.dat
+*.dat.*
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.log
+*.pid
+
+# Local build receipts and maintenance artifacts
+/.runtime_verify/
+/.patch_builds/
+/.patch_backups/
+/.patch_state/
+/.recovery_backups/
+/.vah*/
+/.*.lock
+/patch-backups/
+/OLD_PATCH_TEST_ARTIFACTS/
+*.bak
+*.bak.*
+*.bak-*
+*.orig
+*.rej
+*~
+
+# Legacy copies and separately maintained website
+/magic_miner/old/
+/web/
+
+# Editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+swap/agent/swap_agent/
+
+# TRU packaged-patch backup workspace
+/.tru_patch_backups/
+.tru_patch_state/
+
+# Local TRU patch rollback/build artifacts
+.tru-patches/
+build-gui-desktop01/
+build-desktop/
+build-desktop-test/
+
+# MAC-DESKTOP-01 local patch/build artifacts
+TRU_MAC_DESKTOP_01_ADDON/
+TRU_MAC_DESKTOP_01A_VERSION_SYNC_PINNED.sh
+build-desktop-mac01-test/
+build-desktop-mac01-qt6-test/
+
+# TRU local patch / backup artifacts
+.tru-patches/
+.tru-patch-backups/
