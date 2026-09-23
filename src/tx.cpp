@@ -830,7 +830,7 @@ Transaction Transaction::deserializeBinary(const std::vector<unsigned char>& byt
     Logger::log("[deserializeBinary] vinCount=" + std::to_string(vinCount) + ", pos=" + std::to_string(pos));
     for (uint64_t i = 0; i < vinCount; i++) {
         TxIn in;
-        if (pos + 32 > bytes.size()) throw std::runtime_error("Invalid transaction: incomplete txid");
+        if (pos > bytes.size() || 32 > bytes.size() - pos) throw std::runtime_error("Invalid transaction: incomplete txid");
         // Read txid as big-endian (no reverse)
         std::vector<unsigned char> txidBytes(bytes.begin() + pos, bytes.begin() + pos + 32);
         in.txid = hexEncode(txidBytes);  // Directly encode to hex without reversing
@@ -849,7 +849,7 @@ Transaction Transaction::deserializeBinary(const std::vector<unsigned char>& byt
         // Read scriptSig
         uint64_t scriptLen = readVarInt(bytes, pos);
         Logger::log("[deserializeBinary] Input " + std::to_string(i) + " scriptSig length=" + std::to_string(scriptLen) + ", pos=" + std::to_string(pos));
-        if (pos + scriptLen > bytes.size()) throw std::runtime_error("Invalid transaction: incomplete scriptSig");
+        if (pos > bytes.size() || scriptLen > bytes.size() - pos) throw std::runtime_error("Invalid transaction: incomplete scriptSig");
         in.scriptSig.assign(bytes.begin() + pos, bytes.begin() + pos + scriptLen);
         pos += scriptLen;
         Logger::log("[deserializeBinary] Input " + std::to_string(i) + " scriptSig hex=" + hexEncode(in.scriptSig) + ", pos=" + std::to_string(pos));
@@ -873,7 +873,7 @@ Transaction Transaction::deserializeBinary(const std::vector<unsigned char>& byt
         // Read scriptPubKey
         uint64_t scriptLen = readVarInt(bytes, pos);
         Logger::log("[deserializeBinary] Output " + std::to_string(i) + " scriptPubKey length=" + std::to_string(scriptLen) + ", pos=" + std::to_string(pos));
-        if (pos + scriptLen > bytes.size()) throw std::runtime_error("Invalid transaction: incomplete scriptPubKey");
+        if (pos > bytes.size() || scriptLen > bytes.size() - pos) throw std::runtime_error("Invalid transaction: incomplete scriptPubKey");
         std::vector<unsigned char> spkBytes(bytes.begin() + pos, bytes.begin() + pos + scriptLen);
         out.scriptPubKey = hexEncode(spkBytes);
         pos += scriptLen;
@@ -895,7 +895,7 @@ Transaction Transaction::deserializeBinary(const std::vector<unsigned char>& byt
             uint64_t metaLen = readVarInt(bytes, pos);
             Logger::log("[deserializeBinary] Metadata length=" + std::to_string(metaLen) + ", pos=" + std::to_string(pos));
             
-            if (pos + metaLen <= bytes.size()) {
+            if (pos <= bytes.size() && metaLen <= bytes.size() - pos) {
                 std::string metaStr(bytes.begin() + pos, bytes.begin() + pos + metaLen);
                 pos += metaLen;
                 
@@ -920,7 +920,7 @@ Transaction Transaction::deserializeBinary(const std::vector<unsigned char>& byt
 //________________________________________________________________
 static uint32_t read32LE(const std::vector<unsigned char> &raw, size_t &pos)
 {
-    if(pos+4>raw.size()) throw std::runtime_error("read32LE out of range");
+    if(pos > raw.size() || 4 > raw.size() - pos) throw std::runtime_error("read32LE out of range");
     uint32_t val = (uint32_t)raw[pos] 
                  | ((uint32_t)raw[pos+1]<<8)
                  | ((uint32_t)raw[pos+2]<<16)
@@ -933,7 +933,7 @@ static uint32_t read32LE(const std::vector<unsigned char> &raw, size_t &pos)
 //________________________________________________________________
 static uint64_t read64LE(const std::vector<unsigned char> &raw, size_t &pos)
 {
-    if(pos+8>raw.size()) throw std::runtime_error("read64LE out of range");
+    if(pos > raw.size() || 8 > raw.size() - pos) throw std::runtime_error("read64LE out of range");
     uint64_t val=0;
     for(int i=0; i<8; i++){
         val |= ((uint64_t)raw[pos+i])<<(8*i);
@@ -950,18 +950,18 @@ static uint64_t readVarInt(const std::vector<unsigned char> &raw, size_t &pos) {
     if (c < 0xFD) {
         return c;
     } else if (c == 0xFD) {
-        if (pos + 2 > raw.size()) throw std::runtime_error("readVarInt[0xFD]: out of range");
+        if (pos > raw.size() || 2 > raw.size() - pos) throw std::runtime_error("readVarInt[0xFD]: out of range");
         uint16_t val = (uint16_t)raw[pos] | ((uint16_t)raw[pos + 1] << 8);
         pos += 2;
         return val;
     } else if (c == 0xFE) {
-        if (pos + 4 > raw.size()) throw std::runtime_error("readVarInt[0xFE]: out of range");
+        if (pos > raw.size() || 4 > raw.size() - pos) throw std::runtime_error("readVarInt[0xFE]: out of range");
         // AUDIT-REMEDIATION-01 / Track 01: read32LE advances pos.
         // Do not advance the cursor a second time here.
         uint32_t val = read32LE(raw, pos);
         return val;
     } else if (c == 0xFF) {
-        if (pos + 8 > raw.size()) throw std::runtime_error("readVarInt[0xFF]: out of range");
+        if (pos > raw.size() || 8 > raw.size() - pos) throw std::runtime_error("readVarInt[0xFF]: out of range");
         // AUDIT-REMEDIATION-01 / Track 01: read64LE advances pos.
         // Do not advance the cursor a second time here.
         uint64_t val = read64LE(raw, pos);

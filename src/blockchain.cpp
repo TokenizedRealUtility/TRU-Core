@@ -1,4 +1,5 @@
 #include "blockchain.h"
+#include "tru_submission_slot.h"
 #include "tru_limits.h"  // shared block/network size limits
 #include "block.h"
 #include "tx.h"
@@ -3937,6 +3938,8 @@ bool Blockchain::validateBlock(const Block& block) {
     Logger::log("[validateBlock] Block validated successfully: " + block.blockHash);
     return true;
 }
+
+#include "mining_template_preflight.inc"
 
 //================================================================================
 //                      VERIFY BLOCK TIMES
@@ -22733,6 +22736,14 @@ std::optional<TRUScriptInfo> Blockchain::getTRUScriptById(const std::string& txi
 //========================================================================
 
 void Blockchain::startExplorerServer(int port, int rpcPort) {
+    // CORE-MINER-HARDEN-01: transport policy; enough room for encoded blocks.
+    g_explorerServer.new_task_queue = [] { return new httplib::ThreadPool(4, 16); };
+    g_explorerServer.set_payload_max_length((tru_limits::MAX_BLOCK_BYTES * 2U) + (4U * 1024U * 1024U));
+    g_explorerServer.set_read_timeout(15, 0);
+    g_explorerServer.set_write_timeout(30, 0);
+    g_explorerServer.set_keep_alive_max_count(5);
+    auto submissionSlots = std::make_shared<std::atomic<unsigned>>(0);
+
     std::unordered_map<std::string, nlohmann::json> tokenCache;
     std::mutex tokenCacheMutex;
     int64_t tokenCacheTimestamp = 0;
@@ -22866,7 +22877,6 @@ void Blockchain::startExplorerServer(int port, int rpcPort) {
 // same-origin Explorer routes enforce a strict allowlist and create a fresh
 // loopback request to the authenticated Core RPC. Caller Authorization,
 // Origin and Sec-Fetch headers are never forwarded.
-{
     using Clock = std::chrono::steady_clock;
     struct GatewayBucket { double tokens{600.0}; Clock::time_point updated{Clock::now()}; };
     auto gatewayBuckets = std::make_shared<std::unordered_map<std::string, GatewayBucket>>();
@@ -22895,6 +22905,7 @@ void Blockchain::startExplorerServer(int port, int rpcPort) {
         return true;
     };
 
+{
     const std::unordered_set<std::string> walletGatewayMethods = {
         // Desktop/public chain + wallet observation. getdesktopinfo is the
         // wallet-safe replacement for getinfo: it contains no Core-wallet
@@ -22940,7 +22951,7 @@ void Blockchain::startExplorerServer(int port, int rpcPort) {
         "testAIProvider", "previewtokenevolution", "committokenevolutionsigned"
     };
 
-    const auto gatewayForward = [rpcPort, consumeGatewayBudget, highCostGatewayMethods](
+    const auto gatewayForward = [rpcPort, consumeGatewayBudget, highCostGatewayMethods, submissionSlots](
         const httplib::Request& req, httplib::Response& res,
         const std::unordered_set<std::string>& allowedMethods) {
         res.set_header("Cache-Control", "no-store");
@@ -22962,6 +22973,11 @@ void Blockchain::startExplorerServer(int port, int rpcPort) {
         if (!allowedMethods.count(method)) {
             Logger::log("[RPC-05-WEB] rejected public gateway method=" + method);
             res.status = 403; res.set_content("{\"error\":\"method is not available through the public web gateway\"}\n", "application/json"); return;
+        }
+        tru_hardening::SubmissionSlot slot(*submissionSlots, highCostGatewayMethods.count(method) != 0);
+        if (!slot) {
+            res.status = 503; res.set_header("Retry-After", "1");
+            res.set_content("{\"error\":\"submission capacity busy\"}", "application/json"); return;
         }
         const double cost = highCostGatewayMethods.count(method) ? 20.0 : (method == "getblocktemplate" ? 5.0 : 1.0);
         if (!consumeGatewayBudget(req.remote_addr, cost)) {
@@ -25293,7 +25309,12 @@ g_explorerServer.Get("/api/hashrate", [&](const httplib::Request&, httplib::Resp
 //============================================================================================================
 //                                     SUBMIT BLOCK ENDPOINT
 //============================================================================================================
-g_explorerServer.Post("/api/submitblock", [&](const httplib::Request& req, httplib::Response& res) {
+g_explorerServer.Post("/api/submitblock", [this, submissionSlots, consumeGatewayBudget](const httplib::Request& req, httplib::Response& res) {
+    tru_hardening::SubmissionSlot slot(*submissionSlots);
+    if (!slot || !consumeGatewayBudget(req.remote_addr, 20.0)) {
+        res.status = 429; res.set_header("Retry-After", "1");
+        res.set_content("{\"error\":\"submission capacity or rate limit exceeded\"}", "application/json"); return;
+    }
     res.set_header("Access-Control-Allow-Origin", "*");
     res.set_header("Content-Type", "application/json");
     

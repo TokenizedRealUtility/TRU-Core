@@ -196,6 +196,7 @@ struct GPUDevice {
     cl_mem foundFlag_buf;
     cl_mem foundNonce_buf;
     cl_mem foundHash_buf;
+    size_t hardeningBatch{1048576}; // measured batches persist across fresh templates
     uint64_t deviceHashes;  
     bool initialized;
     uint64_t totalKernelsLaunched;
@@ -1116,554 +1117,144 @@ bool initializeGPUDevicesWithAutoTuning() {
 }
 
 // 🎯 INTELLIGENT GPU MINING FUNCTION WITH AUTO-TUNED SETTINGS
+// CORE-MINER-HARDEN-01: bounded work, ordered device I/O, CPU-verified publication.
 bool mineBlockGPU_21E8_AutoTuned(Block& candidate, uint64_t maxNonce, httplib::Client& cli,
-                                 const std::string& minerAddr, int& extraNonce, uint64_t& blockCount) {
-    
-    Logger::log(formatLogMessage("INFO", "MINING", 
-        "Starting GPU mining for block " + std::to_string(candidate.height) + 
-        " with " + std::to_string(g_devices.size()) + " devices"));
-    
-    // Reset global state properly
-    if (g_devices.empty()) {
-        Logger::log(formatLogMessage("ERROR", "MINING", "No initialized GPU devices"));
-        return false;
-    }
-
+                               const std::string& minerAddr, int& extraNonce, uint64_t& blockCount) {
+    (void)extraNonce;
+    if (g_devices.empty() || g_shutdown.load()) return false;
     g_found.store(false);
     g_foundNonce.store(0);
     g_totalHashes.store(0);
     g_hashesAtLastReport.store(0);
-    for (auto& device : g_devices) {
-        if (device) device->deviceHashes = 0;
-    }
-    
-    std::cout << C_FIRE << C_BOLD << "\n╭─ " << SYMBOL_BRAIN << " INITIATING AI QUANTUM MINING SEQUENCE " << SYMBOL_BRAIN << " ─╮" << C_RESET << "\n";
-    std::cout << C_SUCCESS << "│ " << SYMBOL_TARGET << " Target Block: #" << C_GOLD << C_BOLD << candidate.height << std::string(35, ' ') << C_TEXT << "│" << C_RESET << "\n";
-    
-    // Use existing blockchain function to build header
-    std::vector<unsigned char> header80;
-    try {
-        header80 = buildBlockHeader80(candidate.header);
-        Logger::log(formatLogMessage("DEBUG", "MINING", "Block header constructed successfully"));
-        std::cout << C_SUCCESS << "│ " << SYMBOL_SUCCESS << " Block header constructed successfully" << std::string(20, ' ') << "│" << C_RESET << "\n";
-    } catch (const std::exception& e) {
-        Logger::log(formatLogMessage("ERROR", "MINING", "Header build failed: " + std::string(e.what())));
-        std::cout << C_ERROR << "│ " << SYMBOL_ERROR << " Header build failed: " << e.what() << std::string(15, ' ') << "│" << C_RESET << "\n";
-        std::string dashLine = std::string(65, '-');
-        std::cout << C_ERROR << "╰─" << dashLine << "─╯" << C_RESET << "\n";
-        return false;
-    }
-    
-    // Use existing blockchain function for target conversion
-    unsigned char targetBE[32];
-    try {
-        bitsToTargetArrayFree(candidate.header.bits, targetBE);
-        
-        // Log target difficulty
-        std::ostringstream targetHex;
-        for (int i = 0; i < 32; i++) {
-            targetHex << std::hex << std::setw(2) << std::setfill('0') << (int)targetBE[i];
-        }
-        std::ostringstream bitsHex;
-        bitsHex << std::hex << std::setw(8) << std::setfill('0') << candidate.header.bits;
-        Logger::log(formatLogMessage("DEBUG", "MINING",
-            "Target: " + targetHex.str() + ", Bits: 0x" + bitsHex.str()));
-        
-        std::cout << C_SUCCESS << "│ " << SYMBOL_SUCCESS << " Mining target configured" << std::string(30, ' ') << "│" << C_RESET << "\n";
-    } catch (const std::exception& e) {
-        Logger::log(formatLogMessage("ERROR", "MINING", "Target conversion failed: " + std::string(e.what())));
-        std::cout << C_ERROR << "│ " << SYMBOL_ERROR << " Target conversion failed: " << e.what() << std::string(10, ' ') << "│" << C_RESET << "\n";
-        std::string dashLine = std::string(65, '-');
-        std::cout << C_ERROR << "╰─" << dashLine << "─╯" << C_RESET << "\n";
-        return false;
-    }
-    std::vector<unsigned char> targetVec(targetBE, targetBE + 32);
-    
-    std::cout << C_ELECTRIC << "│ " << SYMBOL_LIGHTNING << " AI Quantum mining engines: ARMED & OPTIMIZED!" << std::string(10, ' ') << "│" << C_RESET << "\n";
-    std::string dashLine = std::string(65, '-');
-    std::cout << C_FIRE << "╰─" << dashLine << "─╯" << C_RESET << "\n\n";
-    
-    auto startTime = std::chrono::steady_clock::now();
-    bool firstCall = true;
-    
-    // lets the progress thread exit when a full nonce sweep
-    // finishes with NO solution (g_found stays false, g_shutdown stays false).
-    std::atomic<bool> miningDone{false};
-    
-    // Enhanced progress reporting thread with hash tracking
-    std::thread progressThread([&]() {
-        auto lastUpdate = std::chrono::steady_clock::now();
-        uint64_t lastHashes = 0;
-        
-        while (!g_found.load() && !g_shutdown.load() &&
-               !miningDone.load(std::memory_order_acquire)) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            
-            auto now = std::chrono::steady_clock::now();
-            double elapsed = std::chrono::duration<double>(now - startTime).count();
-            uint64_t currentHashes = g_totalHashes.load();
-            
-            double intervalTime = std::chrono::duration<double>(now - lastUpdate).count();
-            uint64_t intervalHashes = currentHashes - lastHashes;
-            double hashRate = (intervalTime > 0) ? (intervalHashes / intervalTime) : 0.0;
-            
-            // Log performance stats periodically
-            static auto lastLogTime = std::chrono::steady_clock::now();
-            if (std::chrono::duration_cast<std::chrono::seconds>(now - lastLogTime).count() >= 30) {
-                Logger::log(formatLogMessage("STATS", "PERFORMANCE", 
-                    "Hash rate: " + std::to_string(hashRate) + " H/s, Total hashes: " + std::to_string(currentHashes)));
-                lastLogTime = now;
-            }
-            
-            printModernGPUInterface(candidate.height, g_devices, hashRate, elapsed, currentHashes,
-                                  1, 1, firstCall, minerAddr, blockCount);
-            
-            firstCall = false;
-            lastUpdate = now;
-            lastHashes = currentHashes;
-        }
-    });
-    
-    // INTELLIGENT: Enhanced device mining threads with AUTO-TUNED settings
-    std::vector<std::thread> deviceThreads;
-
-    // MINER-TIME-01B: performance-preserving fresh-template sweep.
-    // Search the complete uint32 nonce space once, then return immediately to
-    // the outer loop for a fresh getblocktemplate. This preserves sustained
-    // GPU occupancy while retaining the >30s stale-solution rejection gate.
-    const uint64_t totalNonces = maxNonce + 1ULL;
-    const uint64_t sweepNonces = totalNonces;
-    const uint64_t deviceCount = static_cast<uint64_t>(g_devices.size());
-    const uint64_t baseNoncesPerDevice = sweepNonces / deviceCount;
-    const uint64_t remainderNonces = sweepNonces % deviceCount;
-
-    uint64_t partitionCursor = 0;
-    for (size_t i = 0; i < g_devices.size(); i++) {
-        auto& device = g_devices[i];
-        const uint64_t extra = (static_cast<uint64_t>(i) < remainderNonces) ? 1ULL : 0ULL;
-        const uint64_t deviceStart = partitionCursor;
-        const uint64_t deviceEndExclusive = deviceStart + baseNoncesPerDevice + extra;
-        partitionCursor = deviceEndExclusive;
-
-        deviceThreads.emplace_back([&device, &header80, &targetVec, deviceStart, deviceEndExclusive, i]() {
-            if (g_found.load()) return;
-            
-            Logger::log(formatLogMessage("INFO", "DEVICE", 
-                "GPU-" + std::to_string(i+1) + " starting with " + device->performanceClass + " settings"));
-            std::cout << C_PRIMARY << "[GPU-" << (i+1) << "] " << device->deviceEmoji << " " << device->deviceName 
-                      << " using " << C_BOLD << device->performanceClass << " AI settings" << C_RESET << "\n";
-            
+    const auto header80 = buildBlockHeader80(candidate.header);
+    if (header80.size() != 80) throw std::runtime_error("invalid mining header size");
+    unsigned char target[32];
+    bitsToTargetArrayFree(candidate.header.bits, target);
+    const uint64_t endExclusive = std::min<uint64_t>(maxNonce, UINT32_MAX) + 1ULL;
+    std::atomic<uint64_t> nextNonce{0};
+    const auto started = std::chrono::steady_clock::now();
+    const auto refreshAt = started + std::chrono::seconds(2);
+    std::vector<std::thread> workers;
+    // Also joins on thread-construction exceptions; no detached access to stack buffers.
+    struct JoinWorkers {
+        std::vector<std::thread>& threads;
+        ~JoinWorkers() { for (auto& t : threads) if (t.joinable()) t.join(); }
+    } joinWorkers{workers};
+    for (auto& deviceRef : g_devices) {
+        auto* device = deviceRef.get();
+        if (!device || !device->initialized || !device->queue) continue;
+        device->deviceHashes = 0;
+        workers.emplace_back([&, device]() {
+            auto require = [](cl_int error, const char* operation) {
+                if (error != CL_SUCCESS)
+                    throw std::runtime_error(std::string(operation) + " failed: " + std::to_string(error));
+            };
             try {
-                cl_int err = 0;
-                
-                // 🚀 USE AUTO-TUNED SETTINGS (NO MORE GUESSING!)
-                
-		size_t KERNELS_PER_GPU = device->optimalKernelsPerGPU;
-		size_t KERNEL_SIZE = device->optimalKernelSize;
-		size_t MAX_KERNELS_TOTAL = device->maxConcurrentKernels;
-		size_t LOCAL_WORK = device->optimalWorkGroupSize;
-
-		if (device->performanceClass == "BEAST" || device->performanceClass == "HIGH") {
-    		    if (device->globalMemSize >= 12ULL * 1024 * 1024 * 1024) {  // TITAN V
-        		KERNEL_SIZE = 1000000000UL;  // 1 billion threads
-        		KERNELS_PER_GPU = 8;          // 8 concurrent kernels
-    		    } else if (device->globalMemSize >= 8ULL * 1024 * 1024 * 1024) {  // GTX 1080
-        		KERNEL_SIZE = 500000000UL;    // 500M threads
-        		KERNELS_PER_GPU = 6;          // 6 concurrent kernels
-    		    }
-		    MAX_KERNELS_TOTAL = KERNELS_PER_GPU * 2;
-    		    LOCAL_WORK = 256;  // Optimal for most GPUs
-    
-    		    std::cout << C_FIRE << C_BOLD << "[GPU-" << (i+1) << "] " << SYMBOL_BOOM 
-                    << " OVERRIDE: " << formatHashRate(KERNEL_SIZE) 
-                    << " threads × " << KERNELS_PER_GPU << " kernels = "
-                    << formatHashRate(KERNEL_SIZE * KERNELS_PER_GPU) << " total!" << C_RESET << "\n";
-		}
-
-                Logger::log(formatLogMessage("DEBUG", "DEVICE", 
-                    "GPU-" + std::to_string(i+1) + " auto-tuned settings: " +
-                    std::to_string(KERNELS_PER_GPU) + " kernels × " + std::to_string(KERNEL_SIZE) + 
-                    " threads (WG: " + std::to_string(LOCAL_WORK) + ")"));
-                
-                std::cout << C_FIRE << "[GPU-" << (i+1) << "] " << SYMBOL_ROCKET << " AI Auto-tuned: " 
-                          << KERNELS_PER_GPU << " kernels × " << formatHashRate(KERNEL_SIZE) 
-                          << " threads (WG: " << LOCAL_WORK << ")" << C_RESET << "\n";
-                
-                // Atomic counters for accurate tracking
-                std::atomic<uint64_t> kernelsLaunched(0);
-                std::atomic<uint64_t> kernelsCompleted(0);
-                std::vector<cl_event> events;
-                std::vector<size_t> kernelWorkSizes;
-                std::vector<cl_command_queue> queues;
-                std::mutex eventMutex;
-                
-                // Create multiple command queues for maximum parallelism
-                for (size_t q = 0; q < KERNELS_PER_GPU; q++) {
-                    cl_command_queue queue = clCreateCommandQueue(device->context, device->device, 0, &err);
-                    if (err == CL_SUCCESS) {
-                        queues.push_back(queue);
+                // The persistent queue is in-order. Blocking initialization keeps
+                // host input storage alive and finishes before any kernel can run.
+                require(clEnqueueWriteBuffer(device->queue, device->header80_buf, CL_TRUE,
+                    0, 80, header80.data(), 0, nullptr, nullptr), "upload header");
+                require(clEnqueueWriteBuffer(device->queue, device->target_buf, CL_TRUE,
+                    0, 32, target, 0, nullptr, nullptr), "upload target");
+                size_t batch = device->hardeningBatch;
+                while (!g_found.load(std::memory_order_acquire) && !g_shutdown.load() &&
+                       std::chrono::steady_clock::now() < refreshAt) {
+                    const cl_ulong start = nextNonce.fetch_add(batch);
+                    if (start >= endExclusive) break;
+                    const cl_ulong end = std::min<uint64_t>(start + batch, endExclusive);
+                    const size_t work = static_cast<size_t>(end - start);
+                    int flag = 0;
+                    require(clEnqueueWriteBuffer(device->queue, device->foundFlag_buf, CL_TRUE,
+                        0, sizeof(flag), &flag, 0, nullptr, nullptr), "reset result");
+                    require(clSetKernelArg(device->kernel, 0, sizeof(cl_mem), &device->header80_buf), "header argument");
+                    require(clSetKernelArg(device->kernel, 1, sizeof(start), &start), "start argument");
+                    require(clSetKernelArg(device->kernel, 2, sizeof(end), &end), "end argument");
+                    require(clSetKernelArg(device->kernel, 3, sizeof(cl_mem), &device->target_buf), "target argument");
+                    require(clSetKernelArg(device->kernel, 4, sizeof(cl_mem), &device->foundFlag_buf), "flag argument");
+                    require(clSetKernelArg(device->kernel, 5, sizeof(cl_mem), &device->foundNonce_buf), "nonce argument");
+                    require(clSetKernelArg(device->kernel, 6, sizeof(cl_mem), &device->foundHash_buf), "hash argument");
+                    const auto batchStarted = std::chrono::steady_clock::now();
+                    // Let OpenCL select a supported local size; no padded ranges or
+                    // assumptions about the device/kernel work-group limit.
+                    require(clEnqueueNDRangeKernel(device->queue, device->kernel, 1,
+                        nullptr, &work, nullptr, 0, nullptr, nullptr), "launch");
+                    ++device->totalKernelsLaunched;
+                    // This read is queued after the kernel on the SAME in-order queue.
+                    // Its completion guarantees all nonce/hash writes are complete.
+                    require(clEnqueueReadBuffer(device->queue, device->foundFlag_buf, CL_TRUE,
+                        0, sizeof(flag), &flag, 0, nullptr, nullptr), "read flag");
+                    if (flag) {
+                        cl_ulong nonce = 0;
+                        std::vector<unsigned char> gpuHash(32);
+                        require(clEnqueueReadBuffer(device->queue, device->foundNonce_buf, CL_TRUE,
+                            0, sizeof(nonce), &nonce, 0, nullptr, nullptr), "read nonce");
+                        require(clEnqueueReadBuffer(device->queue, device->foundHash_buf, CL_TRUE,
+                            0, 32, gpuHash.data(), 0, nullptr, nullptr), "read hash");
+                        if (nonce < start || nonce >= end || nonce > UINT32_MAX)
+                            throw std::runtime_error("GPU returned an out-of-range nonce");
+                        auto winningHeader = header80;
+                        for (unsigned n = 0; n < 4; ++n)
+                            winningHeader[76 + n] = static_cast<unsigned char>(nonce >> (8 * n));
+                        const auto cpuHash = sha256_21e8(winningHeader);
+                        if (cpuHash != gpuHash || !compare256LE(cpuHash.data(), target))
+                            throw std::runtime_error("GPU solution failed CPU hash/target verification");
+                        std::lock_guard<std::mutex> lock(g_foundMutex);
+                        if (!g_found.load(std::memory_order_relaxed)) {
+                            g_foundNonce.store(nonce, std::memory_order_relaxed);
+                            g_foundHash = cpuHash;
+                            // Publish only AFTER the complete result has been captured.
+                            g_found.store(true, std::memory_order_release);
+                        }
+                        break;
+                    }
+                    creditCompletedHashWork(work);
+                    device->deviceHashes += work;
+                    const double seconds = std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - batchStarted).count();
+                    // Target 200ms/device batch. Bounds avoid huge stale-work queues.
+                    if (seconds > 0) {
+                        const double scaled = static_cast<double>(work) * 0.2 / seconds;
+                        batch = static_cast<size_t>(std::clamp(scaled, 65536.0, 16777216.0));
+                        device->hardeningBatch = batch;
                     }
                 }
-                
-                // Write initial buffers
-                int zeroFlag = 0;
-                cl_ulong startN = deviceStart;
-                std::vector<unsigned char> zeroHash(32, 0);
-                
-                err = clEnqueueWriteBuffer(device->queue, device->header80_buf, CL_FALSE, 0, 80, header80.data(), 0, nullptr, nullptr);
-                err |= clEnqueueWriteBuffer(device->queue, device->target_buf, CL_FALSE, 0, 32, targetVec.data(), 0, nullptr, nullptr);
-                err |= clEnqueueWriteBuffer(device->queue, device->foundFlag_buf, CL_FALSE, 0, sizeof(int), &zeroFlag, 0, nullptr, nullptr);
-                err |= clEnqueueWriteBuffer(device->queue, device->foundNonce_buf, CL_FALSE, 0, sizeof(cl_ulong), &startN, 0, nullptr, nullptr);
-                err |= clEnqueueWriteBuffer(device->queue, device->foundHash_buf, CL_FALSE, 0, 32, zeroHash.data(), 0, nullptr, nullptr);
-                
-                if (err == CL_SUCCESS) {
-                    cl_ulong currentStart = deviceStart;
-                    size_t kernelIndex = 0;
-                    size_t localWork = LOCAL_WORK;
-                    
-                    // Launch kernels with AI-optimized settings
-                    while (currentStart < deviceEndExclusive && !g_found.load() && kernelIndex < MAX_KERNELS_TOTAL) {
-                        cl_command_queue currentQueue = queues[kernelIndex % queues.size()];
-                        cl_ulong kernelEndExclusive = std::min(
-                            currentStart + static_cast<cl_ulong>(KERNEL_SIZE),
-                            static_cast<cl_ulong>(deviceEndExclusive));
-                        size_t actualWork = static_cast<size_t>(kernelEndExclusive - currentStart);
-                        
-                        if (actualWork < localWork) break;
-                        
-                        // Round up to work group size
-                        actualWork = ((actualWork + localWork - 1) / localWork) * localWork;
-                        
-                        // Set kernel arguments
-                        err = clSetKernelArg(device->kernel, 0, sizeof(cl_mem), &device->header80_buf);
-                        err |= clSetKernelArg(device->kernel, 1, sizeof(cl_ulong), &currentStart);
-                        err |= clSetKernelArg(device->kernel, 2, sizeof(cl_ulong), &kernelEndExclusive);
-                        err |= clSetKernelArg(device->kernel, 3, sizeof(cl_mem), &device->target_buf);
-                        err |= clSetKernelArg(device->kernel, 4, sizeof(cl_mem), &device->foundFlag_buf);
-                        err |= clSetKernelArg(device->kernel, 5, sizeof(cl_mem), &device->foundNonce_buf);
-                        err |= clSetKernelArg(device->kernel, 6, sizeof(cl_mem), &device->foundHash_buf);
-                        
-                        if (err != CL_SUCCESS) {
-                            Logger::log(formatLogMessage("ERROR", "DEVICE", 
-                                "GPU-" + std::to_string(i+1) + " kernel args failed: " + std::to_string(err)));
-                            std::cout << C_ERROR << "[GPU-" << (i+1) << "] " << SYMBOL_ERROR << " Kernel args failed: " << err << C_RESET << "\n";
-                            break;
-                        }
-                        
-                        // Launch kernel with event tracking
-                        cl_event kernelEvent;
-                        err = clEnqueueNDRangeKernel(currentQueue, device->kernel, 1, nullptr, 
-                                                   &actualWork, &localWork, 0, nullptr, &kernelEvent);
-                        
-                        if (err == CL_SUCCESS) {
-                            {
-                                std::lock_guard<std::mutex> lock(eventMutex);
-                                events.push_back(kernelEvent);
-                                kernelWorkSizes.push_back(actualWork);
-                            }
-                            
-                            kernelsLaunched.fetch_add(1);
-                            device->totalKernelsLaunched++;
-                            
-                            if (kernelIndex % 10 == 0) {  // Log every 10th kernel
-                                Logger::log(formatLogMessage("DEBUG", "DEVICE", 
-                                    "GPU-" + std::to_string(i+1) + " kernel " + std::to_string(kernelIndex) + 
-                                    " launched: " + std::to_string(actualWork) + " threads"));
-                            }
-                            
-                            if (kernelIndex % 3 == 0) {  // Show progress every 3rd kernel
-                                std::cout << C_SUCCESS << "[GPU-" << (i+1) << "] " << SYMBOL_LIGHTNING << " AI Kernel " << kernelIndex 
-                                          << " launched: " << formatHashRate(actualWork) << " threads" << C_RESET << "\n";
-                            }
-                        } else {
-                            Logger::log(formatLogMessage("ERROR", "DEVICE", 
-                                "GPU-" + std::to_string(i+1) + " kernel launch failed: " + std::to_string(err)));
-                            std::cout << C_ERROR << "[GPU-" << (i+1) << "] " << SYMBOL_ERROR << " Kernel launch failed: " << err << C_RESET << "\n";
-                            break;
-                        }
-                        
-                        currentStart = kernelEndExclusive;
-                        kernelIndex++;
-                        
-                        // Quick solution check - optimized frequency based on device class
-                        int checkFreq = (device->performanceClass == "BEAST") ? 4 : 
-                                       (device->performanceClass == "HIGH") ? 3 : 2;
-                        if (kernelIndex % checkFreq == 0) {
-                            int foundFlag = 0;
-                            clEnqueueReadBuffer(device->queue, device->foundFlag_buf, CL_FALSE, 0, sizeof(int), &foundFlag, 0, nullptr, nullptr);
-                            clFinish(device->queue);
-                            
-                            if (foundFlag) {
-                                g_found.store(true);
-                                Logger::log(formatLogMessage("SUCCESS", "DEVICE", 
-                                    "GPU-" + std::to_string(i+1) + " found solution!"));
-                                std::cout << C_FIRE << C_BOLD << "[GPU-" << (i+1) << "] " << SYMBOL_BOOM << " AI QUANTUM SOLUTION DISCOVERED!" << C_RESET << "\n";
-                                break;
-                            }
-                        }
-                    }
-                    
-                    // INTELLIGENT: Concurrent kernel completion monitoring
-                    std::thread completionThread([&]() {
-                        auto monitorStart = std::chrono::steady_clock::now();
-                        
-                        while (kernelsCompleted.load() < kernelsLaunched.load() && !g_found.load()) {
-                            {
-                                std::lock_guard<std::mutex> lock(eventMutex);
-                                
-                                for (auto it = events.begin(); it != events.end();) {
-                                    cl_int eventStatus;
-                                    err = clGetEventInfo(*it, CL_EVENT_COMMAND_EXECUTION_STATUS, sizeof(cl_int), &eventStatus, nullptr);
-                                    
-                                    if (err == CL_SUCCESS && eventStatus == CL_COMPLETE) {
-                                        // capture the index ONCE, before any erase,
-                                        // so `events` and `kernelWorkSizes` stay in lockstep.
-                                        size_t idx = static_cast<size_t>(it - events.begin());
-                                        size_t workCompleted = kernelWorkSizes[idx];
-
-                                        // Check the device-local solution flag BEFORE crediting the
-                                        // NDRange. If a solution was observed, some work-items may
-                                        // have returned early, so queued size is not exact hashes tried.
-                                        int foundFlag = 0;
-                                        clEnqueueReadBuffer(device->queue, device->foundFlag_buf, CL_TRUE, 0,
-                                                            sizeof(int), &foundFlag, 0, nullptr, nullptr);
-
-                                        if (foundFlag && !g_found.load()) {
-                                            cl_ulong foundNonce = 0;
-                                            std::vector<unsigned char> foundHash(32);
-                                            clEnqueueReadBuffer(device->queue, device->foundNonce_buf, CL_TRUE, 0, sizeof(cl_ulong), &foundNonce, 0, nullptr, nullptr);
-                                            clEnqueueReadBuffer(device->queue, device->foundHash_buf, CL_TRUE, 0, 32, foundHash.data(), 0, nullptr, nullptr);
-
-                                            std::lock_guard<std::mutex> foundLock(g_foundMutex);
-                                            if (!g_found.exchange(true)) {
-                                                g_foundNonce.store(foundNonce);
-                                                g_foundHash = foundHash;
-
-                                                std::ostringstream hashHex;
-                                                for (int i = 0; i < 32; i++) {
-                                                    hashHex << std::hex << std::setw(2) << std::setfill('0') << (int)foundHash[i];
-                                                }
-                                                Logger::log(formatLogMessage("SUCCESS", "DEVICE",
-                                                    "GPU-" + std::to_string(i+1) + " found valid hash! Nonce: " +
-                                                    std::to_string(foundNonce) + ", Hash: " + hashHex.str()));
-
-                                                std::cout << C_FIRE << C_BOLD << BG_SUCCESS << "[GPU-" << (i+1) << "] " << SYMBOL_CROWN
-                                                          << " AI VICTORY! NONCE " << foundNonce << " DISCOVERED!" << C_RESET << "\n";
-                                            }
-                                        }
-
-                                        bool credited = false;
-                                        // GPU-CREDIT-01: credit is decided by THIS kernel's own
-                                        // foundFlag, not by the process-wide g_found.
-                                        //
-                                        // The kernel aborts on its own device flag:
-                                        //     if(atomic_cmpxchg(foundFlag, 0, 0) != 0) return;
-                                        // so any kernel that exited early already reads back
-                                        // foundFlag != 0 and is correctly denied credit by
-                                        // !foundFlag alone.
-                                        //
-                                        // The former extra "&& !g_found.load()" denied credit to
-                                        // kernels that ran a FULL sweep and found nothing, purely
-                                        // because some other kernel on some other device had won
-                                        // in the meantime. At short block times g_found is set most
-                                        // of the time, so nearly all honest work scored zero:
-                                        //     "Found: 1, Credited hashes: 0, Rate: 0.000000 H/s"
-                                        // g_sessionHashes then stayed 0 and the keepalive reporter
-                                        // published hashRate 0, so the explorer counted no active
-                                        // miners even while both GPUs ran at 100%.
-                                        if (!foundFlag) {
-                                            creditCompletedHashWork(workCompleted);
-                                            device->deviceHashes += workCompleted;
-                                            credited = true;
-                                        }
-                                        kernelsCompleted.fetch_add(1);
-
-                                        if (kernelsCompleted.load() % 10 == 0) {
-                                            Logger::log(formatLogMessage("DEBUG", "DEVICE",
-                                                "GPU-" + std::to_string(i+1) + " completed " +
-                                                std::to_string(kernelsCompleted.load()) + " kernels, " +
-                                                std::to_string(device->deviceHashes) + " credited hash work"));
-                                        }
-
-                                        if (credited && kernelsCompleted.load() % 4 == 0) {
-                                            std::cout << C_SUCCESS << "[GPU-" << (i+1) << "] " << SYMBOL_GEM << " AI Kernel completed: "
-                                                      << formatHashRate(workCompleted) << " credited hashes (Sweep total: "
-                                                      << formatHashRate(g_totalHashes.load()) << ")" << C_RESET << "\n";
-                                        }
-
-                                        clReleaseEvent(*it);
-                                        it = events.erase(it);
-                                        // erase the SAME index captured above; using
-                                        // (it - events.begin()) here points at the NEXT element after
-                                        // erase, which desynced the vectors and hung the monitor loop.
-                                        kernelWorkSizes.erase(kernelWorkSizes.begin() + idx);
-                                    } else {
-                                        ++it;
-                                    }
-                                }
-                            }
-                            
-                            std::this_thread::sleep_for(std::chrono::microseconds(100));
-                            
-                            // Adaptive timeout based on device class
-                            int timeoutSecs = (device->performanceClass == "BEAST") ? 45 : 
-                                             (device->performanceClass == "HIGH") ? 35 : 25;
-                            auto elapsed = std::chrono::steady_clock::now() - monitorStart;
-                            if (std::chrono::duration_cast<std::chrono::seconds>(elapsed).count() > timeoutSecs) {
-                                Logger::log(formatLogMessage("WARNING", "DEVICE",
-                                    "GPU-" + std::to_string(i+1) + " monitor timeout - deferring accounting to final event wait"));
-                                std::cout << C_WARNING << "[GPU-" << (i+1) << "] " << SYMBOL_WARNING
-                                          << " AI Monitor timeout - pending work will not be pre-counted" << C_RESET << "\n";
-                                break;
-                            }
-                        }
-                    });
-                    
-                    completionThread.join();
-                    
-                    // Final cleanup
-                    {
-                        std::lock_guard<std::mutex> lock(eventMutex);
-                        for (size_t j = 0; j < events.size(); j++) {
-                            clWaitForEvents(1, &events[j]);
-                            
-                            // GPU-CREDIT-01: same correction as the monitor loop above.
-                            // This kernel's own foundFlag already covers early-returning
-                            // work-items; g_found only says some OTHER device won, which
-                            // is not a reason to discard this device's completed sweep.
-                            size_t remainingWork = kernelWorkSizes[j];
-                            int foundFlag = 0;
-                            clEnqueueReadBuffer(device->queue, device->foundFlag_buf, CL_TRUE, 0,
-                                                sizeof(int), &foundFlag, 0, nullptr, nullptr);
-                            if (!foundFlag) {
-                                creditCompletedHashWork(remainingWork);
-                                device->deviceHashes += remainingWork;
-                            }
-
-                            clReleaseEvent(events[j]);
-                        }
-                    }
-                    
-                    // Final solution check
-                    if (!g_found.load()) {
-                        int foundFlag = 0;
-                        clEnqueueReadBuffer(device->queue, device->foundFlag_buf, CL_TRUE, 0, sizeof(int), &foundFlag, 0, nullptr, nullptr);
-                        
-                        if (foundFlag && !g_found.load()) {
-                            cl_ulong foundNonce = 0;
-                            std::vector<unsigned char> foundHash(32);
-                            clEnqueueReadBuffer(device->queue, device->foundNonce_buf, CL_TRUE, 0, sizeof(cl_ulong), &foundNonce, 0, nullptr, nullptr);
-                            clEnqueueReadBuffer(device->queue, device->foundHash_buf, CL_TRUE, 0, 32, foundHash.data(), 0, nullptr, nullptr);
-                            
-                            std::lock_guard<std::mutex> lock(g_foundMutex);
-                            if (!g_found.exchange(true)) {
-                                g_foundNonce.store(foundNonce);
-                                g_foundHash = foundHash;
-                            }
-                        }
-                    }
-                } else {
-                    Logger::log(formatLogMessage("ERROR", "DEVICE", 
-                        "GPU-" + std::to_string(i+1) + " buffer operations failed: " + std::to_string(err)));
-                    std::cout << C_ERROR << "[GPU-" << (i+1) << "] " << SYMBOL_ERROR << " Buffer operations failed: " << err << C_RESET << "\n";
-                }
-                
-                // Clean up additional queues
-                for (size_t q = 1; q < queues.size(); q++) {
-                    clReleaseCommandQueue(queues[q]);
-                }
-                
-                Logger::log(formatLogMessage("INFO", "DEVICE", 
-                    "GPU-" + std::to_string(i+1) + " completed. Kernels launched: " + std::to_string(kernelsLaunched.load()) +
-                    ", completed: " + std::to_string(kernelsCompleted.load()) + 
-                    ", creditedHashes: " + std::to_string(device->deviceHashes)));
-                
-                std::cout << C_INFO << "[GPU-" << (i+1) << "] " << device->deviceEmoji << " AI Mining complete. " 
-                          << "Class: " << device->performanceClass << ", Kernels: " << kernelsLaunched.load() 
-                          << " launched, " << kernelsCompleted.load() << " completed, Credited Hash Work: "
-                          << formatHashRate(device->deviceHashes) << C_RESET << "\n";
-                
             } catch (const std::exception& e) {
-                Logger::log(formatLogMessage("ERROR", "DEVICE", 
-                    "GPU-" + std::to_string(i+1) + " exception: " + std::string(e.what())));
-                std::cout << C_ERROR << "[GPU-" << (i+1) << "] " << SYMBOL_ERROR << " Device error: " << e.what() << C_RESET << "\n";
+                // Drain before stack storage can disappear after a failed API call.
+                clFinish(device->queue);
+                Logger::log(formatLogMessage("ERROR", "GPU", device->deviceName + ": " + e.what()));
             }
         });
     }
-    
-    // Wait for all devices
-    for (auto& thread : deviceThreads) {
-        thread.join();
+    for (auto& thread : workers) if (thread.joinable()) thread.join();
+    const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+    const uint64_t hashes = g_totalHashes.load();
+    printModernGPUInterface(candidate.height, g_devices, elapsed > 0 ? hashes / elapsed : 0,
+                            elapsed, hashes, 1, 1, false, minerAddr, blockCount, g_found.load());
+    if (!g_found.load(std::memory_order_acquire) || g_shutdown.load()) return false;
+    candidate.header.nonce = static_cast<uint32_t>(g_foundNonce.load());
+    candidate.blockHash = candidate.computeHash();
+    // A parent-hash check replaces the arbitrary 30-second winning-work discard.
+    // The node still performs authoritative validation; an RPC failure is not
+    // evidence that this CPU-verified solution is invalid.
+    try {
+        nlohmann::json request = {{"jsonrpc", "2.0"}, {"id", 31},
+            {"method", "getchaininfo"}, {"params", nlohmann::json::object()}};
+        auto response = cli.Post("/rpc", request.dump(), "application/json");
+        if (response && response->status == 200) {
+            const auto reply = nlohmann::json::parse(response->body);
+            if (reply.contains("result") && reply["result"].is_object()) {
+                const auto tip = reply["result"].value("bestHash", std::string());
+                if (!tip.empty() && tip != candidate.header.prevHash) {
+                    Logger::log("[CORE-MINER-HARDEN-01] Parent changed; refreshing mining work");
+                    return false;
+                }
+            }
+        }
+    } catch (const std::exception& e) {
+        Logger::log(std::string("[CORE-MINER-HARDEN-01] Tip check unavailable: ") + e.what());
     }
-    
-    // all device workers finished; release the progress thread
-    // even when no solution was found, so join() below cannot hang.
-    miningDone.store(true, std::memory_order_release);
-    
-    if (progressThread.joinable()) {
-        progressThread.join();
-    }
-    
-    // Final status with enhanced visuals
-    auto endTime = std::chrono::steady_clock::now();
-    double elapsed = std::chrono::duration<double>(endTime - startTime).count();
-    uint64_t finalHashes = g_totalHashes.load();
-    double finalHashRate = (elapsed > 0) ? (finalHashes / elapsed) : 0.0;
-    
-    Logger::log(formatLogMessage("INFO", "MINING", 
-        "Mining completed. Found: " + std::to_string(g_found.load()) + 
-        ", Credited hashes: " + std::to_string(finalHashes) +
-        ", Time: " + std::to_string(elapsed) + "s" +
-        ", Rate: " + std::to_string(finalHashRate) + " H/s"));
-    
-    printModernGPUInterface(candidate.height, g_devices, finalHashRate, elapsed, finalHashes,
-                          1, 1, false, minerAddr, blockCount, g_found.load());
-    
-    // MINER-TIME-01A hard freshness gate. Even if an OpenCL driver/device
-    // takes unexpectedly long to drain queued work, a solution from a
-    // candidate held for more than 30 seconds is discarded instead of being
-    // submitted with an old template timestamp.
-    constexpr double kMaxGpuCandidateHoldSeconds = 30.0;
-    if (g_found.load() && elapsed > kMaxGpuCandidateHoldSeconds) {
-        Logger::log(formatLogMessage(
-            "WARNING", "MINER-TIME-01A",
-            "GPU solution discarded: candidate was held for " +
-            std::to_string(elapsed) +
-            "s (>30s); requesting fresh getblocktemplate"));
-        std::cout << C_WARNING
-                  << "[AI MINING] " << SYMBOL_WARNING
-                  << " Stale GPU solution discarded after "
-                  << std::fixed << std::setprecision(1) << elapsed
-                  << "s; refreshing template"
-                  << C_RESET << "\n";
-        g_found.store(false);
-        return false;
-    }
-
-    if (g_found.load()) {
-        std::string headerLine = std::string(65, '=');
-        std::cout << "\n" << C_FIRE << C_BOLD << BG_SUCCESS;
-        std::cout << "╭─" << headerLine << "─╮\n";
-        std::cout << "│ " << SYMBOL_BOOM << " AI QUANTUM BLOCK DISCOVERY! " << SYMBOL_BOOM << " Block #" << candidate.height << std::string(15, ' ') << "│\n";
-        std::cout << "│ " << SYMBOL_CROWN << " Final hash rate: " << formatHashRate(finalHashRate) << std::string(30, ' ') << "│\n";
-        std::cout << "│ " << SYMBOL_LIGHTNING << " Mining time: " << formatDuration(elapsed) << std::string(35, ' ') << "│\n";
-        std::cout << "│ " << SYMBOL_TARGET << " Victory nonce: " << C_GOLD << g_foundNonce.load() << std::string(30, ' ') << C_FIRE << "│\n";
-        std::cout << "│ " << SYMBOL_GEM << " Credited hash work: " << formatHashRate(finalHashes) << std::string(22, ' ') << "│\n";
-        std::cout << "│ " << SYMBOL_BRAIN << " AI Efficiency: MAXIMUM OPTIMIZATION ACHIEVED!" << std::string(10, ' ') << "│\n";
-        std::cout << "╰─" << headerLine << "─╯" << C_RESET << "\n";
-        
-        candidate.header.nonce = static_cast<uint32_t>(g_foundNonce.load());
-        candidate.blockHash = candidate.computeHash();
-        
-	Logger::log(formatLogMessage("SUCCESS", "MINING", 
-    	    "Block " + std::to_string(candidate.height) + " mined successfully! " +
-    	    "Block hash: " + candidate.blockHash));
-        
-        blockCount++;
-        return true;
-    }
-    
-    return false;
+    Logger::log("[CORE-MINER-HARDEN-01] CPU-verified GPU solution ready for submission");
+    return true;
 }
 
 // Build coinbase transaction (enhanced with emojis)
@@ -1705,9 +1296,7 @@ static void addTemplateTransactions(Block& candidate, const nlohmann::json& tpl)
             candidate.transactions.push_back(memTx);
             txCount++;
         } catch (const std::exception& e) {
-            skipped++;
-            Logger::log(formatLogMessage("WARNING", "TEMPLATE", 
-                "Failed to parse transaction: " + std::string(e.what())));
+            throw std::runtime_error(std::string("Cannot build complete template: ") + e.what());
         }
     }
     
@@ -1719,7 +1308,7 @@ static Block buildCandidateBlockFromTemplate(const nlohmann::json& tpl, const st
     Logger::log(formatLogMessage("INFO", "TEMPLATE", "Building candidate block from template"));
     
     int32_t height = tpl.value("height", 1);
-    int32_t version = tpl.value("version", height);
+    int32_t version = tpl.value("version", 0x20000000);
     std::string prevH = tpl.value("previousblockhash", "0000000000000000000000000000000000000000000000000000000000000000");
     std::string bitsHex = tpl.value("bits", "1d00ffff");
     uint32_t bitsVal = std::stoul(bitsHex, nullptr, 16);
@@ -1733,6 +1322,7 @@ static Block buildCandidateBlockFromTemplate(const nlohmann::json& tpl, const st
         ", Reward: " + std::to_string(rewardSat)));
     
     Block candidate(height, prevH, curTime, bitsVal);
+    candidate.header.version = version;
     candidate.height = height;
     
     Transaction coinbaseTx = buildCoinbaseTx(minerAddr, rewardSat, height, extraNonce);
@@ -1955,9 +1545,7 @@ static void startGPUMiningLoop(const std::string& nodeIP, int nodePort, const st
                     extraNonce
                 );
 
-            // Exactly one full uint32 GPU sweep per newly fetched GBT. A
-            // miss returns immediately to this outer loop, fetches a fresh
-            // curtime, and advances extraNonce if the tip is unchanged.
+            // Bounded work interval; refresh the template and extraNonce on return.
             bool success =
                 mineBlockGPU_21E8_AutoTuned(
                     candidate,
@@ -2020,6 +1608,7 @@ static void startGPUMiningLoop(const std::string& nodeIP, int nodePort, const st
                 }
 
                 if (accepted) {
+                    ++blockCount;
                     Logger::log(formatLogMessage("SUCCESS", "MAIN", 
                         "Block accepted by node. Total blocks: " + std::to_string(blockCount)));
                     std::cout << C_SUCCESS << C_BOLD << "[AI MINING] " << SYMBOL_TROPHY << " AI BLOCK ACCEPTED! 🧠🎉" << C_RESET << "\n";

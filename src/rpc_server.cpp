@@ -4495,6 +4495,11 @@ static json handleGetBlockTemplate(Blockchain &chain, const json &params = json:
     // Serve the SAME difficulty bits the validator enforces, derived from the
     // exact previousblockhash advertised above rather than active-chain height.
     gbt["bits"] = chain.calculateExpectedBits(parentHash, nextHeight);
+    const uint64_t minimumTime = static_cast<uint64_t>(chain.getMedianTimePast(parentHash, nextHeight)) + 1ULL;
+    const uint64_t templateTime = std::max(gbt["curtime"].get<uint64_t>(), minimumTime);
+    if (templateTime > UINT32_MAX) throw std::runtime_error("mining timestamp out of range");
+    gbt["curtime"] = templateTime;
+
 
     // size-aware template construction.  Previously the RPC put
     // the entire mempool into every template, so a busy mempool could create a
@@ -4514,6 +4519,8 @@ static json handleGetBlockTemplate(Blockchain &chain, const json &params = json:
 
     size_t assembledBytes = 4096; // conservative header + coinbase + delimiters reserve
     size_t skippedForSize = 0;
+    std::vector<Transaction> selectedTransactions;
+    std::vector<uint64_t> selectedFees;
 
     // test-validate every mempool transaction against the
     // prospective height BEFORE it goes into the template.
@@ -4645,10 +4652,51 @@ static json handleGetBlockTemplate(Blockchain &chain, const json &params = json:
         }
 
         totalFees += fee; // checked above
+        selectedTransactions.push_back(tx);
+        selectedFees.push_back(fee);
         gbt["transactions"].push_back({{"data", txHex}, {"fee", fee}});
         assembledBytes += txCost;
     }
 
+    // CORE-MINER-HARDEN-01: preflight an unsolved candidate against the
+    // current acceptance checks (including script gas and state-root budgets).
+    // On failure reduce the prefix geometrically, bounding repeated validation.
+    // No mempool entry is deleted by this local selection policy.
+    const auto preflight = [&]() {
+        const uint32_t workBits = static_cast<uint32_t>(std::stoul(gbt["bits"].get<std::string>(), nullptr, 16));
+        Block candidate(nextHeight, parentHash, static_cast<uint32_t>(gbt["curtime"].get<uint64_t>()), workBits);
+        candidate.header.version = 0x20000000;
+        candidate.height = nextHeight;
+        Transaction coinbase(true);
+        const std::string text = "TRU:" + std::to_string(nextHeight) + "|TEMPLATE:0";
+        coinbase.vin.emplace_back("COINBASE", 0,
+            std::vector<unsigned char>(text.begin(), text.end()), std::vector<unsigned char>());
+        TxOut output;
+        output.amount = subsidy + totalFees;
+        // Placeholder P2PKH output has the same resource shape as the native miner payout.
+        output.scriptPubKey = "76a914000000000000000000000000000000000000000088ac";
+        coinbase.vout.push_back(output); coinbase.computeTxId();
+        candidate.transactions.push_back(std::move(coinbase));
+        candidate.transactions.insert(candidate.transactions.end(), selectedTransactions.begin(), selectedTransactions.end());
+        candidate.header.merkleRoot = computeMerkleRoot(candidate.transactions);
+        candidate.blockHash = candidate.computeHash();
+        return chain.checkMiningTemplate(candidate);
+    };
+    while (!preflight()) {
+        if (selectedTransactions.empty())
+            throw std::runtime_error("empty mining template failed preflight; retry after checking tip/time");
+        const size_t keep = selectedTransactions.size() / 2;
+        skippedInvalid += selectedTransactions.size() - keep;
+        selectedTransactions.resize(keep);
+        selectedFees.resize(keep);
+        gbt["transactions"].erase(gbt["transactions"].begin() + keep, gbt["transactions"].end());
+        totalFees = 0; assembledBytes = 4096;
+        for (size_t i = 0; i < keep; ++i) {
+            totalFees += selectedFees[i];
+            assembledBytes += selectedTransactions[i].serialize().size() + 32;
+        }
+        Logger::log("[getblocktemplate] Resource/validity preflight trimmed candidate to " + std::to_string(keep) + " transactions");
+    }
     gbt["coinbasevalue"] = subsidy + totalFees; // overflow-safe by maxTemplateFees invariant
     gbt["estimatedblockbytes"] = assembledBytes;
     gbt["skippedforsize"] = skippedForSize;

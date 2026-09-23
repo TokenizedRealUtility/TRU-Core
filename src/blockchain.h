@@ -230,6 +230,8 @@ public:
        std::mutex* coutMutex,
        const std::function<void(const std::string&)>& statusCallback = {});
    bool validateBlock(const Block& block);
+   // Local mining assembly only; does not connect, accept, or persist a block.
+   bool checkMiningTemplate(const Block& block);
 
    std::string blockHash;
    bool validateTokenOutput(const ExtendedTokenData& tokenData, const std::string& owner) const;
