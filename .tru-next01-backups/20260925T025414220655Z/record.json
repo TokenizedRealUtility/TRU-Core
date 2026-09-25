@@ -1,0 +1,12 @@
+{
+  "kind": "core",
+  "before": {
+    "src/rpc_server.cpp": "53f129e563401145d174120537ae36bfba1ba59269f7814720eb4723f706317b",
+    "src/tru-cli.cpp": "997a7b6a2017140f67ed32f25d922c7b239dfe207ab7f8bb013bb6b0fd816350"
+  },
+  "after": {
+    "src/rpc_server.cpp": "3dedb0941b7ca4382a994a6a8917492010662e2f0f2c1966ddd06664cb0ce0ea",
+    "src/tru-cli.cpp": "7b785b6580786257261fad374083d085e5758c16e88554e950ec5e7c062cad01"
+  },
+  "applied": true
+}

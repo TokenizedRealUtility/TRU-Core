@@ -1,5 +1,4 @@
 #include "desktop_ai_widget.h"
-#include "token_media_file.h"
 
 #include "desktop_rpc.h"
 #include "desktop_wallet_widget.h"
@@ -1247,26 +1246,6 @@ void DesktopAIWidget::evolveToken(
     params.insert("owner", owner);
     params.insert("provider", provider);
     params.insert("trigger", trigger);
-
-    if (QMessageBox::question(this, "Extended AI / Artwork",
-            "Use V4 descriptive fields and optional artwork import? Old cores cannot verify V4 history. "
-            "This does not generate or upload images.",
-            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes) {
-        bool accepted = false;
-        const auto text = QInputDialog::getMultiLineText(this, "Media inputs",
-            "JSON object; {} for text-only. Image requires image, artwork_file and change_note. "
-            "Only public metadata: these inputs may be sent to the configured AI provider.",
-            "{}", &accepted);
-        if (!accepted) return;
-        try {
-            if (text.toUtf8().size() > 16384) throw std::runtime_error("Input exceeds 16 KiB");
-            const auto imported = tru_media_v4::importLocalInputs(nlohmann::json::parse(text.toStdString()));
-            params.insert("media_inputs", QJsonDocument::fromJson(QByteArray::fromStdString(imported.dump())).object());
-        } catch (const std::exception& e) {
-            QMessageBox::warning(this, "Media input refused", QString::fromUtf8(e.what()));
-            return;
-        }
-    }
 
     status_->setText(
         "Generating constrained evolution preview for " +

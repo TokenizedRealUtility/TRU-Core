@@ -18,11 +18,6 @@
 #include "ai_oracle_service.h"
 #include "ai_providers.h"          // TOKEN-AI-03A wallet evolution provider factories
 #include "token_evolution.h"       // TOKEN-AI-03A wallet evolution engine
-#include "token_editor_authority.h"
-#include "token_media_file.h"
-#include "tru_artwork_fetch.h"
-#include "tru_limits.h"  // TRU-DESKTOP-07B RPC spend config bounds
-#include "tru_version.h"
 #include "globals.h"
 #include <fmt/core.h>
 #include <cxxopts.hpp>
@@ -2158,16 +2153,52 @@ static std::vector<TruEvolutionWalletToken> truEvolutionUiOwnedTokens(Wallet& wa
 
     const auto addresses = wallet.getAllAddresses();
     const std::unordered_set<std::string> myAddresses(addresses.begin(), addresses.end());
-    ContractStorage contractStorage(storage);
-    TokenEvolutionEngine engine(&contractStorage);
-    storage->iteratePrefix("tokenIssuance:", [&](const std::string& tokenID, const std::string&) {
+    std::set<std::string> seenTokenIDs;
+
+    // Confirmed/current ownership only: tokenUTXO index entry PLUS the matching
+    // live confirmed utxo:<txid>:<vout>. Historical/spent token indexes are not
+    // eligible to authorize a wallet evolution commit.
+    storage->iteratePrefix("tokenUTXO:", [&](const std::string& key, const std::string& value) {
+        const auto colon = key.find(':');
+        if (colon == std::string::npos) return;
+
+        const std::string txid = key.substr(0, colon);
+        const std::string voutText = key.substr(colon + 1U);
+        if (txid.size() != 64U || voutText.empty()) return;
+
+        uint32_t vout = 0;
         try {
-            if (!truEvolutionUiCanonicalTokenID(tokenID)) return;
-            const auto authority = engine.issuerContext(tokenID);
-            const std::string owner = authority.at("owner").get<std::string>();
+            const unsigned long parsed = std::stoul(voutText);
+            if (parsed > std::numeric_limits<uint32_t>::max()) return;
+            vout = static_cast<uint32_t>(parsed);
+        } catch (...) {
+            return;
+        }
+
+        if (!storage->exists("utxo:" + txid + ":" + std::to_string(vout))) return;
+
+        try {
+            const auto indexed = nlohmann::json::parse(value);
+            if (!indexed.is_object() ||
+                !indexed.contains("tokenID") || !indexed["tokenID"].is_string() ||
+                !indexed.contains("owner") || !indexed["owner"].is_string())
+            {
+                return;
+            }
+
+            const std::string owner = indexed["owner"].get<std::string>();
             if (!myAddresses.count(owner)) return;
-            Transaction issuance;
-            if (!chain.getTransaction(authority.at("issuance_txid").get<std::string>(), issuance)) return;
+
+            if (indexed.contains("controllingVout")) {
+                try {
+                    if (indexed["controllingVout"].get<uint32_t>() != vout) return;
+                } catch (...) {
+                    return;
+                }
+            }
+
+            const std::string tokenID = indexed["tokenID"].get<std::string>();
+            if (!truEvolutionUiCanonicalTokenID(tokenID) || seenTokenIDs.count(tokenID)) return;
 
             TruEvolutionWalletToken token;
             token.tokenID = tokenID;
@@ -2185,6 +2216,7 @@ static std::vector<TruEvolutionWalletToken> truEvolutionUiOwnedTokens(Wallet& wa
                 return;
             }
 
+            seenTokenIDs.insert(tokenID);
             result.push_back(std::move(token));
         } catch (...) {
             return;
@@ -2341,7 +2373,7 @@ static bool truEvolutionUiPreviousAnchorConfirmed(
 
     const nlohmann::json history =
         engine.verifyHistory(token.tokenID, token.issuanceMetadata);
-    if (!history.is_object() || !history.value("lineage_ok", false) ||
+    if (!history.is_object() || !history.value("ok", false) ||
         !history.contains("epochs") || !history["epochs"].is_array())
     {
         reason = "prior evolution history is not internally verifiable";
@@ -2486,8 +2518,6 @@ static void truEvolutionUiShowTokenHistory(
             if (!epoch.is_object()) continue;
 
             const uint64_t epochNumber = epoch.value("epoch", 0ULL);
-            report << "Previous values: " << epoch.value("previous_values", nlohmann::json::object()).dump() << std::endl;
-            report << "Updated fields: " << epoch.value("updated_fields", nlohmann::json::object()).dump() << std::endl;
             const std::string anchorTxid = epoch.value("anchor_txid", "");
             std::string chainStatus = "PENDING";
             if (!anchorTxid.empty()) {
@@ -2609,14 +2639,13 @@ static void menuTokenEvolution(Wallet& wallet, int rows, std::mutex& coutMutex) 
                  << " epoch " << preview.result.record.value("epoch_after", 0ULL) << "]";
         }
         menu << "\n3. View Token History\n"
-             << "4. Preview Extended AI / Artwork (SFT or NCFT)\n"
              << "0. Back\n\n"
              << "Preview makes an AI call but writes no TOKEN_EVOLUTION state.\n"
              << "Commit persists the exact preview; it never makes a second AI call.\n"
              << "History is token-centric and does not require current wallet ownership.";
 
         displayResult(menu.str(), rows, coutMutex, 96);
-        const std::string action = readLineTrimmed("Select [0/1/2/3/4]:", rows, coutMutex);
+        const std::string action = readLineTrimmed("Select [0/1/2/3]:", rows, coutMutex);
 
         if (action == "0" || action == "back" || action == "q") return;
 
@@ -2625,7 +2654,7 @@ static void menuTokenEvolution(Wallet& wallet, int rows, std::mutex& coutMutex) 
             continue;
         }
 
-        if (action == "1" || action == "4") {
+        if (action == "1") {
             const auto tokens = truEvolutionUiOwnedTokens(wallet);
             if (tokens.empty()) {
                 displayResult(
@@ -2664,61 +2693,6 @@ static void menuTokenEvolution(Wallet& wallet, int rows, std::mutex& coutMutex) 
             }
 
             const TruEvolutionWalletToken selected = tokens[tokenIndex];
-
-            nlohmann::json mediaInputs;
-            if (action == "4") {
-                try {
-                    displayResult("=== ARTWORK / METADATA UPDATE ===\n"
-                        "1. Image on this computer (also needs its public URL)\n"
-                        "2. Image link (HTTPS or ipfs://)\n"
-                        "3. Text-only update\n4. Advanced JSON file\n0. Cancel\n\n"
-                        "Linked images are downloaded to calculate their hash. No automatic upload.", rows, coutMutex, 96);
-                    auto mediaChoice = readLineTrimmed("Select [Enter=3]:", rows, coutMutex);
-                    if (mediaChoice.empty()) mediaChoice = "3";
-                    preview.valid = false;
-                    if (mediaChoice == "0") continue;
-                    mediaInputs = nlohmann::json::object();
-                    if (mediaChoice == "1" || mediaChoice == "2") {
-                        if (mediaChoice == "1")
-                            mediaInputs["artwork_file"] = readLineTrimmed("Local image file (full path):", rows, coutMutex);
-                        mediaInputs["image"] = readLineTrimmed("Public image URL (HTTPS or ipfs://):", rows, coutMutex);
-                        mediaInputs["change_note"] = readLineTrimmed("Describe this artwork update:", rows, coutMutex);
-                    } else if (mediaChoice == "4") {
-                        const auto path = readLineTrimmed("Media JSON file (full path):", rows, coutMutex);
-                        if (!std::filesystem::is_regular_file(path) || std::filesystem::file_size(path) > 16384U)
-                            throw std::runtime_error("Media JSON must be a regular file at most 16 KiB");
-                        std::ifstream input(path);
-                        if (!input) throw std::runtime_error("Cannot open media JSON");
-                        input >> mediaInputs;
-                    } else if (mediaChoice != "3") {
-                        throw std::runtime_error("Select 0, 1, 2, 3 or 4");
-                    }
-                    if (!mediaInputs.is_object()) throw std::runtime_error("Media input must be a JSON object");
-                    if (mediaInputs.contains("artwork_file")) {
-                        mediaInputs = tru_media_v4::importLocalInputs(mediaInputs);
-                    }
-                    if (mediaInputs.contains("image")) {
-                        // Validate the public schema before making any network request.
-                        auto schemaCheck = mediaInputs;
-                        if (!schemaCheck.contains("artwork_sha256"))
-                            schemaCheck["artwork_sha256"] = std::string(64, '0');
-                        tru_media_v4::validateInputs(schemaCheck);
-                        displayResult("Checking image link and calculating SHA-256 (up to 45 seconds)...", rows, coutMutex, 96);
-                        const auto image = tru_artwork::fetch(mediaInputs.at("image").get<std::string>());
-                        if (mediaInputs.contains("artwork_sha256") && mediaInputs.at("artwork_sha256") != image.sha256)
-                            throw std::runtime_error("Hosted image bytes differ from your local file or supplied hash. Upload the exact file or choose Image link.");
-                        mediaInputs["artwork_sha256"] = image.sha256;
-                        displayResult("Image checked: " + std::to_string(image.bytes) + " bytes\nSHA-256: " + image.sha256,
-                                      rows, coutMutex, 92);
-                    }
-                    tru_media_v4::validateInputs(mediaInputs);
-                } catch (const std::exception& e) {
-                    preview.valid = false;
-                    displayResult(std::string("Media input refused: ") + e.what(), rows, coutMutex, 91);
-                    (void)readLineTrimmed("Press Enter:", rows, coutMutex);
-                    continue;
-                }
-            }
 
             const std::vector<std::string> providers = {
                 "nemotron", "oobabooga", "ollama", "openai",
@@ -2808,7 +2782,7 @@ static void menuTokenEvolution(Wallet& wallet, int rows, std::mutex& coutMutex) 
                 selected.tokenType,
                 selected.issuanceMetadata,
                 providers[providerIndex],
-                trigger, mediaInputs);
+                trigger);
 
             if (!generated.ok) {
                 preview.valid = false;
@@ -2932,8 +2906,8 @@ static void menuTokenEvolution(Wallet& wallet, int rows, std::mutex& coutMutex) 
             if (!truEvolutionUiStillOwnsToken(wallet, preview.token)) {
                 preview.valid = false;
                 displayResult(
-                    "COMMIT REFUSED: This wallet does not control the original issuance-owner key.\n"
-                    "Receiving token units does not grant shared artwork editing authority.",
+                    "COMMIT REFUSED: You no longer own this token.\n"
+                    "Nothing was persisted or anchored. The preview has been invalidated.",
                     rows, coutMutex, 91);
                 (void)readLineTrimmed("Press Enter to continue:", rows, coutMutex);
                 continue;
@@ -2955,37 +2929,7 @@ static void menuTokenEvolution(Wallet& wallet, int rows, std::mutex& coutMutex) 
             // duplicate/stale epochs, broken hash lineage, queue overflow and
             // any non-atomic persistence outcome. The UI never rebuilds or
             // regenerates the record after the user's COMMIT confirmation.
-            nlohmann::json exactPreview = preview.result.record;
-            if (exactPreview.value("record_format_version", 1U) == 4U &&
-                !engine.validateMediaPreview(exactPreview, preview.token.issuanceMetadata)) {
-                preview.valid = false;
-                displayResult("V4 preview/root validation failed; nothing persisted.", rows, coutMutex, 91);
-                (void)readLineTrimmed("Press Enter:", rows, coutMutex);
-                continue;
-            }
-            try {
-                const auto trusted = engine.issuerContext(preview.token.tokenID);
-                if (exactPreview.at("issuer_context") != trusted)
-                    throw std::runtime_error("issuer context changed; create a fresh preview");
-                const std::string editor = trusted.at("owner").get<std::string>();
-                std::string material = wallet.getPrivateKeyForAddress(editor);
-                ECDSAKey signingKey = material.find("-----BEGIN") != std::string::npos
-                    ? ECDSAKey::fromPrivateKey(material)
-                    : ECDSAKey::fromRawBytes(tru_editor::unhex(material));
-                std::fill(material.begin(), material.end(), '\0');
-                exactPreview["editor_proof"] = tru_editor::proof(
-                    signingKey.getCompressedSec1(),
-                    signingKey.sign(tru_editor::hashBytes(tru_editor::message(exactPreview))));
-                if (!engine.verifyEditorProof(exactPreview))
-                    throw std::runtime_error("issuer signature self-check failed");
-            } catch (const std::exception& e) {
-                preview.valid = false;
-                displayResult(std::string("COMMIT REFUSED: Issuer authorization unavailable.\n") +
-                    "Unlock the original issuance-owner wallet and make a fresh preview.\nReason: " + e.what(),
-                    rows, coutMutex, 91);
-                (void)readLineTrimmed("Press Enter to continue:", rows, coutMutex);
-                continue;
-            }
+            const nlohmann::json exactPreview = preview.result.record;
             if (!engine.persistPreview(exactPreview)) {
                 preview.valid = false;
                 displayResult(
@@ -10670,23 +10614,14 @@ int main(int argc, char *argv[]) {
             ("no-seeds", "Start without connecting to seed nodes", cxxopts::value<bool>()->default_value("false"))
             ("no-p2p", "Run without P2P listener", cxxopts::value<bool>()->default_value("false"))
             ("bootstrap-encrypted-wallet", "Create a brand-new encrypted wallet artifact set and exit", cxxopts::value<bool>()->default_value("false"))
-            ("version", "Print compiled core identity and exit before opening chain data")
             ("h,help", "Print usage");
 
         auto result = options.parse(argc, argv);
-        if (result.count("version")) {
-            std::cout << "TRU Core build " << tru_version::compiledCoreVersion()
-                      << std::endl << "Advertised label: " << tru_version::coreReleaseVersion()
-                      << std::endl << "Feature: AI-MEDIA-01 R2 draft" << std::endl;
-            return 0;
-        }
         if (result.count("help")) {
             std::cout << options.help() << std::endl;
             return 0;
         }
 
-        std::cout << "TRU Core build " << tru_version::compiledCoreVersion()
-                  << " [AI-MEDIA-01 R2 draft]" << std::endl;
         // GUI-DESKTOP-01: initialize Qt only for GUI launches. CLI/headless
         // execution never attempts to connect to a display server.
 #ifdef BUILD_WITH_QT
@@ -10861,69 +10796,6 @@ int main(int argc, char *argv[]) {
         Logger::log("[main] Config file loaded successfully");
 
         const auto &networkCfg = cfg["network"];
-
-        // TRU-DESKTOP-07B: opt-in spending policy from the SAME tru.conf
-        // selected by --conf. The existing environment variables remain
-        // supported; an explicitly present config key overrides them.
-        // Accepted in [network] or at top level (but never both).
-        auto rpcSendConf = [&](const std::string& key,
-                               const std::string& alias) -> std::string {
-            std::string resolved;
-            bool found = false;
-            for (const auto& section : {"network", "default"}) {
-                const auto secIt = cfg.find(section);
-                if (secIt == cfg.end()) continue;
-                for (const auto& name : {key, alias}) {
-                    const auto it = secIt->second.find(name);
-                    if (it == secIt->second.end()) continue;
-                    if (found) throw std::runtime_error(
-                        "Duplicate RPC spend config; use one name/section for " + key);
-                    found = true; resolved = it->second;
-                }
-            }
-            return found ? resolved : std::string();
-        };
-        const std::string confSendEnabled = rpcSendConf(
-            "TRU_RPC_WALLET_SEND_ENABLE", "rpcWalletSend");
-        const std::string confSendCap = rpcSendConf(
-            "TRU_RPC_WALLET_SEND_MAX_ATOMS", "rpcWalletSendMaxAtoms");
-        if (!confSendEnabled.empty()) {
-            if (confSendEnabled != "0" && confSendEnabled != "1")
-                throw std::runtime_error("tru.conf RPC spend enable must be 0 or 1");
-#ifndef _WIN32
-            ::setenv("TRU_RPC_WALLET_SEND_ENABLE", confSendEnabled.c_str(), 1);
-#else
-            _putenv_s("TRU_RPC_WALLET_SEND_ENABLE", confSendEnabled.c_str());
-#endif
-        }
-        if (!confSendCap.empty()) {
-            const bool unlimited = confSendCap == "unlimited";
-            if (!unlimited && (confSendCap.empty() || confSendCap.size() > 20 ||
-                confSendCap.find_first_not_of("0123456789") != std::string::npos ||
-                confSendCap == "0"))
-                throw std::runtime_error(
-                    "tru.conf RPC spend max must be positive atom count or unlimited");
-            if (!unlimited) {
-                try {
-                    const auto cap = std::stoull(confSendCap);
-                    if (cap == 0 || cap > tru_limits::MAX_MONEY)
-                        throw std::runtime_error("cap exceeds MAX_MONEY");
-                } catch (...) {
-                    throw std::runtime_error("Invalid tru.conf RPC spend max atom count");
-                }
-            }
-#ifndef _WIN32
-            ::setenv("TRU_RPC_WALLET_SEND_MAX_ATOMS", confSendCap.c_str(), 1);
-#else
-            _putenv_s("TRU_RPC_WALLET_SEND_MAX_ATOMS", confSendCap.c_str());
-#endif
-        }
-        Logger::log(std::string("[RPC-SEND-07B] enabled=") +
-            ((std::getenv("TRU_RPC_WALLET_SEND_ENABLE") &&
-              std::string(std::getenv("TRU_RPC_WALLET_SEND_ENABLE")) == "1") ? "yes" : "no") +
-            "; cap=" + ((std::getenv("TRU_RPC_WALLET_SEND_MAX_ATOMS") &&
-                std::string(std::getenv("TRU_RPC_WALLET_SEND_MAX_ATOMS")) == "unlimited") ?
-                "operator-explicit-unlimited" : "capped"));
 
         // rpcbind
         {
@@ -11169,13 +11041,6 @@ int main(int argc, char *argv[]) {
         if (!tru_rpc::isLoopbackBind(rpcBind) && !rpcAllowRemote) {
             throw std::runtime_error(
                 "Patch 05: refusing non-loopback rpcbind without [network] rpcAllowRemote=1");
-        }
-        // 07B: a spending-enabled Core may never bind privileged RPC to a
-        // non-loopback interface, even when a separate remote-read option exists.
-        if (std::getenv("TRU_RPC_WALLET_SEND_ENABLE") &&
-            std::string(std::getenv("TRU_RPC_WALLET_SEND_ENABLE"))=="1" &&
-            !tru_rpc::isLoopbackBind(rpcBind)) {
-            throw std::runtime_error("RPC spending requires loopback rpcbind; refuse remote exposure");
         }
         const std::string rpcAuthToken = tru_rpc::loadOrCreateServerToken(rpcPort);
 #ifndef _WIN32

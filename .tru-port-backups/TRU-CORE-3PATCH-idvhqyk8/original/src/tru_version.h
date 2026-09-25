@@ -22,15 +22,6 @@
 
 namespace tru_version {
 
-// Build identity is distinct from the mutable advertised release label.
-inline std::string compiledCoreVersion() {
-#ifdef TRU_BUILD_CORE_VERSION
-    return TRU_BUILD_CORE_VERSION;
-#else
-    return "unreported-build";
-#endif
-}
-
 inline std::string trim(std::string s) {
     auto notSpace=[](unsigned char c){ return !std::isspace(c); };
     s.erase(s.begin(), std::find_if(s.begin(), s.end(), notSpace));

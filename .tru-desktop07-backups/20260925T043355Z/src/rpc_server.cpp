@@ -103,30 +103,11 @@ static bool parseJsonTRUAmount(const json& value, uint64_t& atomsOut, std::strin
 
 static bool readRpcUtxoAtoms(const json& utxo, uint64_t& atomsOut, std::string& reason) {
     if (utxo.contains("amount_atoms")) {
-        if (utxo["amount_atoms"].is_number_unsigned()) {
-            atomsOut = utxo["amount_atoms"].get<uint64_t>();
-        } else if (utxo["amount_atoms"].is_string()) {
-            const std::string digits = utxo["amount_atoms"].get<std::string>();
-            if (digits.empty() || digits.size()>20 ||
-                digits.find_first_not_of("0123456789") != std::string::npos ||
-                (digits.size()>1 && digits[0]=='0')) {
-                reason = "amount_atoms must be canonical base-10 uint64";
-                return false;
-            }
-            try { atomsOut = std::stoull(digits); }
-            catch (...) { reason = "amount_atoms overflow"; return false; }
-        } else {
-            reason = "amount_atoms must be an unsigned integer or canonical decimal string";
+        if (!utxo["amount_atoms"].is_number_unsigned()) {
+            reason = "amount_atoms must be an unsigned integer";
             return false;
         }
-        if (utxo["amount_atoms"].is_string() && utxo.contains("amount")) {
-            uint64_t suppliedHuman=0;
-            if (!parseJsonTRUAmount(utxo["amount"],suppliedHuman,reason) ||
-                suppliedHuman!=atomsOut) {
-                reason="UTXO amount does not match amount_atoms";
-                return false;
-            }
-        }
+        atomsOut = utxo["amount_atoms"].get<uint64_t>();
         if (atomsOut > tru_limits::MAX_MONEY) {
             reason = "amount_atoms exceeds MAX_MONEY";
             return false;
@@ -2323,37 +2304,6 @@ static json handleGetTxOut(Blockchain &chain, const json &params, int id) {
         return makeError(-32000, e.what());
     }
 }
-// TRU-DESKTOP-07B: exact contract output descriptor for standalone signing.
-// Never takes a private key/preimage and never spends with the Core wallet.
-static json handleGetContractOutpoint07B(Blockchain& chain, const json& params,int id){
-    try {
-        if(!params.is_object() || params.size()!=2 ||
-           !params.contains("txid") || !params["txid"].is_string() ||
-           !params.contains("vout") || !params["vout"].is_number_integer())
-            return makeError(-32602,"expected {txid:lowercase64hex,vout:uint32}");
-        const auto txid=params["txid"].get<std::string>();
-        const auto signedIndex=params["vout"].get<std::int64_t>();
-        if(signedIndex<0)return makeError(-32602,"negative contract output index");
-        const auto index=static_cast<std::uint64_t>(signedIndex);
-        if(txid.size()!=64 || txid.find_first_not_of("0123456789abcdef")!=std::string::npos ||
-            index>UINT32_MAX)return makeError(-32602,"invalid contract outpoint");
-        UTXO utxo;
-        if(!chain.utxoSet.getUTXO(txid,static_cast<uint32_t>(index),utxo))
-            return makeError(-32080,"contract output is missing or already spent");
-        if(utxo.scriptPubKey.size()>1024)
-            return makeError(-32081,"oversized contract locking script");
-        std::string tip;int height=-1;
-        chain.getBestTipSnapshot(tip,height);
-        const uint32_t mtp=(height>=0 && !tip.empty()) ?
-            chain.getMedianTimePast(tip,height+1) : 0;
-        return makeResult(id,json{{"txid",txid},{"vout",index},
-            {"amount_atoms",std::to_string(utxo.amount)},
-            {"scriptPubKey",utxo.scriptPubKey},
-            {"chain_parent_mtp",mtp},{"bestblock",tip}});
-    } catch(const std::exception& e){return makeError(-32082,"contract output lookup failed");}
-}
-
-#include "tru_contract_rpc_07b.h" // TRU-DESKTOP-07B unsigned native Voting V1
 //========================
 // Redeem canonical Hash Lock
 //========================
@@ -4317,64 +4267,6 @@ static json handleInscribeTRUScriptSigned(Blockchain &chain, const json &params,
         
         Logger::log("[handleInscribeTRUScriptSigned] Processing TRUScript inscription for txid: " + tx.txid);
         
-        // DESKTOP-07A: strict opt-in for new standalone callers; the legacy
-        // web RPC path is deliberately left byte-for-byte compatible while
-        // old consumers are migrated to requireBoundOpReturn.
-        const bool requireBoundOpReturn=params.value("requireBoundOpReturn",false);
-        if(requireBoundOpReturn) {
-        // DESKTOP-07A: bind claimed owner/data to an actually signed
-        // OP_RETURN payload, rather than indexing arbitrary RPC parameters.
-        // This opt-in is used by the standalone desktop; legacy RPC callers
-        // must supply the same bound payload before metadata is accepted.
-        if (!params.contains("inscriptionData") ||
-            !params["inscriptionData"].is_string() ||
-            !params.contains("owner") || !params["owner"].is_string()) {
-            return makeError(-32602, "inscriptionData and owner are required");
-        }
-        const std::string requestedData=params["inscriptionData"].get<std::string>();
-        const std::string requestedOwner=params["owner"].get<std::string>();
-        bool bound=false;
-        for (const auto& out:tx.vout) {
-            if(out.amount != 0 || out.scriptPubKey.size()<4 ||
-               out.scriptPubKey.substr(0,2)!="6a") continue;
-            const auto bytes=hexDecode(out.scriptPubKey);
-            if(bytes.size()<2 || bytes[0]!=0x6a) continue;
-            size_t pos=1,sz=0;
-            if(bytes[pos]<=75) sz=bytes[pos++];
-            else if(bytes[pos]==0x4c && bytes.size()>pos+1) {++pos;sz=bytes[pos++];}
-            else if(bytes[pos]==0x4d && bytes.size()>pos+2) {
-                ++pos;sz=static_cast<size_t>(bytes[pos]) |
-                    (static_cast<size_t>(bytes[pos+1])<<8);pos+=2;
-            } else continue;
-            if(sz>2048 || pos+sz!=bytes.size()) continue;
-            try {
-                const auto payload=json::parse(bytes.begin()+pos,bytes.end());
-                if(payload.is_object() && payload.value("type","")=="TRUSCRIPT" &&
-                   payload.value("owner","")==requestedOwner &&
-                   payload.value("data","")==requestedData) {bound=true;break;}
-            } catch(const std::exception&) {}
-        }
-        if(!bound) return makeError(-32602,
-            "Signed TRUScript OP_RETURN does not match owner/inscriptionData");
-        // Merely naming an owner inside OP_RETURN would allow impersonation.
-        // Require a confirmed funding input locked to that owner. The normal
-        // mempool validation below then independently checks the spending signature.
-        const std::string ownerScript=createP2PKHScriptHexFromAddress(requestedOwner);
-        bool signedByOwner=false;
-        if(tx.vin.size()>0 && tx.vin.size()<=32) for(const auto& input:tx.vin) {
-            UTXO previous;
-            if(chain.utxoSet.getUTXO(input.txid,input.vout,previous) &&
-               previous.scriptPubKey==ownerScript && !input.scriptSig.empty()) {
-                signedByOwner=true;break;
-            }
-        }
-        if(!signedByOwner)return makeError(-32602,
-            "TRUScript claimed owner must fund a signed P2PKH input");
-        if(!chain.addTransaction(tx))
-            return makeError(-32000,"Transaction queue admission rejected");
-        }
-
-
         // Store TRUScript data if provided
         if (params.contains("inscriptionData")) {
             std::string inscriptionData = params["inscriptionData"].get<std::string>();
@@ -4426,12 +4318,12 @@ static json handleInscribeTRUScriptSigned(Blockchain &chain, const json &params,
                        " with size=" + std::to_string(sizeBytes) + " bytes");
         }
         
-        // Legacy callers use the historical admission position; strict
-        // desktop callers were admitted before indexing above.
-        if (!requireBoundOpReturn && !chain.addTransaction(tx)) {
-            return makeError(-32000,"Transaction queue admission rejected");
+        // Add transaction to the bounded ingress queue.
+        if (!chain.addTransaction(tx)) {
+            Logger::log("[handleInscribeTRUScriptSigned] TX queue admission rejected: " + tx.txid);
+            return makeError(-32000, "Transaction queue admission rejected");
         }
-
+        
         Logger::log("[handleInscribeTRUScriptSigned] TRUScript transaction submitted: " + tx.txid);
         
         json result;
@@ -6874,14 +6766,6 @@ static json handleCreateTokenTransaction(Blockchain &chain, const json &params, 
             {"controllingVout", 1}      // Controlling output is at vout 1
         };
         
-        // DESKTOP-07A: explicit opt-in for standalone wallet self-custody.
-        // Attach metadata BEFORE creating unsigned bytes. Reattaching metadata
-        // after signing changes the serialized transaction and is not allowed
-        // by the desktop's independent prepared-transaction audit.
-        if (params.value("metadataBeforeSigning", false)) {
-            tx.tokenMetadata[tx.txid] = tokenMetadata;
-        }
-
         Logger::log("[handleCreateTokenTransaction] Created unsigned transaction");
         
         // Return unsigned transaction and metadata for client
@@ -9768,7 +9652,6 @@ static double rpcMethodCost(const std::string& method) {
         "submitblock", "sendtoaddress", "sendrawtransaction", "sendrawtransactionWeb",
         "signrawtransactionwithkey", "signrawtransactionwithkeyWeb",
         "issuetoken", "issuetokensigned", "createcontracttransaction",
-        "preparevotingv1create07b", "preparevotingv1ballot07b",
         "inscribeTRUScript", "inscribeTRUScriptSigned", "createsocialpost",
         "createAIToken", "interactWithAIToken", "trainAIToken"
     };
@@ -9826,9 +9709,6 @@ static uint64_t rpcMaxSendAtoms() {
     // The operator may explicitly set a higher atom-denominated cap.
     const char* raw = std::getenv("TRU_RPC_WALLET_SEND_MAX_ATOMS");
     if (!raw || !*raw) return 100000000ULL;
-    // No arbitrary 1-TRU software cap only when operator explicitly opts out.
-    // Consensus MAX_MONEY, wallet balance, fee, maturity and mempool rules remain.
-    if (std::string(raw) == "unlimited") return tru_limits::MAX_MONEY;
     const std::string digits(raw);
     if (digits.size() > 20U || digits.find_first_not_of("0123456789") != std::string::npos)
         return 0;
@@ -9840,7 +9720,7 @@ static uint64_t rpcMaxSendAtoms() {
 static json handleSendToAddressLocal(Blockchain& chain, Wallet& wallet, const json& params,
                                      int id, const std::string& peer, int port) {
     if (!rpcEnvEnabled("TRU_RPC_WALLET_SEND_ENABLE"))
-        return makeError(-32070, "sendtoaddress disabled; opt in via tru.conf [network] TRU_RPC_WALLET_SEND_ENABLE=1 or Core environment");
+        return makeError(-32070, "sendtoaddress disabled; set TRU_RPC_WALLET_SEND_ENABLE=1 on the local Core process");
     if (!rpcLocalPeer(peer))
         return makeError(-32071, "sendtoaddress requires a local loopback RPC connection");
     if (!params.is_object() || !params.contains("address") || !params["address"].is_string() ||
@@ -10040,10 +9920,6 @@ void startRPCServer(Blockchain &chain, Wallet &wallet, P2PNode &node, int port,
         else if (m=="getcontracts")        response=handleGetContracts(chain,params,id);
         else if (m=="getrawtransaction")  response=handleGetRawTransaction(chain,params,id);
         else if (m=="gettxout")           response=handleGetTxOut(chain,params,id);
-        else if (m=="getcontractoutpoint07b") response=handleGetContractOutpoint07B(chain,params,id);
-        else if (m=="getvotingv1snapshot07b") response=tru_desktop_voting_rpc_07b::snapshot(chain,params,id);
-        else if (m=="preparevotingv1create07b") response=tru_desktop_voting_rpc_07b::create(chain,params,id);
-        else if (m=="preparevotingv1ballot07b") response=tru_desktop_voting_rpc_07b::ballot(chain,params,id);
         else if (m == "getTRUScripts") response = handleGetTRUScripts(chain, params, id);
         else if (m == "getTRUScriptDetails") response = handleGetTRUScriptDetails(chain, params, id);
         else if (m=="sendtokenweb")       response=handleSendTokenWeb(chain,params,id);

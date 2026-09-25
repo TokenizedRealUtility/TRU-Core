@@ -1,15 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
 project(TRUBlockchain)
-# TRU_CORE_MEDIA_EDITOR_PORT_01: compile release identity from VERSION (non-consensus).
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/VERSION")
-file(STRINGS "${CMAKE_SOURCE_DIR}/VERSION" TRU_BUILD_RELEASE LIMIT_COUNT 1)
-string(STRIP "${TRU_BUILD_RELEASE}" TRU_BUILD_RELEASE)
-string(LENGTH "${TRU_BUILD_RELEASE}" TRU_BUILD_RELEASE_LENGTH)
-if(NOT TRU_BUILD_RELEASE MATCHES "^[A-Za-z0-9._+-]+$" OR TRU_BUILD_RELEASE_LENGTH GREATER 32)
-    message(FATAL_ERROR "VERSION must be a 1..32 character portable release label")
-endif()
-add_definitions(-DTRU_BUILD_CORE_VERSION="${TRU_BUILD_RELEASE}")
-
 # TRU Security Patch 01:
 # Prefer a local runtime config for native builds when explicitly present.
 # Clean clones and Docker builds must not require or consume private tru.conf.
@@ -590,7 +580,6 @@ endif()
 add_executable(tru_ai_provenance_closeout_dev EXCLUDE_FROM_ALL
     src/token_evolution_closeout_test.cpp
     src/token_evolution.cpp
-    src/crypto_ecdsa.cpp
     src/vah_capabilities.cpp
     src/leveldb_storage.cpp
     src/logging.cpp

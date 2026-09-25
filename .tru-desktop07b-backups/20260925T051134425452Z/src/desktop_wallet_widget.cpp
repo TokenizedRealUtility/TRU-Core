@@ -34,7 +34,6 @@
 #include <qrencode.h>
 
 #include <algorithm>
-#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -571,75 +570,6 @@ bool DesktopWalletWidget::inspectPreparedIntent(
         }
         return true;
     } catch(const std::exception& e) {errorOut=QString::fromUtf8(e.what());return false;}
-}
-
-bool DesktopWalletWidget::signVotingV1Ballot(
-    const QString& unsignedTxHex,const QJsonObject& u,const QString& live,
-    const QString& anchorAtoms,const QString& unlockHex,const QString& callHex,
-    QString& signedTxOut,QString& txidOut,QString& errorOut) const {
-    signedTxOut.clear();txidOut.clear();errorOut.clear();
-    if(!wallet_.isUnlocked()){errorOut="Unlock the standalone wallet first";return false;}
-    try {
-        const QString txid=u.value("txid").toString();
-        const auto n=u.value("vout");
-        std::uint64_t atoms=0;
-        bool ok=false;const auto anchor=anchorAtoms.toULongLong(&ok,10);
-        if(!ok || anchor==0 || txid.size()!=64 || !n.isDouble() ||
-           n.toDouble()<0 || n.toDouble()>4294967295.0 ||
-           n.toDouble()!=std::floor(n.toDouble()) || !exactAtoms(u,atoms))
-            throw std::runtime_error("Voting funding/anchor amount is malformed");
-        const QString script=scriptHex(u.value("scriptPubKey"));
-        std::uint32_t keyIndex=wallet_.addressCount();
-        for(std::uint32_t i=0;i<wallet_.addressCount();++i){
-            const auto own=QString::fromStdString(wallet_.scriptForAddress(wallet_.address(i)));
-            if(own==script){keyIndex=i;break;}
-        }
-        if(keyIndex>=wallet_.addressCount())
-            throw std::runtime_error("Voting fee input belongs to another wallet");
-        DesktopWalletUtxo input;
-        input.txid=txid.toStdString();input.vout=static_cast<std::uint32_t>(n.toDouble());
-        input.scriptPubKey=script.toStdString();input.amountAtoms=atoms;input.keyIndex=keyIndex;
-        const auto signedTx=wallet_.signCanonicalVotingV1Ballot(
-            unsignedTxHex.toStdString(),input,live.toStdString(),anchor,
-            unlockHex.toStdString(),callHex.toStdString());
-        signedTxOut=QString::fromStdString(signedTx.rawHex);
-        txidOut=QString::fromStdString(signedTx.txid);return true;
-    }catch(const std::exception& ex){errorOut=QString::fromUtf8(ex.what());return false;}
-}
-
-bool DesktopWalletWidget::signContractRedemption(
-    const QJsonObject& o, const QString& family,
-    const QString& preimage, const QString& destination,
-    QString& rawHexOut, QString& txidOut, QString& errorOut) const {
-    rawHexOut.clear();txidOut.clear();errorOut.clear();
-    if(!wallet_.isUnlocked()) {errorOut="Unlock the standalone wallet first";return false;}
-    try {
-        const QString txid=o.value("txid").toString();
-        const auto n=o.value("vout");
-        const QString script=o.value("scriptPubKey").toString();
-        std::uint64_t atoms=0;
-        if(txid.size()!=64 || !n.isDouble() || n.toDouble()<0 ||
-           n.toDouble()>4294967295.0 ||
-           n.toDouble()!=std::floor(n.toDouble()) || !exactAtoms(o,atoms))
-            throw std::runtime_error("Core returned malformed contract UTXO identity/amount");
-        DesktopWalletSignedTx signedTx;
-        if(family=="HASH LOCK") {
-            signedTx=wallet_.redeemCanonicalHashLock(txid.toStdString(),
-                static_cast<std::uint32_t>(n.toDouble()),atoms,
-                script.toStdString(),preimage.toStdString(),destination.toStdString());
-        } else if(family=="TIME LOCK") {
-            const auto mtp=o.value("chain_parent_mtp");
-            if(!mtp.isDouble() || mtp.toDouble()<0 || mtp.toDouble()>4294967295.0 ||
-               mtp.toDouble()!=std::floor(mtp.toDouble()))
-                throw std::runtime_error("Core returned invalid parent-chain MTP");
-            signedTx=wallet_.redeemCanonicalTimeLock(txid.toStdString(),
-                static_cast<std::uint32_t>(n.toDouble()),atoms,script.toStdString(),
-                static_cast<std::uint32_t>(mtp.toDouble()),destination.toStdString());
-        } else throw std::runtime_error("unsupported canonical redemption family");
-        rawHexOut=QString::fromStdString(signedTx.rawHex);
-        txidOut=QString::fromStdString(signedTx.txid);
-        return true;
-    }catch(const std::exception& ex){errorOut=QString::fromUtf8(ex.what());return false;}
 }
 
 bool DesktopWalletWidget::signPreparedTransaction(

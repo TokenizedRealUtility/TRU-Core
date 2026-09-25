@@ -2,7 +2,6 @@
 
 #include "desktop_rpc.h"
 #include "desktop_wallet_widget.h"
-#include "tru_desktop_studio_07.h"
 
 #include <QBuffer>
 #include <QDateTime>
@@ -571,7 +570,6 @@ DesktopAssetsWidget::DesktopAssetsWidget(
 
     tabs->addTab(tokenPage, "Tokens");
     tabs->addTab(scriptPage, "TRUScripts");
-    tabs->addTab(new TruDesktopStudio07(rpc_, wallet_, tabs), "Create & Contracts");
     root->addWidget(tabs, 1);
 
     auto* privacy = new QLabel(

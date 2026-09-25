@@ -29,7 +29,6 @@
 #include <cctype>
 #include <queue>
 #include <condition_variable>
-#include <mutex>  // TRU-RPC-SEND-01 explicit transaction serialisation
 #include <atomic>
 #include <future>
 #include <sstream>  // WEB-MINER-01 canonical browser coinbase tag
@@ -40,7 +39,6 @@
 #include "ai_provider_interface.h"
 #include "ai_oracle_service.h"
 #include "token_evolution.h"  // TOKEN-AI-02D live provenance verifier
-#include "token_editor_authority.h"
 #include "tru_network_params.h"
 #include "tru_amount.h"
 #include "tru_version.h"  // UI-08 connected Core release version
@@ -103,30 +101,11 @@ static bool parseJsonTRUAmount(const json& value, uint64_t& atomsOut, std::strin
 
 static bool readRpcUtxoAtoms(const json& utxo, uint64_t& atomsOut, std::string& reason) {
     if (utxo.contains("amount_atoms")) {
-        if (utxo["amount_atoms"].is_number_unsigned()) {
-            atomsOut = utxo["amount_atoms"].get<uint64_t>();
-        } else if (utxo["amount_atoms"].is_string()) {
-            const std::string digits = utxo["amount_atoms"].get<std::string>();
-            if (digits.empty() || digits.size()>20 ||
-                digits.find_first_not_of("0123456789") != std::string::npos ||
-                (digits.size()>1 && digits[0]=='0')) {
-                reason = "amount_atoms must be canonical base-10 uint64";
-                return false;
-            }
-            try { atomsOut = std::stoull(digits); }
-            catch (...) { reason = "amount_atoms overflow"; return false; }
-        } else {
-            reason = "amount_atoms must be an unsigned integer or canonical decimal string";
+        if (!utxo["amount_atoms"].is_number_unsigned()) {
+            reason = "amount_atoms must be an unsigned integer";
             return false;
         }
-        if (utxo["amount_atoms"].is_string() && utxo.contains("amount")) {
-            uint64_t suppliedHuman=0;
-            if (!parseJsonTRUAmount(utxo["amount"],suppliedHuman,reason) ||
-                suppliedHuman!=atomsOut) {
-                reason="UTXO amount does not match amount_atoms";
-                return false;
-            }
-        }
+        atomsOut = utxo["amount_atoms"].get<uint64_t>();
         if (atomsOut > tru_limits::MAX_MONEY) {
             reason = "amount_atoms exceeds MAX_MONEY";
             return false;
@@ -2323,37 +2302,6 @@ static json handleGetTxOut(Blockchain &chain, const json &params, int id) {
         return makeError(-32000, e.what());
     }
 }
-// TRU-DESKTOP-07B: exact contract output descriptor for standalone signing.
-// Never takes a private key/preimage and never spends with the Core wallet.
-static json handleGetContractOutpoint07B(Blockchain& chain, const json& params,int id){
-    try {
-        if(!params.is_object() || params.size()!=2 ||
-           !params.contains("txid") || !params["txid"].is_string() ||
-           !params.contains("vout") || !params["vout"].is_number_integer())
-            return makeError(-32602,"expected {txid:lowercase64hex,vout:uint32}");
-        const auto txid=params["txid"].get<std::string>();
-        const auto signedIndex=params["vout"].get<std::int64_t>();
-        if(signedIndex<0)return makeError(-32602,"negative contract output index");
-        const auto index=static_cast<std::uint64_t>(signedIndex);
-        if(txid.size()!=64 || txid.find_first_not_of("0123456789abcdef")!=std::string::npos ||
-            index>UINT32_MAX)return makeError(-32602,"invalid contract outpoint");
-        UTXO utxo;
-        if(!chain.utxoSet.getUTXO(txid,static_cast<uint32_t>(index),utxo))
-            return makeError(-32080,"contract output is missing or already spent");
-        if(utxo.scriptPubKey.size()>1024)
-            return makeError(-32081,"oversized contract locking script");
-        std::string tip;int height=-1;
-        chain.getBestTipSnapshot(tip,height);
-        const uint32_t mtp=(height>=0 && !tip.empty()) ?
-            chain.getMedianTimePast(tip,height+1) : 0;
-        return makeResult(id,json{{"txid",txid},{"vout",index},
-            {"amount_atoms",std::to_string(utxo.amount)},
-            {"scriptPubKey",utxo.scriptPubKey},
-            {"chain_parent_mtp",mtp},{"bestblock",tip}});
-    } catch(const std::exception& e){return makeError(-32082,"contract output lookup failed");}
-}
-
-#include "tru_contract_rpc_07b.h" // TRU-DESKTOP-07B unsigned native Voting V1
 //========================
 // Redeem canonical Hash Lock
 //========================
@@ -4317,64 +4265,6 @@ static json handleInscribeTRUScriptSigned(Blockchain &chain, const json &params,
         
         Logger::log("[handleInscribeTRUScriptSigned] Processing TRUScript inscription for txid: " + tx.txid);
         
-        // DESKTOP-07A: strict opt-in for new standalone callers; the legacy
-        // web RPC path is deliberately left byte-for-byte compatible while
-        // old consumers are migrated to requireBoundOpReturn.
-        const bool requireBoundOpReturn=params.value("requireBoundOpReturn",false);
-        if(requireBoundOpReturn) {
-        // DESKTOP-07A: bind claimed owner/data to an actually signed
-        // OP_RETURN payload, rather than indexing arbitrary RPC parameters.
-        // This opt-in is used by the standalone desktop; legacy RPC callers
-        // must supply the same bound payload before metadata is accepted.
-        if (!params.contains("inscriptionData") ||
-            !params["inscriptionData"].is_string() ||
-            !params.contains("owner") || !params["owner"].is_string()) {
-            return makeError(-32602, "inscriptionData and owner are required");
-        }
-        const std::string requestedData=params["inscriptionData"].get<std::string>();
-        const std::string requestedOwner=params["owner"].get<std::string>();
-        bool bound=false;
-        for (const auto& out:tx.vout) {
-            if(out.amount != 0 || out.scriptPubKey.size()<4 ||
-               out.scriptPubKey.substr(0,2)!="6a") continue;
-            const auto bytes=hexDecode(out.scriptPubKey);
-            if(bytes.size()<2 || bytes[0]!=0x6a) continue;
-            size_t pos=1,sz=0;
-            if(bytes[pos]<=75) sz=bytes[pos++];
-            else if(bytes[pos]==0x4c && bytes.size()>pos+1) {++pos;sz=bytes[pos++];}
-            else if(bytes[pos]==0x4d && bytes.size()>pos+2) {
-                ++pos;sz=static_cast<size_t>(bytes[pos]) |
-                    (static_cast<size_t>(bytes[pos+1])<<8);pos+=2;
-            } else continue;
-            if(sz>2048 || pos+sz!=bytes.size()) continue;
-            try {
-                const auto payload=json::parse(bytes.begin()+pos,bytes.end());
-                if(payload.is_object() && payload.value("type","")=="TRUSCRIPT" &&
-                   payload.value("owner","")==requestedOwner &&
-                   payload.value("data","")==requestedData) {bound=true;break;}
-            } catch(const std::exception&) {}
-        }
-        if(!bound) return makeError(-32602,
-            "Signed TRUScript OP_RETURN does not match owner/inscriptionData");
-        // Merely naming an owner inside OP_RETURN would allow impersonation.
-        // Require a confirmed funding input locked to that owner. The normal
-        // mempool validation below then independently checks the spending signature.
-        const std::string ownerScript=createP2PKHScriptHexFromAddress(requestedOwner);
-        bool signedByOwner=false;
-        if(tx.vin.size()>0 && tx.vin.size()<=32) for(const auto& input:tx.vin) {
-            UTXO previous;
-            if(chain.utxoSet.getUTXO(input.txid,input.vout,previous) &&
-               previous.scriptPubKey==ownerScript && !input.scriptSig.empty()) {
-                signedByOwner=true;break;
-            }
-        }
-        if(!signedByOwner)return makeError(-32602,
-            "TRUScript claimed owner must fund a signed P2PKH input");
-        if(!chain.addTransaction(tx))
-            return makeError(-32000,"Transaction queue admission rejected");
-        }
-
-
         // Store TRUScript data if provided
         if (params.contains("inscriptionData")) {
             std::string inscriptionData = params["inscriptionData"].get<std::string>();
@@ -4426,12 +4316,12 @@ static json handleInscribeTRUScriptSigned(Blockchain &chain, const json &params,
                        " with size=" + std::to_string(sizeBytes) + " bytes");
         }
         
-        // Legacy callers use the historical admission position; strict
-        // desktop callers were admitted before indexing above.
-        if (!requireBoundOpReturn && !chain.addTransaction(tx)) {
-            return makeError(-32000,"Transaction queue admission rejected");
+        // Add transaction to the bounded ingress queue.
+        if (!chain.addTransaction(tx)) {
+            Logger::log("[handleInscribeTRUScriptSigned] TX queue admission rejected: " + tx.txid);
+            return makeError(-32000, "Transaction queue admission rejected");
         }
-
+        
         Logger::log("[handleInscribeTRUScriptSigned] TRUScript transaction submitted: " + tx.txid);
         
         json result;
@@ -6874,14 +6764,6 @@ static json handleCreateTokenTransaction(Blockchain &chain, const json &params, 
             {"controllingVout", 1}      // Controlling output is at vout 1
         };
         
-        // DESKTOP-07A: explicit opt-in for standalone wallet self-custody.
-        // Attach metadata BEFORE creating unsigned bytes. Reattaching metadata
-        // after signing changes the serialized transaction and is not allowed
-        // by the desktop's independent prepared-transaction audit.
-        if (params.value("metadataBeforeSigning", false)) {
-            tx.tokenMetadata[tx.txid] = tokenMetadata;
-        }
-
         Logger::log("[handleCreateTokenTransaction] Created unsigned transaction");
         
         // Return unsigned transaction and metadata for client
@@ -7798,7 +7680,7 @@ static json handleVerifyTokenEvolution(
     uint64_t missingAnchors = 0;
     uint64_t validAnchorPayloads = 0;
 
-    if (!history.value("lineage_ok", false) ||
+    if (!history.value("ok", false) ||
         !history.contains("epochs") || !history["epochs"].is_array())
     {
         result["all_anchor_txs_observable"] = false;
@@ -7922,13 +7804,6 @@ static json handleVerifyTokenEvolution(
         allObservable &&
         allPayloadsValid &&
         anchorConfirmationAcceptable;
-    result["issuer_authorized"] = history.value("issuer_authorized", false);
-    result["authorization_status"] = history.value("authorization_status", "UNKNOWN");
-    result["anchor_lineage_ok"] =
-        history.value("lineage_ok", false) &&
-        history.value("fully_anchored", false) &&
-        issuanceAcceptable && allObservable && allPayloadsValid &&
-        anchorConfirmationAcceptable;
 
     return makeResult(id, result);
 }
@@ -7974,24 +7849,62 @@ static bool desktopEvolutionConfirmedOwner(
     std::string& reason)
 {
     reason.clear();
-    try {
-        ContractStorage storage(&db);
-        TokenEvolutionEngine engine(&storage);
-        const json authority = engine.issuerContext(tokenID);
-        if (authority.at("owner").get<std::string>() != owner) {
-            reason = "address is not the original issuance owner; receiving token units does not grant edit authority";
-            return false;
-        }
-        Transaction issuance;
-        if (!chain.getTransaction(authority.at("issuance_txid").get<std::string>(), issuance)) {
-            reason = "original issuance transaction is not confirmed on the active chain";
-            return false;
-        }
-        return true;
-    } catch (const std::exception& e) {
-        reason = std::string("issuer authority unavailable: ") + e.what();
-        return false;
-    }
+    bool found = false;
+    const std::string prefix =
+        "tokenOwnerUTXO:" + tokenID + ":" + owner + ":";
+
+    db.iteratePrefix(
+        prefix,
+        [&](const std::string& suffix, const std::string&) {
+            if (found) return;
+            try {
+                const std::size_t colon = suffix.rfind(':');
+                if (colon == std::string::npos) return;
+                const std::string txid = suffix.substr(0, colon);
+                const uint32_t vout = static_cast<uint32_t>(
+                    std::stoul(suffix.substr(colon + 1)));
+
+                UTXO control;
+                if (!chain.utxoSet.getUTXO(txid, vout, control))
+                    return;
+                if (chain.mempool &&
+                    chain.mempool->isUTXOSpentInMempool(txid, vout))
+                    return;
+
+                std::string raw;
+                if (!db.getWithDataChecksum(
+                        "tokenUTXO:" + txid + ":" +
+                            std::to_string(vout),
+                        raw))
+                    return;
+
+                const json state = json::parse(raw);
+                if (state.value("tokenID", "") != tokenID ||
+                    state.value("owner", "") != owner)
+                    return;
+
+                uint64_t amount = 0;
+                if (state.contains("amount") &&
+                    state["amount"].is_string()) {
+                    amount =
+                        std::stoull(state["amount"].get<std::string>());
+                } else if (state.contains("amount")) {
+                    amount = state["amount"].get<uint64_t>();
+                }
+                if (amount == 0) return;
+                found = true;
+            } catch (const std::exception& e) {
+                Logger::log(
+                    "[DesktopEvolution] ownership candidate skipped: " +
+                    std::string(e.what()));
+            }
+        });
+
+    if (!found)
+        reason =
+            "wallet address is not the current confirmed owner, or its "
+            "control output is already spent/pending";
+    return found;
 }
 
 static bool desktopEvolutionParentStillCurrent(
@@ -8078,9 +7991,9 @@ static bool desktopEvolutionPreviousAnchorConfirmed(
     }
 
     const json result = wrapped["result"];
-    if (!result.value("anchor_lineage_ok", false)) {
+    if (!result.value("runtime_ok", false)) {
         reason =
-            "previous evolution lineage is not fully confirmed/verified";
+            "previous evolution epoch is not fully confirmed/verified";
         return false;
     }
     return true;
@@ -8182,8 +8095,7 @@ static json handlePreviewTokenEvolution(
             tokenType,
             issuanceMetadata,
             providerName,
-            trigger,
-            params.value("media_inputs", json()));
+            trigger);
 
     if (!preview.ok) {
         return makeError(
@@ -8254,7 +8166,7 @@ static json handleCommitTokenEvolutionSigned(
         params["record_json"].get<std::string>();
     std::string publicKeyHex =
         params["publicKey"].get<std::string>();
-    std::string signatureHex =
+    const std::string signatureHex =
         params["signature"].get<std::string>();
 
     if ((tokenID.size() != 8U &&
@@ -8284,10 +8196,6 @@ static json handleCommitTokenEvolutionSigned(
         return makeError(
             -32602,
             "Evolution record identity/format mismatch");
-    }
-    if (record.dump() != recordJson || record.contains("editor_proof")) {
-        return makeError(-32602,
-            "record_json must be the exact canonical unsigned preview returned by Core");
     }
 
     const std::string tokenType =
@@ -8353,17 +8261,6 @@ static json handleCommitTokenEvolutionSigned(
             -32000, "Blockchain storage is unavailable");
     ContractStorage contractStorage(db);
     TokenEvolutionEngine engine(&contractStorage);
-    try {
-        const json trusted = engine.issuerContext(tokenID);
-        if (record.at("issuer_context") != trusted ||
-            trusted.at("owner").get<std::string>() != owner) {
-            return makeError(-32045,
-                "Preview is not bound to this token's original issuance owner");
-        }
-    } catch (const std::exception& e) {
-        return makeError(-32045,
-            std::string("Issuer authority validation failed: ") + e.what());
-    }
 
     // UI-06 COMMIT ORDERING INVARIANT:
     // exact COMMIT -> fresh latest -> parent epoch/hash -> confirmed parent
@@ -8408,8 +8305,6 @@ static json handleCommitTokenEvolutionSigned(
         [](unsigned char c) {
             return static_cast<char>(std::tolower(c));
         });
-    std::transform(signatureHex.begin(), signatureHex.end(), signatureHex.begin(),
-        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 
     if (publicKeyHex.size() != 66U ||
         (publicKeyHex.rfind("02", 0) != 0 &&
@@ -8465,16 +8360,6 @@ static json handleCommitTokenEvolutionSigned(
 
     // TOKEN-AI-02A persistPreview() remains the final persistence authority
     // and independently rejects stale/duplicate/broken-lineage records.
-    if (record.value("record_format_version", 1U) == 4U) {
-        json issuance;
-        std::string issuanceTx, issuanceType, reason;
-        if (!loadTokenEvolutionIssuanceMetadata(*db, tokenID, issuance, issuanceTx, issuanceType, reason) ||
-            issuanceType != tokenType || !engine.validateMediaPreview(record, issuance))
-            return makeError(-32048, "V4 root, request, or exact metadata transition invalid");
-    }
-    record["editor_proof"] = tru_editor::proof(publicKey, signature);
-    if (!engine.verifyEditorProof(record))
-        return makeError(-32047, "Issuer authorization envelope self-check failed");
     if (!engine.persistPreview(record)) {
         return makeError(
             -32048,
@@ -8493,8 +8378,6 @@ static json handleCommitTokenEvolutionSigned(
         {"epoch", nextEpoch},
         {"record_sha256",
          desktopEvolutionSha256Hex(recordJson)},
-        {"sealed_record_sha256", desktopEvolutionSha256Hex(record.dump())},
-        {"authorization", "ORIGINAL_ISSUANCE_OWNER_VERIFIED"},
         {"persisted", true},
         {"anchor_queued", true},
         {"note",
@@ -9765,10 +9648,9 @@ static bool consumeRpcBucket(std::unordered_map<std::string, RpcRateBucket>& buc
 
 static double rpcMethodCost(const std::string& method) {
     static const std::unordered_set<std::string> expensive = {
-        "submitblock", "sendtoaddress", "sendrawtransaction", "sendrawtransactionWeb",
+        "submitblock", "sendrawtransaction", "sendrawtransactionWeb",
         "signrawtransactionwithkey", "signrawtransactionwithkeyWeb",
         "issuetoken", "issuetokensigned", "createcontracttransaction",
-        "preparevotingv1create07b", "preparevotingv1ballot07b",
         "inscribeTRUScript", "inscribeTRUScriptSigned", "createsocialpost",
         "createAIToken", "interactWithAIToken", "trainAIToken"
     };
@@ -9809,92 +9691,6 @@ static bool authorizeRpcTransport(const httplib::Request& req,
 }
 } // namespace
 
-// TRU-RPC-SEND-01: local-only, operator-opted-in core wallet spend.
-// This is intentionally NOT part of the public explorer's gateway allowlist.
-// Authentication of /rpc is enforced by authorizeRpcTransport before dispatch.
-namespace {
-std::mutex g_cliSendMutex;
-static bool rpcEnvEnabled(const char* key) {
-    const char* value = std::getenv(key);
-    return value && std::string(value) == "1";
-}
-static bool rpcLocalPeer(const std::string& peer) {
-    return peer == "127.0.0.1" || peer == "::1" || peer == "::ffff:127.0.0.1";
-}
-static uint64_t rpcMaxSendAtoms() {
-    // Default maximum per CLI transaction is 1 TRU, including stress tests.
-    // The operator may explicitly set a higher atom-denominated cap.
-    const char* raw = std::getenv("TRU_RPC_WALLET_SEND_MAX_ATOMS");
-    if (!raw || !*raw) return 100000000ULL;
-    // No arbitrary 1-TRU software cap only when operator explicitly opts out.
-    // Consensus MAX_MONEY, wallet balance, fee, maturity and mempool rules remain.
-    if (std::string(raw) == "unlimited") return tru_limits::MAX_MONEY;
-    const std::string digits(raw);
-    if (digits.size() > 20U || digits.find_first_not_of("0123456789") != std::string::npos)
-        return 0;
-    try {
-        const uint64_t value = std::stoull(digits);
-        return value <= tru_limits::MAX_MONEY ? value : 0;
-    } catch (...) { return 0; }
-}
-static json handleSendToAddressLocal(Blockchain& chain, Wallet& wallet, const json& params,
-                                     int id, const std::string& peer, int port) {
-    if (!rpcEnvEnabled("TRU_RPC_WALLET_SEND_ENABLE"))
-        return makeError(-32070, "sendtoaddress disabled; opt in via tru.conf [network] TRU_RPC_WALLET_SEND_ENABLE=1 or Core environment");
-    if (!rpcLocalPeer(peer))
-        return makeError(-32071, "sendtoaddress requires a local loopback RPC connection");
-    if (!params.is_object() || !params.contains("address") || !params["address"].is_string() ||
-        !params.contains("amount") || !params["amount"].is_string())
-        return makeError(-32602, "sendtoaddress requires {address:string, amount:decimal-string, dry_run?:bool}");
-    if (params.size() > 3U || (params.contains("dry_run") && !params["dry_run"].is_boolean()))
-        return makeError(-32602, "unsupported sendtoaddress parameter");
-    for (auto it = params.begin(); it != params.end(); ++it)
-        if (it.key() != "address" && it.key() != "amount" && it.key() != "dry_run")
-            return makeError(-32602, "unexpected sendtoaddress parameter");
-    const std::string address = params["address"].get<std::string>();
-    const std::string amount = params["amount"].get<std::string>();
-    if (address.empty() || address.size() > 128U || amount.empty() || amount.size() > 64U)
-        return makeError(-32602, "invalid address or amount length");
-    if (!chain.isValidAddress(address))
-        return makeError(-32602, "invalid TRU destination address");
-    uint64_t atoms = 0;
-    std::string reason;
-    if (!parseJsonTRUAmount(params["amount"], atoms, reason) || atoms == 0U)
-        return makeError(-32602, "invalid amount: " + reason);
-    const uint64_t maxAtoms = rpcMaxSendAtoms();
-    if (maxAtoms == 0U || atoms > maxAtoms)
-        return makeError(-32072, "send exceeds operator-configured per-transaction atom limit");
-    // Wallet::send_transaction's local path applies its established P2PKH,
-    // maturity, fee, change, signature and mempool admission checks.
-    try {
-        if (!wallet.isLocalChainAvailable())
-            return makeError(-32073, "sendtoaddress requires a Core wallet attached to its local chain");
-        wallet.requirePrivateAccess("sendtoaddress");
-        const std::string from = wallet.getCurrentAddress();
-        if (from.empty()) return makeError(-32073, "Core wallet has no current sender address");
-        if (params.value("dry_run", false))
-            return makeResult(id, json{{"dry_run", true}, {"broadcast", false},
-                {"from", from}, {"address", address},
-                {"amount", tru_amount::format(atoms)}, {"amount_atoms", atoms},
-                {"note", "Syntax, cap and unlocked-wallet checks only; UTXO selection and fee NOT simulated"}});
-        std::lock_guard<std::mutex> sendGuard(g_cliSendMutex);
-        const std::string result = wallet.send_transaction(address, atoms, "127.0.0.1", port);
-        const std::string marker = "[send_transaction] TX => ";
-        if (result.rfind(marker, 0) != 0 || result.size() != marker.size() + 64U ||
-            !isHex(result.substr(marker.size())))
-            return makeError(-32074, "local wallet returned an unexpected send result; inspect local transaction history before retrying");
-        return makeResult(id, json{{"txid", result.substr(marker.size())},
-            {"from", from}, {"address", address},
-            {"amount", tru_amount::format(atoms)}, {"amount_atoms", atoms},
-            {"broadcast", true}});
-    } catch (const std::exception& e) {
-        // Never return keys/passphrases or raw serialized transaction data.
-        Logger::log("[RPC-SEND-01] local send failed: " + std::string(e.what()));
-        return makeError(-32075, "local send failed; inspect Core wallet/log (no retry without checking mempool)");
-    }
-}
-} // namespace
-
 void startRPCServer(Blockchain &chain, Wallet &wallet, P2PNode &node, int port,
                     const std::string &bindIP, int maxConnections,
                     const std::string &rpcAuthToken) {
@@ -9917,7 +9713,7 @@ void startRPCServer(Blockchain &chain, Wallet &wallet, P2PNode &node, int port,
         res.set_content("{\"error\":\"browser CORS access disabled\"}\n", "application/json");
     });
 
-    g_rpcServer.Post("/rpc",[&chain, &wallet, &node, rpcAuthToken, port](auto &req,auto &res){
+    g_rpcServer.Post("/rpc",[&chain, &wallet, &node, rpcAuthToken](auto &req,auto &res){
         if (!authorizeRpcTransport(req, res, rpcAuthToken)) return;
         const std::string contentType = req.get_header_value("Content-Type");
         if (contentType.rfind("application/json", 0) != 0) {
@@ -9999,7 +9795,6 @@ void startRPCServer(Blockchain &chain, Wallet &wallet, P2PNode &node, int port,
         else if (m=="getchaininfo")        response=handleGetChainInfo(chain,id);
         else if (m=="sendrawtransactionWeb")  response=handleSendTransactionWeb(chain,params,id);
         else if (m=="sendrawtransaction")  response=handleSendTransaction(chain,params,id);
-        else if (m=="sendtoaddress") response=handleSendToAddressLocal(chain,wallet,params,id,req.remote_addr,port);
         else if (m== "startmining")        response=handleStartMining(chain, params);
         else if (m=="getmempooltransactions") response=handleGetMempoolTransactions(chain,id);
         else if (m=="getrawmempool")       response=handleGetRawMempool(chain,params,id);
@@ -10040,10 +9835,6 @@ void startRPCServer(Blockchain &chain, Wallet &wallet, P2PNode &node, int port,
         else if (m=="getcontracts")        response=handleGetContracts(chain,params,id);
         else if (m=="getrawtransaction")  response=handleGetRawTransaction(chain,params,id);
         else if (m=="gettxout")           response=handleGetTxOut(chain,params,id);
-        else if (m=="getcontractoutpoint07b") response=handleGetContractOutpoint07B(chain,params,id);
-        else if (m=="getvotingv1snapshot07b") response=tru_desktop_voting_rpc_07b::snapshot(chain,params,id);
-        else if (m=="preparevotingv1create07b") response=tru_desktop_voting_rpc_07b::create(chain,params,id);
-        else if (m=="preparevotingv1ballot07b") response=tru_desktop_voting_rpc_07b::ballot(chain,params,id);
         else if (m == "getTRUScripts") response = handleGetTRUScripts(chain, params, id);
         else if (m == "getTRUScriptDetails") response = handleGetTRUScriptDetails(chain, params, id);
         else if (m=="sendtokenweb")       response=handleSendTokenWeb(chain,params,id);

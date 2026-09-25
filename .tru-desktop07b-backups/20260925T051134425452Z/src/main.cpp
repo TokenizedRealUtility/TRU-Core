@@ -21,7 +21,6 @@
 #include "token_editor_authority.h"
 #include "token_media_file.h"
 #include "tru_artwork_fetch.h"
-#include "tru_limits.h"  // TRU-DESKTOP-07B RPC spend config bounds
 #include "tru_version.h"
 #include "globals.h"
 #include <fmt/core.h>
@@ -10862,69 +10861,6 @@ int main(int argc, char *argv[]) {
 
         const auto &networkCfg = cfg["network"];
 
-        // TRU-DESKTOP-07B: opt-in spending policy from the SAME tru.conf
-        // selected by --conf. The existing environment variables remain
-        // supported; an explicitly present config key overrides them.
-        // Accepted in [network] or at top level (but never both).
-        auto rpcSendConf = [&](const std::string& key,
-                               const std::string& alias) -> std::string {
-            std::string resolved;
-            bool found = false;
-            for (const auto& section : {"network", "default"}) {
-                const auto secIt = cfg.find(section);
-                if (secIt == cfg.end()) continue;
-                for (const auto& name : {key, alias}) {
-                    const auto it = secIt->second.find(name);
-                    if (it == secIt->second.end()) continue;
-                    if (found) throw std::runtime_error(
-                        "Duplicate RPC spend config; use one name/section for " + key);
-                    found = true; resolved = it->second;
-                }
-            }
-            return found ? resolved : std::string();
-        };
-        const std::string confSendEnabled = rpcSendConf(
-            "TRU_RPC_WALLET_SEND_ENABLE", "rpcWalletSend");
-        const std::string confSendCap = rpcSendConf(
-            "TRU_RPC_WALLET_SEND_MAX_ATOMS", "rpcWalletSendMaxAtoms");
-        if (!confSendEnabled.empty()) {
-            if (confSendEnabled != "0" && confSendEnabled != "1")
-                throw std::runtime_error("tru.conf RPC spend enable must be 0 or 1");
-#ifndef _WIN32
-            ::setenv("TRU_RPC_WALLET_SEND_ENABLE", confSendEnabled.c_str(), 1);
-#else
-            _putenv_s("TRU_RPC_WALLET_SEND_ENABLE", confSendEnabled.c_str());
-#endif
-        }
-        if (!confSendCap.empty()) {
-            const bool unlimited = confSendCap == "unlimited";
-            if (!unlimited && (confSendCap.empty() || confSendCap.size() > 20 ||
-                confSendCap.find_first_not_of("0123456789") != std::string::npos ||
-                confSendCap == "0"))
-                throw std::runtime_error(
-                    "tru.conf RPC spend max must be positive atom count or unlimited");
-            if (!unlimited) {
-                try {
-                    const auto cap = std::stoull(confSendCap);
-                    if (cap == 0 || cap > tru_limits::MAX_MONEY)
-                        throw std::runtime_error("cap exceeds MAX_MONEY");
-                } catch (...) {
-                    throw std::runtime_error("Invalid tru.conf RPC spend max atom count");
-                }
-            }
-#ifndef _WIN32
-            ::setenv("TRU_RPC_WALLET_SEND_MAX_ATOMS", confSendCap.c_str(), 1);
-#else
-            _putenv_s("TRU_RPC_WALLET_SEND_MAX_ATOMS", confSendCap.c_str());
-#endif
-        }
-        Logger::log(std::string("[RPC-SEND-07B] enabled=") +
-            ((std::getenv("TRU_RPC_WALLET_SEND_ENABLE") &&
-              std::string(std::getenv("TRU_RPC_WALLET_SEND_ENABLE")) == "1") ? "yes" : "no") +
-            "; cap=" + ((std::getenv("TRU_RPC_WALLET_SEND_MAX_ATOMS") &&
-                std::string(std::getenv("TRU_RPC_WALLET_SEND_MAX_ATOMS")) == "unlimited") ?
-                "operator-explicit-unlimited" : "capped"));
-
         // rpcbind
         {
             auto it = networkCfg.find("rpcbind");
@@ -11169,13 +11105,6 @@ int main(int argc, char *argv[]) {
         if (!tru_rpc::isLoopbackBind(rpcBind) && !rpcAllowRemote) {
             throw std::runtime_error(
                 "Patch 05: refusing non-loopback rpcbind without [network] rpcAllowRemote=1");
-        }
-        // 07B: a spending-enabled Core may never bind privileged RPC to a
-        // non-loopback interface, even when a separate remote-read option exists.
-        if (std::getenv("TRU_RPC_WALLET_SEND_ENABLE") &&
-            std::string(std::getenv("TRU_RPC_WALLET_SEND_ENABLE"))=="1" &&
-            !tru_rpc::isLoopbackBind(rpcBind)) {
-            throw std::runtime_error("RPC spending requires loopback rpcbind; refuse remote exposure");
         }
         const std::string rpcAuthToken = tru_rpc::loadOrCreateServerToken(rpcPort);
 #ifndef _WIN32

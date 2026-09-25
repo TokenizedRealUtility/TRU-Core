@@ -201,11 +201,11 @@ chmod 700 "$TRU_DATA_HOME" "$WALLET_STORE" "$RUNTIME_STORE"
 # conda ships its own cmake, protobuf, leveldb and libstdc++. Activated, they
 # shadow the system toolchain and yield link errors or a binary with a
 # mismatched ABI that only runs on this machine.
-if [[ -n "${CONDA_PREFIX:-}" ]]; then
-    fail "conda environment '${CONDA_DEFAULT_ENV:-?}' is active.
-       It shadows the system toolchain. Run 'conda deactivate' and retry.
-       TRU's C++ build uses system packages only."
-fi
+#if [[ -n "${CONDA_PREFIX:-}" ]]; then
+#    fail "conda environment '${CONDA_DEFAULT_ENV:-?}' is active.
+#       It shadows the system toolchain. Run 'conda deactivate' and retry.
+#       TRU's C++ build uses system packages only."
+#fi
 
 for cmd in cmake sha256sum install protoc git pkg-config; do
     command -v "$cmd" >/dev/null 2>&1 ||

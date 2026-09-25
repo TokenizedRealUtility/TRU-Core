@@ -1,0 +1,78 @@
+{
+  "format": "TRU_CORE_MEDIA_EDITOR_PORT_01_V1",
+  "status": "applied",
+  "core": "/home/gw878/TRU-Core",
+  "files": [
+    {
+      "path": "src/blockchain.cpp",
+      "before_sha256": "bd4bdc4061d133fd9c44c7cdb2a963063398af6e650a990e5caaf8de4596bc29",
+      "after_sha256": "6afc50a46bd9590908f231756693f2f35e6970245bafd8971863159cbf8086e4"
+    },
+    {
+      "path": "src/contract_storage.h",
+      "before_sha256": "17845b65d8fd8ff3321d822e3a76b2f68a18d55f9042fc95c5b83431e7f82bfd",
+      "after_sha256": "989f9c8f9e26d7c5ca357c43112b29e0b436c7ee4cec853ee6ed6d1f1b4320b8"
+    },
+    {
+      "path": "src/desktop_ai_widget.cpp",
+      "before_sha256": "e617703ce940c248af5d5d1d65edcd86d76f0315dfd58af7bfc62e0883b62881",
+      "after_sha256": "f64ebb29696afc2224c1562c21f4c723b4a019ffca592e87ef08dc22d44e46e0"
+    },
+    {
+      "path": "src/main.cpp",
+      "before_sha256": "4c39a91357ddbe3326ac82f9707388373f89f4f79e49b705d7634d77833e4fb2",
+      "after_sha256": "391160b7e3a86b925d74618a409c2c7c61feec34dec43594244ad5ce2238a117"
+    },
+    {
+      "path": "src/rpc_server.cpp",
+      "before_sha256": "0e1af36300e5b016597f911a7333f4451b3ab6806f4981683a9bd52ad0e34046",
+      "after_sha256": "53f129e563401145d174120537ae36bfba1ba59269f7814720eb4723f706317b"
+    },
+    {
+      "path": "src/token_editor_authority.h",
+      "before_sha256": null,
+      "after_sha256": "97909426301fdf3d110bfbeb54519fcb3dbe64f049528483c22e3d645e7d3bbc"
+    },
+    {
+      "path": "src/token_evolution.cpp",
+      "before_sha256": "28bfa2827b5bb1e3321677b6eeb1e658a8d58e2d9191b1303dd1236241d5661b",
+      "after_sha256": "2a4bd280cce9ee96aa58988ccebec9d67fa4de5bc3dcf4f166df9987d24f3768"
+    },
+    {
+      "path": "src/token_evolution.h",
+      "before_sha256": "8fff891803b6178aa9cc117ee7b6518e5a180265f8c4687f1c094f3df3f46d18",
+      "after_sha256": "2dd34a6b00fb133c5fb28b1f0d81f37388562bbe8bc669a9bbee38222afd4f85"
+    },
+    {
+      "path": "src/token_media_file.h",
+      "before_sha256": null,
+      "after_sha256": "dc318b70d9191bc7ab0c3e74108b71ad9d118dcf211c62a49dd3a86f7069739b"
+    },
+    {
+      "path": "src/token_media_v4.h",
+      "before_sha256": null,
+      "after_sha256": "1b039834f5256946d617551575ad439ad564372e2e40adefc4b6d0a8740192ce"
+    },
+    {
+      "path": "src/tru_artwork_fetch.h",
+      "before_sha256": null,
+      "after_sha256": "152f71d13106b747050e6bc19e59f909acd802c88383ba1fbb41c1525f20f79c"
+    },
+    {
+      "path": "src/tru_submission_slot.h",
+      "before_sha256": "430a50e88c495870127989a8763f02b505d005116778776c110c6dde163ce8b0",
+      "after_sha256": "24cecda6c189c5784ac2c418f1297a6356d5d747d9ebde291ccdbd637ddeb491"
+    },
+    {
+      "path": "src/tru_version.h",
+      "before_sha256": "f038671e2a3373fb31ca13c5349681e21e3e18b2f8b34e3583f83fcc55ed3a2c",
+      "after_sha256": "26fa28befd5bc4a684cb34b717dfcda01521c34cf22be48307ac938aafe180c3"
+    },
+    {
+      "path": "CMakeLists.txt",
+      "before_sha256": "31cd96cd9ddd16cc2106f915b8d860f95d1f6ef768ef4d86370da140f7c98bfa",
+      "after_sha256": "af57a1ac8b3e030872c4972be56e99f0a57941025fef3a7ea0a1d36559556fb8"
+    }
+  ],
+  "warnings": []
+}

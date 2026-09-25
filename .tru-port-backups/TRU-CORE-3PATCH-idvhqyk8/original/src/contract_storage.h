@@ -7,13 +7,6 @@
 
 class ContractStorage {
 public:
-    // Read-only access to confirmed issuance authority, outside TOKEN_EVOLUTION.
-    bool readConfirmedAuthorityValue(const std::string& key, std::string& value) const {
-        return storage_ && storage_->getWithDataChecksum(key, value);
-    }
-    bool authorityGeneration(uint64_t& generation) const {
-        return storage_ && storage_->getMutationGeneration(generation);
-    }
 #ifdef TRU_TOKEN_EVOLUTION_TEST_FAULTS
     enum class TestFault {
         NONE,

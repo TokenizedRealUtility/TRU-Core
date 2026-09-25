@@ -85,7 +85,6 @@ static void printUsage() {
 "Common commands:\n"
 "  getinfo                          aggregate node + wallet snapshot\n"
 "  getbalance [address]             spendable TRU (defaults to wallet addr)\n"
-"  sendtoaddress <addr> <amount> [--dry-run]  locally authorized send; opt-in Core\n"
 "  getblockcount                    current height\n"
 "  getchaininfo                     tip height/hash/difficulty/valid\n"
 "  getbestblockhash                 best block hash\n"
@@ -120,12 +119,11 @@ static void printUsage() {
 "  getTRUScriptDetails <txid>       one TRUscription\n"
 "  listmagiclocks [address]         magic locks, optionally filtered\n\n"
 "  raw <method> [jsonparams]        call ANY node method directly\n\n"
-"Other money-moving and HTLC methods remain reachable through 'raw' only.\n"
+"Money-moving and HTLC methods are reachable through 'raw' only, on purpose.\n"
 "Funding, claim, refund and prepared-broadcast belong to the Swap Agent, which\n"
 "keeps the durable journal these commands would bypass.\n\n"
 "Examples:\n"
 "  tru-cli getinfo\n"
-"  tru-cli sendtoaddress TYourAddressHere 0.001 --dry-run\n"
 "  tru-cli getbalance 1Fyuq4Nzy65isRXwcbpaHaZJbcGPkS57hb\n"
 "  tru-cli -rpcconnect=137.184.68.43 getblockcount\n"
 "  tru-cli raw gettokenmetadata '{\"tokenID\":\"cottage\"}'\n"
@@ -282,32 +280,6 @@ int main(int argc, char** argv) {
             summary = [](const json& r){
                 std::cout << r.value("confirmed","0.00000000") << " TRU"
                           << "   (" << r.value("address","") << ")\n";
-            };
-        }
-        else if (cmd == "sendtoaddress") {
-            if (pos.size() < 3 || pos.size() > 4 ||
-                (pos.size() == 4 && pos[3] != "--dry-run")) {
-                std::cerr << "sendtoaddress: need <address> <decimal-TRU-amount> [--dry-run]\n";
-                return 2;
-            }
-            // Locality is enforced again inside Core even if this client is bypassed.
-            if (cfg.ip != "127.0.0.1" && cfg.ip != "localhost" && cfg.ip != "::1") {
-                std::cerr << "sendtoaddress: use a local Core RPC connection\n";
-                return 2;
-            }
-            method = "sendtoaddress";
-            params["address"] = pos[1];
-            params["amount"] = pos[2]; // Exact decimal string: never floating point.
-            params["dry_run"] = pos.size() == 4;
-            summary = [](const json& r) {
-                if (r.value("dry_run", false)) {
-                    std::cout << "VALIDATED (not signed or broadcast): "
-                              << r.value("amount", "") << " TRU to "
-                              << r.value("address", "") << "\n"
-                              << r.value("note", "") << "\n";
-                } else {
-                    std::cout << "TXID " << r.value("txid", "") << "\n";
-                }
             };
         }
         else if (cmd == "getblockcount") {

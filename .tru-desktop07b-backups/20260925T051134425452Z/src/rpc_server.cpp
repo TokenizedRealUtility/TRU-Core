@@ -2323,37 +2323,6 @@ static json handleGetTxOut(Blockchain &chain, const json &params, int id) {
         return makeError(-32000, e.what());
     }
 }
-// TRU-DESKTOP-07B: exact contract output descriptor for standalone signing.
-// Never takes a private key/preimage and never spends with the Core wallet.
-static json handleGetContractOutpoint07B(Blockchain& chain, const json& params,int id){
-    try {
-        if(!params.is_object() || params.size()!=2 ||
-           !params.contains("txid") || !params["txid"].is_string() ||
-           !params.contains("vout") || !params["vout"].is_number_integer())
-            return makeError(-32602,"expected {txid:lowercase64hex,vout:uint32}");
-        const auto txid=params["txid"].get<std::string>();
-        const auto signedIndex=params["vout"].get<std::int64_t>();
-        if(signedIndex<0)return makeError(-32602,"negative contract output index");
-        const auto index=static_cast<std::uint64_t>(signedIndex);
-        if(txid.size()!=64 || txid.find_first_not_of("0123456789abcdef")!=std::string::npos ||
-            index>UINT32_MAX)return makeError(-32602,"invalid contract outpoint");
-        UTXO utxo;
-        if(!chain.utxoSet.getUTXO(txid,static_cast<uint32_t>(index),utxo))
-            return makeError(-32080,"contract output is missing or already spent");
-        if(utxo.scriptPubKey.size()>1024)
-            return makeError(-32081,"oversized contract locking script");
-        std::string tip;int height=-1;
-        chain.getBestTipSnapshot(tip,height);
-        const uint32_t mtp=(height>=0 && !tip.empty()) ?
-            chain.getMedianTimePast(tip,height+1) : 0;
-        return makeResult(id,json{{"txid",txid},{"vout",index},
-            {"amount_atoms",std::to_string(utxo.amount)},
-            {"scriptPubKey",utxo.scriptPubKey},
-            {"chain_parent_mtp",mtp},{"bestblock",tip}});
-    } catch(const std::exception& e){return makeError(-32082,"contract output lookup failed");}
-}
-
-#include "tru_contract_rpc_07b.h" // TRU-DESKTOP-07B unsigned native Voting V1
 //========================
 // Redeem canonical Hash Lock
 //========================
@@ -9768,7 +9737,6 @@ static double rpcMethodCost(const std::string& method) {
         "submitblock", "sendtoaddress", "sendrawtransaction", "sendrawtransactionWeb",
         "signrawtransactionwithkey", "signrawtransactionwithkeyWeb",
         "issuetoken", "issuetokensigned", "createcontracttransaction",
-        "preparevotingv1create07b", "preparevotingv1ballot07b",
         "inscribeTRUScript", "inscribeTRUScriptSigned", "createsocialpost",
         "createAIToken", "interactWithAIToken", "trainAIToken"
     };
@@ -9826,9 +9794,6 @@ static uint64_t rpcMaxSendAtoms() {
     // The operator may explicitly set a higher atom-denominated cap.
     const char* raw = std::getenv("TRU_RPC_WALLET_SEND_MAX_ATOMS");
     if (!raw || !*raw) return 100000000ULL;
-    // No arbitrary 1-TRU software cap only when operator explicitly opts out.
-    // Consensus MAX_MONEY, wallet balance, fee, maturity and mempool rules remain.
-    if (std::string(raw) == "unlimited") return tru_limits::MAX_MONEY;
     const std::string digits(raw);
     if (digits.size() > 20U || digits.find_first_not_of("0123456789") != std::string::npos)
         return 0;
@@ -9840,7 +9805,7 @@ static uint64_t rpcMaxSendAtoms() {
 static json handleSendToAddressLocal(Blockchain& chain, Wallet& wallet, const json& params,
                                      int id, const std::string& peer, int port) {
     if (!rpcEnvEnabled("TRU_RPC_WALLET_SEND_ENABLE"))
-        return makeError(-32070, "sendtoaddress disabled; opt in via tru.conf [network] TRU_RPC_WALLET_SEND_ENABLE=1 or Core environment");
+        return makeError(-32070, "sendtoaddress disabled; set TRU_RPC_WALLET_SEND_ENABLE=1 on the local Core process");
     if (!rpcLocalPeer(peer))
         return makeError(-32071, "sendtoaddress requires a local loopback RPC connection");
     if (!params.is_object() || !params.contains("address") || !params["address"].is_string() ||
@@ -10040,10 +10005,6 @@ void startRPCServer(Blockchain &chain, Wallet &wallet, P2PNode &node, int port,
         else if (m=="getcontracts")        response=handleGetContracts(chain,params,id);
         else if (m=="getrawtransaction")  response=handleGetRawTransaction(chain,params,id);
         else if (m=="gettxout")           response=handleGetTxOut(chain,params,id);
-        else if (m=="getcontractoutpoint07b") response=handleGetContractOutpoint07B(chain,params,id);
-        else if (m=="getvotingv1snapshot07b") response=tru_desktop_voting_rpc_07b::snapshot(chain,params,id);
-        else if (m=="preparevotingv1create07b") response=tru_desktop_voting_rpc_07b::create(chain,params,id);
-        else if (m=="preparevotingv1ballot07b") response=tru_desktop_voting_rpc_07b::ballot(chain,params,id);
         else if (m == "getTRUScripts") response = handleGetTRUScripts(chain, params, id);
         else if (m == "getTRUScriptDetails") response = handleGetTRUScriptDetails(chain, params, id);
         else if (m=="sendtokenweb")       response=handleSendTokenWeb(chain,params,id);

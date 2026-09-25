@@ -25,7 +25,6 @@
 #include <QPixmap>
 #include <QPlainTextEdit>
 #include <QPushButton>
-#include <QRegularExpression>
 #include <QStandardPaths>
 #include <QStyle>
 #include <QTabWidget>
@@ -34,7 +33,6 @@
 #include <qrencode.h>
 
 #include <algorithm>
-#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -498,148 +496,12 @@ void DesktopWalletWidget::selectSafeFeeUtxo(
                             static_cast<qulonglong>(
                                 selected->amountAtoms)));
                     result.insert(
-                        "amount",
-                        QString::fromStdString(DesktopWalletCore::formatAmount(selected->amountAtoms)));
-                    result.insert(
                         "scriptPubKey",
                         QString::fromStdString(
                             selected->scriptPubKey));
                     done(result, {});
                 });
         });
-}
-
-QString DesktopWalletWidget::walletScriptForAddress(
-    const QString& address) const {
-    try {
-        if(!wallet_.validateAddress(address.toStdString())) return {};
-        return QString::fromStdString(wallet_.scriptForAddress(address.toStdString()));
-    } catch (...) { return {}; }
-}
-
-bool DesktopWalletWidget::inspectPreparedIntent(
-    const QString& unsignedTxHex,
-    const QJsonObject& selectedUtxo,
-    const QJsonArray& approvedOutputs,
-    std::uint64_t maxFeeAtoms,
-    QString& metadataTailHex,
-    QJsonObject& embeddedMetadata,
-    QString& errorOut) const {
-    metadataTailHex.clear(); embeddedMetadata={}; errorOut.clear();
-    if(!wallet_.isUnlocked()) {errorOut="Unlock the standalone wallet first.";return false;}
-    try {
-        const QString rawAmount=selectedUtxo.value("amount_atoms").toString();
-        if(rawAmount.isEmpty() || rawAmount.contains(QRegularExpression("[^0-9]")))
-            throw std::runtime_error("selected input lacks exact amount_atoms");
-        bool ok=false;
-        const auto inputAtoms=rawAmount.toULongLong(&ok,10);
-        if(!ok || inputAtoms==0)
-            throw std::runtime_error("invalid selected input amount");
-        const QString prevTxid=selectedUtxo.value("txid").toString();
-        const QJsonValue voutValue=selectedUtxo.value("vout");
-        if(!QRegularExpression("^[0-9a-fA-F]{64}$").match(prevTxid).hasMatch() ||
-           !voutValue.isDouble() || voutValue.toDouble()<0 ||
-           voutValue.toDouble()>4294967295.0 ||
-           voutValue.toDouble()!=static_cast<std::uint32_t>(voutValue.toDouble()))
-            throw std::runtime_error("invalid selected outpoint");
-        wallet_.assertPreparedOneInputV1(unsignedTxHex.toStdString(),
-            prevTxid.toLower().toStdString(),static_cast<std::uint32_t>(voutValue.toDouble()));
-        const auto found=wallet_.inspectPreparedOutputs(unsignedTxHex.toStdString());
-        std::vector<tru_desktop_07::Output> expected;
-        for(const auto& v : approvedOutputs) {
-            const QJsonObject o=v.toObject();
-            const QString amountText=o.value("amount_atoms").toString();
-            const QString script=o.value("scriptPubKey").toString().toLower();
-            if(amountText.isEmpty() || amountText.contains(QRegularExpression("[^0-9]")) ||
-               script.isEmpty() || script.size()%2 || script.contains(QRegularExpression("[^0-9a-f]")))
-                throw std::runtime_error("invalid locally approved output");
-            bool valid=false;auto amount=amountText.toULongLong(&valid,10);
-            if(!valid) throw std::runtime_error("approved output amount overflow");
-            expected.push_back({static_cast<std::uint64_t>(amount),script.toStdString()});
-        }
-        tru_desktop_07::verifyIntent(found,expected,
-            static_cast<std::uint64_t>(inputAtoms),maxFeeAtoms);
-        metadataTailHex=QString::fromStdString(
-            wallet_.inspectPreparedMetadataTail(unsignedTxHex.toStdString()));
-        if(metadataTailHex.startsWith("01")) {
-            const auto raw=wallet_.inspectPreparedMetadataJson(unsignedTxHex.toStdString());
-            QJsonParseError err;
-            const auto json=QJsonDocument::fromJson(QByteArray::fromStdString(raw),&err);
-            if(err.error!=QJsonParseError::NoError || !json.isObject())
-                throw std::runtime_error("invalid embedded token metadata JSON");
-            embeddedMetadata=json.object();
-        }
-        return true;
-    } catch(const std::exception& e) {errorOut=QString::fromUtf8(e.what());return false;}
-}
-
-bool DesktopWalletWidget::signVotingV1Ballot(
-    const QString& unsignedTxHex,const QJsonObject& u,const QString& live,
-    const QString& anchorAtoms,const QString& unlockHex,const QString& callHex,
-    QString& signedTxOut,QString& txidOut,QString& errorOut) const {
-    signedTxOut.clear();txidOut.clear();errorOut.clear();
-    if(!wallet_.isUnlocked()){errorOut="Unlock the standalone wallet first";return false;}
-    try {
-        const QString txid=u.value("txid").toString();
-        const auto n=u.value("vout");
-        std::uint64_t atoms=0;
-        bool ok=false;const auto anchor=anchorAtoms.toULongLong(&ok,10);
-        if(!ok || anchor==0 || txid.size()!=64 || !n.isDouble() ||
-           n.toDouble()<0 || n.toDouble()>4294967295.0 ||
-           n.toDouble()!=std::floor(n.toDouble()) || !exactAtoms(u,atoms))
-            throw std::runtime_error("Voting funding/anchor amount is malformed");
-        const QString script=scriptHex(u.value("scriptPubKey"));
-        std::uint32_t keyIndex=wallet_.addressCount();
-        for(std::uint32_t i=0;i<wallet_.addressCount();++i){
-            const auto own=QString::fromStdString(wallet_.scriptForAddress(wallet_.address(i)));
-            if(own==script){keyIndex=i;break;}
-        }
-        if(keyIndex>=wallet_.addressCount())
-            throw std::runtime_error("Voting fee input belongs to another wallet");
-        DesktopWalletUtxo input;
-        input.txid=txid.toStdString();input.vout=static_cast<std::uint32_t>(n.toDouble());
-        input.scriptPubKey=script.toStdString();input.amountAtoms=atoms;input.keyIndex=keyIndex;
-        const auto signedTx=wallet_.signCanonicalVotingV1Ballot(
-            unsignedTxHex.toStdString(),input,live.toStdString(),anchor,
-            unlockHex.toStdString(),callHex.toStdString());
-        signedTxOut=QString::fromStdString(signedTx.rawHex);
-        txidOut=QString::fromStdString(signedTx.txid);return true;
-    }catch(const std::exception& ex){errorOut=QString::fromUtf8(ex.what());return false;}
-}
-
-bool DesktopWalletWidget::signContractRedemption(
-    const QJsonObject& o, const QString& family,
-    const QString& preimage, const QString& destination,
-    QString& rawHexOut, QString& txidOut, QString& errorOut) const {
-    rawHexOut.clear();txidOut.clear();errorOut.clear();
-    if(!wallet_.isUnlocked()) {errorOut="Unlock the standalone wallet first";return false;}
-    try {
-        const QString txid=o.value("txid").toString();
-        const auto n=o.value("vout");
-        const QString script=o.value("scriptPubKey").toString();
-        std::uint64_t atoms=0;
-        if(txid.size()!=64 || !n.isDouble() || n.toDouble()<0 ||
-           n.toDouble()>4294967295.0 ||
-           n.toDouble()!=std::floor(n.toDouble()) || !exactAtoms(o,atoms))
-            throw std::runtime_error("Core returned malformed contract UTXO identity/amount");
-        DesktopWalletSignedTx signedTx;
-        if(family=="HASH LOCK") {
-            signedTx=wallet_.redeemCanonicalHashLock(txid.toStdString(),
-                static_cast<std::uint32_t>(n.toDouble()),atoms,
-                script.toStdString(),preimage.toStdString(),destination.toStdString());
-        } else if(family=="TIME LOCK") {
-            const auto mtp=o.value("chain_parent_mtp");
-            if(!mtp.isDouble() || mtp.toDouble()<0 || mtp.toDouble()>4294967295.0 ||
-               mtp.toDouble()!=std::floor(mtp.toDouble()))
-                throw std::runtime_error("Core returned invalid parent-chain MTP");
-            signedTx=wallet_.redeemCanonicalTimeLock(txid.toStdString(),
-                static_cast<std::uint32_t>(n.toDouble()),atoms,script.toStdString(),
-                static_cast<std::uint32_t>(mtp.toDouble()),destination.toStdString());
-        } else throw std::runtime_error("unsupported canonical redemption family");
-        rawHexOut=QString::fromStdString(signedTx.rawHex);
-        txidOut=QString::fromStdString(signedTx.txid);
-        return true;
-    }catch(const std::exception& ex){errorOut=QString::fromUtf8(ex.what());return false;}
 }
 
 bool DesktopWalletWidget::signPreparedTransaction(

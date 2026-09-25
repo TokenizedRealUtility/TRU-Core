@@ -1,0 +1,22 @@
+{
+  "before": {
+    "src/desktop_wallet_core.cpp": "e553cdca1381e3018c8a955497d9b89649773304c6441848dd5445738688b6ba",
+    "src/desktop_wallet_core.h": "a0b129abce4a800aa16c89e3a9b607dba075674a3d9aba2b90133a259cf28422",
+    "src/desktop_wallet_widget.cpp": "6beddd787f40b1b2d885c159f8725cb0466aaad410457802b1fd58a3bb708e58",
+    "src/desktop_wallet_widget.h": "11027a313285c918c2466422d2cc089ff6d24d6a36e2606f0a5398e15a7b0096",
+    "src/main.cpp": "391160b7e3a86b925d74618a409c2c7c61feec34dec43594244ad5ce2238a117",
+    "src/rpc_server.cpp": "1c3f334a13ccd689e2b3830bd204196f35362a41e64f778f75067bbefc275571",
+    "src/tru_contract_rpc_07b.h": null,
+    "src/tru_desktop_studio_07.h": "14c2dccc4e3679cf8e9148bdf171b43345cbfc89c201d42c30531040902eb649"
+  },
+  "after": {
+    "src/desktop_wallet_core.cpp": "2b7783d9e6a8c64ec1c03954cfceebd01787e524a8cee9b9db48752d44cfcefa",
+    "src/desktop_wallet_core.h": "c19b433e9f69f96c40b7ca1652ba3aeff87849674f4a2834d36a64065d60e9c3",
+    "src/desktop_wallet_widget.cpp": "7e3439090f368079b7e79989702559aa8043fa41fced562cfc9a17e56a73ce9c",
+    "src/desktop_wallet_widget.h": "c46cbf7947d438b6633c8c19b9bcd8b770ed543fac0869397fbfb7e1c71247e0",
+    "src/main.cpp": "4ec0eca3addb4c371b33482db56d067be6b07b24b7bfe11e159f6918953714a9",
+    "src/rpc_server.cpp": "d3d0d21ac77532de750fb014e68d0fe05bd408b2424e6bfbbaa0c4da8538fc11",
+    "src/tru_contract_rpc_07b.h": "1743059038d4a01ca2178b7899f8d322799912ed28c610d05cda38c9c243c18a",
+    "src/tru_desktop_studio_07.h": "50b008ac1b6a19305e6402d2a4380d1848feb0bbd3a7995e1697d9951f4d45a9"
+  }
+}

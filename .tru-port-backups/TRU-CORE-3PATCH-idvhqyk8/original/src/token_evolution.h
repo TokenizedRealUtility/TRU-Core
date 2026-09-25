@@ -29,17 +29,10 @@ public:
         const std::string& tokenType,
         const nlohmann::json& currentMetadata,
         const std::string& providerName,
-        const std::string& trigger,
-        const nlohmann::json& mediaInputs = nullptr
+        const std::string& trigger
     );
 
-    // Reconstruct against a trusted issuance root/current parent before commit.
-    bool validateMediaPreview(const nlohmann::json& record,
-                              const nlohmann::json& issuanceMetadata) const;
-
     bool persistPreview(const nlohmann::json& record);
-    nlohmann::json issuerContext(const std::string& tokenID) const;
-    bool verifyEditorProof(const nlohmann::json& record) const;
 
     // TOKEN-AI-02C: verify the complete persisted epoch chain, the root
     // metadata hash, anchor queue state, prepared transactions and durable
@@ -62,11 +55,6 @@ private:
         const nlohmann::json& proposed
     );
     static uint64_t parseEpoch(const nlohmann::json& meta);
-    bool validateMediaRecord(const nlohmann::json& record,
-                             const nlohmann::json& parent) const;
-    std::string buildMediaPrompt(const std::string& tokenID, const std::string& tokenType,
-        const nlohmann::json& parent, const std::string& trigger,
-        const nlohmann::json& inputs) const;
 
     // TOKEN-AI-03A2: canonical logical-request provenance.
     // The request hash commits to the structured request handed to the

@@ -22743,9 +22743,6 @@ void Blockchain::startExplorerServer(int port, int rpcPort) {
     g_explorerServer.set_write_timeout(30, 0);
     g_explorerServer.set_keep_alive_max_count(5);
     auto submissionSlots = std::make_shared<std::atomic<unsigned>>(0);
-    // AI-MEDIA-01 R2: slow provider calls must not occupy block-submission slots.
-    // One AI request leaves capacity in the four-worker explorer pool.
-    auto aiRequestSlots = std::make_shared<std::atomic<unsigned>>(0);
 
     std::unordered_map<std::string, nlohmann::json> tokenCache;
     std::mutex tokenCacheMutex;
@@ -22954,7 +22951,7 @@ void Blockchain::startExplorerServer(int port, int rpcPort) {
         "testAIProvider", "previewtokenevolution", "committokenevolutionsigned"
     };
 
-    const auto gatewayForward = [rpcPort, consumeGatewayBudget, highCostGatewayMethods, submissionSlots, aiRequestSlots](
+    const auto gatewayForward = [rpcPort, consumeGatewayBudget, highCostGatewayMethods, submissionSlots](
         const httplib::Request& req, httplib::Response& res,
         const std::unordered_set<std::string>& allowedMethods) {
         res.set_header("Cache-Control", "no-store");
@@ -22977,11 +22974,7 @@ void Blockchain::startExplorerServer(int port, int rpcPort) {
             Logger::log("[RPC-05-WEB] rejected public gateway method=" + method);
             res.status = 403; res.set_content("{\"error\":\"method is not available through the public web gateway\"}\n", "application/json"); return;
         }
-        const bool providerRequest = method == "testAIProvider" || method == "previewtokenevolution";
-        tru_hardening::SubmissionSlot slot(
-            providerRequest ? *aiRequestSlots : *submissionSlots,
-            highCostGatewayMethods.count(method) != 0,
-            providerRequest ? 1U : 2U);
+        tru_hardening::SubmissionSlot slot(*submissionSlots, highCostGatewayMethods.count(method) != 0);
         if (!slot) {
             res.status = 503; res.set_header("Retry-After", "1");
             res.set_content("{\"error\":\"submission capacity busy\"}", "application/json"); return;

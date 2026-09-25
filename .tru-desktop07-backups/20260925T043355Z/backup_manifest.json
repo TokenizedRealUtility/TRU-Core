@@ -1,0 +1,8 @@
+{
+  "src/desktop_assets_widget.cpp": "0c58c657fb26ef01f0568d39dfc58d9ee92fdf75372312fb73e28f772bcd9bd9",
+  "src/desktop_wallet_core.cpp": "b2756acc185a3c119f49391558c457f8b955dfc21ce6eda797020586c01ddd95",
+  "src/desktop_wallet_core.h": "10a1086f3a9923bb1ee39ebaffa658fc7f64786223b4bbb22d382f395b966f70",
+  "src/desktop_wallet_widget.cpp": "2808eba2d47eca4b97b28af69bb313b8dbf840c09ac2abdcc0f3307788225d92",
+  "src/desktop_wallet_widget.h": "660eadbd16392ae5d2178f7c025989bf33389f7235d5eaf3b67b6824a193b25a",
+  "src/rpc_server.cpp": "fac75251686ae7cae75ff825c993c986205eda68d5e9aa999678e77a1455ff7a"
+}

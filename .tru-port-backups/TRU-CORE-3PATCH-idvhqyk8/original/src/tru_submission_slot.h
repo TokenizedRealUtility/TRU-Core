@@ -6,11 +6,10 @@ class SubmissionSlot {
     std::atomic<unsigned>* counter_{nullptr};
     bool admitted_{true};
 public:
-    explicit SubmissionSlot(std::atomic<unsigned>& count, bool needed = true,
-                            unsigned limit = 2) {
+    explicit SubmissionSlot(std::atomic<unsigned>& count, bool needed = true) {
         if (!needed) return;
         unsigned current = count.load(std::memory_order_relaxed);
-        while (current < limit) {
+        while (current < 2) {
             if (count.compare_exchange_weak(current, current + 1, std::memory_order_acq_rel)) {
                 counter_ = &count; return;
             }

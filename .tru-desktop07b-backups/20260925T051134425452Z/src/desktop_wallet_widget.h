@@ -51,18 +51,6 @@ public:
         QString& txidOut,
         QString& errorOut);
 
-    bool signVotingV1Ballot(const QString& unsignedTxHex,
-        const QJsonObject& feeUtxo,const QString& liveAnchor,
-        const QString& anchorAtoms,const QString& unlockHex,
-        const QString& callHex,QString& signedTxOut,
-        QString& txidOut,QString& errorOut) const;
-
-    // 07B: derive and sign a canonical lock redemption locally. Never expose keys.
-    bool signContractRedemption(
-        const QJsonObject& confirmedOutpoint, const QString& family,
-        const QString& preimage, const QString& destination,
-        QString& rawHexOut, QString& txidOut, QString& errorOut) const;
-
     bool signAuthorization(
         const QString& ownerAddress,
         const QString& canonicalMessage,
