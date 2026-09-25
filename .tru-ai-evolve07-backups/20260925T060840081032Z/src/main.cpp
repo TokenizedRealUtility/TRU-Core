@@ -18,7 +18,6 @@
 #include "ai_oracle_service.h"
 #include "ai_providers.h"          // TOKEN-AI-03A wallet evolution provider factories
 #include "token_evolution.h"       // TOKEN-AI-03A wallet evolution engine
-#include "tru_evolution_scenarios_07.h"  // TRU-AI-EVOLVE-07 manual templates
 #include "token_editor_authority.h"
 #include "token_media_file.h"
 #include "tru_artwork_fetch.h"
@@ -2611,39 +2610,18 @@ static void menuTokenEvolution(Wallet& wallet, int rows, std::mutex& coutMutex) 
         }
         menu << "\n3. View Token History\n"
              << "4. Preview Extended AI / Artwork (SFT or NCFT)\n"
-             << "5. Explore Evolution Use Cases (manual templates)\n"
              << "0. Back\n\n"
              << "Preview makes an AI call but writes no TOKEN_EVOLUTION state.\n"
              << "Commit persists the exact preview; it never makes a second AI call.\n"
              << "History is token-centric and does not require current wallet ownership.";
 
         displayResult(menu.str(), rows, coutMutex, 96);
-        const std::string action = readLineTrimmed("Select [0/1/2/3/4/5]:", rows, coutMutex);
+        const std::string action = readLineTrimmed("Select [0/1/2/3/4]:", rows, coutMutex);
 
         if (action == "0" || action == "back" || action == "q") return;
 
         if (action == "3") {
             truEvolutionUiShowTokenHistory(wallet, rows, coutMutex);
-            continue;
-        }
-
-        if (action == "5") {
-            std::ostringstream guide;
-            guide << "=== WHAT CAN YOU BUILD WITH TRU AI EVOLVE? ===\n"
-                  << "Today: manually preview issuer-signed SFT/NCFT descriptive epochs.\n"
-                  << "Each epoch links to its parent, and its anchor can be verified on-chain.\n"
-                  << "An anchor proves what was recorded, NOT that the event was true.\n\n";
-            for (const auto& scenario : tru_evolve_scenarios07::scenarios) {
-                guide << "- " << scenario.title << " ["
-                      << (scenario.supportsSft ? "SFT" : "")
-                      << (scenario.supportsSft && scenario.supportsNcft ? "/" : "")
-                      << (scenario.supportsNcft ? "NCFT" : "") << "]\n"
-                      << "  Example: " << scenario.example << "\n";
-            }
-            guide << "\nNot yet automatic: game/sensor/wallet/vote/miner/schedule/VAH triggers.\n"
-                  << "Use option 1 or 4 for a real manual preview; only the original issuer can approve it.";
-            displayResult(guide.str(), rows, coutMutex, 96);
-            (void)readLineTrimmed("Press Enter to return:", rows, coutMutex);
             continue;
         }
 
@@ -2773,51 +2751,9 @@ static void menuTokenEvolution(Wallet& wallet, int rows, std::mutex& coutMutex) 
                 continue;
             }
 
-            // TRU-AI-EVOLVE-07: presets are prompts, never automated/event-verified writes.
-            std::vector<const tru_evolve_scenarios07::Scenario*> eligible;
-            std::ostringstream scenarioReport;
-            scenarioReport << "=== EVOLUTION SCENARIO / MANUAL EVENT ===\n"
-                           << "0. Custom trigger [default]\n";
-            for (const auto& scenario : tru_evolve_scenarios07::scenarios) {
-                if (!tru_evolve_scenarios07::availableFor(scenario, selected.tokenType))
-                    continue;
-                eligible.push_back(&scenario);
-                scenarioReport << eligible.size() << ". " << scenario.title
-                               << "\n   Example: " << scenario.example << "\n";
-            }
-            scenarioReport << "\nScenario events are supplied by you, NOT independently checked.\n"
-                           << "The original issuer must still approve the exact preview.";
-            displayResult(scenarioReport.str(), rows, coutMutex, 96);
-            std::string chosen = readLineTrimmed(
-                "Scenario number [Enter=custom]:", rows, coutMutex);
-            std::string trigger;
-            if (!chosen.empty() && chosen != "0") {
-                try {
-                    const unsigned long n = std::stoul(chosen);
-                    if (n == 0U || n > eligible.size() ||
-                        std::to_string(n) != chosen)
-                        throw std::out_of_range("scenario number");
-                    const std::string note = readLineTrimmed(
-                        "Describe the ACTUAL issuer-reported milestone (1..640 bytes):",
-                        rows, coutMutex);
-                    trigger = tru_evolve_scenarios07::composeTrigger(
-                        *eligible[n - 1U], selected.tokenType, note);
-                } catch (const std::exception& e) {
-                    displayResult(std::string("Scenario refused: ") + e.what(),
-                                  rows, coutMutex, 91);
-                    (void)readLineTrimmed("Press Enter:", rows, coutMutex);
-                    continue;
-                }
-            } else {
-                trigger = readLineTrimmed(
-                    "Custom evolution trigger/reason [Enter=manual]:", rows, coutMutex);
-                if (trigger.empty()) trigger = "manual";
-                if (trigger.size() > 1024U) {
-                    displayResult("Trigger exceeds 1024 bytes", rows, coutMutex, 91);
-                    (void)readLineTrimmed("Press Enter:", rows, coutMutex);
-                    continue;
-                }
-            }
+            std::string trigger = readLineTrimmed(
+                "Evolution trigger/reason [Enter=manual]:", rows, coutMutex);
+            if (trigger.empty()) trigger = "manual";
 
             // Re-prove current confirmed ownership immediately before the AI call.
             if (!truEvolutionUiStillOwnsToken(wallet, selected)) {

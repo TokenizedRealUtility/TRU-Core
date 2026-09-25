@@ -1,5 +1,4 @@
 #include "desktop_ai_widget.h"
-#include "tru_evolution_scenarios_07.h"  // manual scenario presets only
 #include "token_media_file.h"
 
 #include "desktop_rpc.h"
@@ -42,7 +41,6 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QScrollArea>
-#include <QStringList>
 #include <QTabWidget>
 #include <QTimer>
 #include <QUrl>
@@ -1227,57 +1225,20 @@ void DesktopAIWidget::evolveToken(
             "local API credentials are never sent to Core.");
     }
 
-    // TRU-AI-EVOLVE-07 manual scenario selector. No automatic external event
-    // trigger or third-party evidence authentication is implied by these prompts.
-    QStringList presetLabels;
-    presetLabels << "Custom / manual evolution";
-    std::vector<const tru_evolve_scenarios07::Scenario*> eligibleScenarios;
-    for (const auto& scenario : tru_evolve_scenarios07::scenarios) {
-        if (!tru_evolve_scenarios07::availableFor(scenario, type.toStdString()))
-            continue;
-        eligibleScenarios.push_back(&scenario);
-        presetLabels << QString::fromUtf8(scenario.title);
-    }
-    bool scenarioOk = false;
-    const QString selectedPreset = QInputDialog::getItem(
-        this, "Evolve " + name + " - Scenario",
-        "Choose a manual scenario. Real-world milestones are issuer claims, not "
-        "verified external evidence:",
-        presetLabels, 0, false, &scenarioOk);
-    if (!scenarioOk) return;
-    const int selectedIndex = presetLabels.indexOf(selectedPreset);
-    if (selectedIndex < 0) return;
-
     bool ok = false;
-    QString trigger;
-    if (selectedIndex == 0) {
-        trigger = QInputDialog::getText(
-            this, "Evolve " + name,
-            "Custom evolution trigger / instruction:",
-            QLineEdit::Normal, "manual evolution", &ok);
-        if (!ok) return;
-    } else {
-        const auto* scenario = eligibleScenarios.at(
-            static_cast<size_t>(selectedIndex - 1));
-        const QString note = QInputDialog::getMultiLineText(
-            this, "Issuer-reported event - " + selectedPreset,
-            QString::fromUtf8(scenario->example) + "\n\n"
-            "Describe what actually happened (1..640 printable UTF-8 bytes). "
-            "External evidence is NOT automatically authenticated:",
-            QString(), &ok);
-        if (!ok) return;
-        try {
-            trigger = QString::fromStdString(
-                tru_evolve_scenarios07::composeTrigger(
-                    *scenario, type.toStdString(), note.toStdString()));
-        } catch (const std::exception& e) {
-            QMessageBox::warning(this, "Scenario refused", QString::fromUtf8(e.what()));
-            return;
-        }
-    }
-    if (trigger.isEmpty() || trigger.toUtf8().size() > 1024) {
-        QMessageBox::warning(this, "Evolve AI Token",
-                             "Trigger must contain 1 to 1024 UTF-8 bytes.");
+    const QString trigger = QInputDialog::getText(
+        this,
+        "Evolve " + name,
+        "Evolution trigger / instruction:",
+        QLineEdit::Normal,
+        "manual evolution",
+        &ok);
+    if (!ok) return;
+    if (trigger.isEmpty() || trigger.size() > 1024) {
+        QMessageBox::warning(
+            this,
+            "Evolve AI Token",
+            "Trigger must contain 1 to 1024 characters.");
         return;
     }
 
