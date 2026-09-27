@@ -98,3 +98,4 @@ build-desktop-mac01-qt6-test/
 # TRU local patch / backup artifacts
 .tru-patches/
 .tru-patch-backups/
+/scripts/
