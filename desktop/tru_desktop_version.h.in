@@ -1,0 +1,4 @@
+#pragma once
+// Generated from the release VERSION file by desktop/CMakeLists.txt.
+// This records the DESKTOP APPLICATION VERSION, not the connected node version.
+#define TRU_DESKTOP_BUILD_VERSION "@TRU_DESKTOP_REPO_VERSION@"

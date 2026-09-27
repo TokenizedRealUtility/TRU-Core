@@ -78,6 +78,7 @@ Thumbs.db
 .vscode/
 *.swp
 swap/agent/swap_agent/
+scripts
 
 # TRU packaged-patch backup workspace
 /.tru_patch_backups/

@@ -3,6 +3,7 @@
 #include "ai_provider_interface.h"
 #include "ai_providers.h"
 #include "token_evolution.h"
+#include "tru_token_evolve_anchor_07e.h"
 #include "blockchain.h"
 #include "logging.h"
 #include "block.h"  // Changed from transaction.h
@@ -483,20 +484,17 @@ bool validateEvolutionAnchorRecord(
         return false;
     }
 
-    const std::vector<std::string> chunks = {
-        "TRU_EVOLVE_V1",
-        expectedTokenID,
-        tokenType,
-        std::to_string(expectedEpoch),
-        provider,
-        trigger,
-        prevHash,
-        newHash
+    // 07E: preserve byte-exact historical V1 when relay-standard; select a
+    // compact, record-and-trigger-bound V2 only when V1 exceeds policy.
+    // The OFF-CHAIN record schema and issuer signature are NOT rewritten.
+    const tru_anchor_07e::Fields fields{
+        expectedTokenID, tokenType, expectedEpoch, provider, trigger,
+        prevHash, newHash, sha256_hex(record.dump())
     };
-
-    try {
-        expectedOpReturn = buildOpReturn(chunks);
-    } catch (...) {
+    std::string legacyScript;
+    if (!tru_anchor_07e::selectCanonical(
+            fields, expectedOpReturn, legacyScript)) {
+        Logger::log("[TOKEN-AI-07E] Evolution anchor cannot fit relay policy");
         return false;
     }
 
@@ -805,6 +803,236 @@ EvolutionAnchorObservation observeEvolutionAnchorTransaction(
 
     out = std::move(found);
     return EvolutionAnchorObservation::Confirmed;
+}
+
+// 07E: migrate ONLY a provably policy-oversized, never-submitted legacy
+// prepared transaction. Keep the signed epoch, issuer proof and its metadata
+// hashes byte-identical; archive the exact old transaction atomically with
+// the replacement. Failure always retains the queue and old prepared bytes.
+enum class OversizedLegacyRecoveryResult {
+    NotApplicable,
+    Replaced,
+    Retain
+};
+
+OversizedLegacyRecoveryResult recoverOversizedLegacyPrepared07E(
+    Blockchain& chain,
+    ContractStorage& storage,
+    const nlohmann::json& record,
+    const std::string& tokenID,
+    uint64_t epoch,
+    const std::string& expectedOpReturn,
+    const std::string& originalPreparedRaw,
+    Wallet* authenticatedSigningWallet)
+{
+    std::string selected;
+    std::string legacy;
+    const std::string recordHash = sha256_hex(record.dump());
+    const tru_anchor_07e::Fields fields{
+        tokenID, record.value("type", ""), epoch,
+        record.value("provider", ""),
+        record.value("trigger", "manual"),
+        record.value("previous_metadata_hash", ""),
+        record.value("new_metadata_hash", ""), recordHash
+    };
+    if (!tru_anchor_07e::selectCanonical(fields, selected, legacy) ||
+        selected != expectedOpReturn || selected == legacy ||
+        legacy.size() / 2U <=
+            tru_anchor_07e::kMaxRelayOpReturnScriptBytes)
+    {
+        return OversizedLegacyRecoveryResult::NotApplicable;
+    }
+
+    nlohmann::json oldPrepared;
+    Transaction oldTx;
+    std::string oldTxid;
+    try {
+        oldPrepared = nlohmann::json::parse(originalPreparedRaw);
+        if (!oldPrepared.is_object()) {
+            return OversizedLegacyRecoveryResult::NotApplicable;
+        }
+        const std::string oldHex = oldPrepared.value("tx_hex", "");
+        oldTxid = oldPrepared.value("txid", "");
+        if (oldHex.empty() ||
+            oldHex.size() > TOKEN_EVOLUTION_ANCHOR_MAX_PREPARED_TX_HEX ||
+            (oldHex.size() % 2U) != 0U ||
+            !std::all_of(oldHex.begin(), oldHex.end(),
+                [](unsigned char c) {
+                    return (c >= '0' && c <= '9') ||
+                           (c >= 'a' && c <= 'f');
+                }))
+        {
+            return OversizedLegacyRecoveryResult::NotApplicable;
+        }
+        oldTx = Transaction::deserializeBinary(hexDecode(oldHex));
+        oldTx.computeTxId();
+
+        // V2 already prepared: normal unchanged retry/receipt handling.
+        if (oldTx.vout.size() == 2U &&
+            oldTx.vout[0].scriptPubKey == expectedOpReturn)
+        {
+            return OversizedLegacyRecoveryResult::NotApplicable;
+        }
+    } catch (...) {
+        // Ordinary strict prepared validation below will report corrupt data;
+        // never auto-migrate an unparseable prepared transaction.
+        return OversizedLegacyRecoveryResult::NotApplicable;
+    }
+
+    if (oldTx.vout.size() != 2U ||
+        oldTx.vout[0].scriptPubKey != legacy)
+    {
+        return OversizedLegacyRecoveryResult::NotApplicable;
+    }
+
+    // An actual old oversized V1 script was prepared. Refuse migration if
+    // ANY identity, authorization record, or receipt check fails.
+    TokenEvolutionEngine issuerVerifier(&storage);
+    if (!issuerVerifier.verifyEditorProof(record)) {
+        Logger::log("[TOKEN-AI-07E] Legacy prepared rescue refused: issuer proof invalid");
+        return OversizedLegacyRecoveryResult::Retain;
+    }
+    if (oldPrepared.value("format", "") !=
+            "TRU_TOKEN_EVOLVE_ANCHOR_PREPARED_V1" ||
+        oldPrepared.value("status", "") != "prepared" ||
+        oldPrepared.value("tokenID", "") != tokenID ||
+        oldPrepared.value("epoch", 0ULL) != epoch ||
+        oldPrepared.value("record_hash", "") != recordHash ||
+        oldPrepared.value("new_metadata_hash", "") !=
+            fields.newMetadataHash ||
+        !isLowerHexExact(oldTxid, 64U) ||
+        oldTx.txid != oldTxid ||
+        !preparedAnchorTransactionMatches(oldTx, oldTxid, legacy))
+    {
+        Logger::log("[TOKEN-AI-07E] Refusing legacy prepared migration: identity mismatch token=" +
+                    tokenID + " epoch=" + std::to_string(epoch));
+        return OversizedLegacyRecoveryResult::Retain;
+    }
+
+    const std::string suffix = tokenID + ":" + std::to_string(epoch);
+    const std::string anchorTxKey = "anchor_tx:" + suffix;
+    const std::string receiptKey = "anchor_receipt:" + suffix;
+    const std::string archiveKey = "anchor_legacy_07e:" + suffix;
+    std::string evidence;
+    const bool noSubmitted =
+        !storage.getContractData("TOKEN_EVOLUTION", anchorTxKey, evidence) &&
+        !storage.getContractData("TOKEN_EVOLUTION", receiptKey, evidence);
+    const bool archiveEmpty =
+        !storage.getContractData("TOKEN_EVOLUTION", archiveKey, evidence);
+    Transaction observed;
+    const bool oldUnobservable =
+        observeEvolutionAnchorTransaction(chain, oldTxid, observed) ==
+            EvolutionAnchorObservation::Missing;
+
+    bool fundingLive = false;
+    bool fundingAvailable = false;
+    if (oldTx.vin.size() == 1U) {
+        const auto& funding = oldTx.vin[0];
+        if (funding.vout >= 0 &&
+            static_cast<uint64_t>(funding.vout) <=
+                std::numeric_limits<uint32_t>::max()) {
+            const uint32_t vout = static_cast<uint32_t>(funding.vout);
+            UTXO live;
+            fundingLive = chain.utxoSet.exists(funding.txid, vout) &&
+                          chain.utxoSet.getUTXO(funding.txid, vout, live);
+            fundingAvailable = chain.mempool &&
+                !chain.mempool->isUTXOSpentInMempool(funding.txid, vout);
+        }
+    }
+    const tru_anchor_07e::RecoveryGate gate{
+        true,
+        true,
+        true,
+        oldUnobservable,
+        noSubmitted,
+        archiveEmpty,
+        fundingLive,
+        fundingAvailable
+    };
+    if (!tru_anchor_07e::canRecover(gate)) {
+        Logger::log("[TOKEN-AI-07E] Oversized V1 prepared held for safety token=" +
+                    tokenID + " epoch=" + std::to_string(epoch) +
+                    " oldObservable=" + (oldUnobservable ? "no" : "yes") +
+                    " submitted=" + (noSubmitted ? "no" : "yes") +
+                    " fundingLive=" + (fundingLive ? "yes" : "no") +
+                    " fundingAvailable=" + (fundingAvailable ? "yes" : "no"));
+        return OversizedLegacyRecoveryResult::Retain;
+    }
+
+    Transaction replacement;
+    std::string replacementTxid;
+    if (!prepareTokenEvolutionAnchorTransaction(
+            chain, record, replacement, replacementTxid,
+            authenticatedSigningWallet) ||
+        !preparedAnchorTransactionMatches(
+            replacement, replacementTxid, expectedOpReturn) ||
+        replacementTxid == oldTxid)
+    {
+        Logger::log("[TOKEN-AI-07E] Compact replacement preparation failed; old prepared retained token=" + tokenID);
+        return OversizedLegacyRecoveryResult::Retain;
+    }
+
+    const std::string replacementHex =
+        bytesToHex(replacement.serializeBinary());
+    if (replacementHex.empty() ||
+        replacementHex.size() > TOKEN_EVOLUTION_ANCHOR_MAX_PREPARED_TX_HEX)
+    {
+        Logger::log("[TOKEN-AI-07E] Compact replacement exceeds local persistence bound");
+        return OversizedLegacyRecoveryResult::Retain;
+    }
+    const nlohmann::json replacementPrepared = {
+        {"format", "TRU_TOKEN_EVOLVE_ANCHOR_PREPARED_V1"},
+        {"status", "prepared"},
+        {"tokenID", tokenID},
+        {"epoch", epoch},
+        {"txid", replacementTxid},
+        {"tx_hex", replacementHex},
+        {"new_metadata_hash", fields.newMetadataHash},
+        {"record_hash", recordHash}
+    };
+    const nlohmann::json archive = {
+        {"format", "TRU_TOKEN_EVOLVE_LEGACY_OVERSIZE_ARCHIVE_07E"},
+        {"tokenID", tokenID},
+        {"epoch", epoch},
+        {"record_hash", recordHash},
+        {"old_txid", oldTxid},
+        {"replacement_txid", replacementTxid},
+        {"legacy_prepared", oldPrepared}
+    };
+    const std::string replacementRaw = replacementPrepared.dump();
+    const std::string archiveRaw = archive.dump();
+    const std::string preparedKey = "anchor_prepared:" + suffix;
+
+    // Both writes in ONE durable batch: crash cannot erase the previous tx
+    // without simultaneously leaving an archived byte-exact copy.
+    const std::vector<ContractStorage::BatchWrite> writes = {
+        {"TOKEN_EVOLUTION", archiveKey, archiveRaw},
+        {"TOKEN_EVOLUTION", preparedKey, replacementRaw}
+    };
+    if (!storage.storeContractDataBatch(writes)) {
+        Logger::log("[TOKEN-AI-07E] Atomic replacement/archive failed; old prepared retained");
+        return OversizedLegacyRecoveryResult::Retain;
+    }
+    std::string actualPrepared;
+    std::string actualArchive;
+    if (!storage.getContractData("TOKEN_EVOLUTION", preparedKey,
+                                 actualPrepared) ||
+        !storage.getContractData("TOKEN_EVOLUTION", archiveKey,
+                                 actualArchive) ||
+        actualPrepared != replacementRaw || actualArchive != archiveRaw)
+    {
+        Logger::log("[TOKEN-AI-07E] Atomic replacement readback FAILED: halt/inspect durable state");
+        return OversizedLegacyRecoveryResult::Retain;
+    }
+    Logger::log("[TOKEN-AI-07E] LEGACY-OVERSIZE-RECOVERED token=" + tokenID +
+                " epoch=" + std::to_string(epoch) +
+                " oldTxid=" + oldTxid +
+                " replacementTxid=" + replacementTxid +
+                " legacyBytes=" + std::to_string(legacy.size()/2U) +
+                " compactBytes=" + std::to_string(expectedOpReturn.size()/2U));
+    // No broadcast in migration pass: the unchanged queue processes this
+    // EXACT persisted compact transaction on its next normal retry pass.
+    return OversizedLegacyRecoveryResult::Replaced;
 }
 
 bool loadEvolutionAnchorWatch(
@@ -1458,8 +1686,27 @@ bool verifyTokenEvolutionAnchorTransaction(
         return false;
     }
 
+    // An already-confirmed legacy V1 script must remain verifiable even when
+    // newer producers would choose V2 for its oversized trigger. Neither
+    // variant is accepted unless it exactly binds this persisted epoch.
+    std::string legacyOpReturn;
+    try {
+        const tru_anchor_07e::Fields fields{
+            tokenID, evolutionRecord.value("type", ""), epoch,
+            evolutionRecord.value("provider", ""),
+            evolutionRecord.value("trigger", "manual"),
+            evolutionRecord.value("previous_metadata_hash", ""),
+            evolutionRecord.value("new_metadata_hash", ""),
+            sha256_hex(evolutionRecord.dump())
+        };
+        legacyOpReturn = tru_anchor_07e::legacyV1(fields);
+    } catch (...) {
+        reason = "cannot recompute historical V1 encoding";
+        return false;
+    }
     if (canonical.vout[0].amount != 0U ||
-        canonical.vout[0].scriptPubKey != expectedOpReturn)
+        (canonical.vout[0].scriptPubKey != expectedOpReturn &&
+         canonical.vout[0].scriptPubKey != legacyOpReturn))
     {
         reason = "anchor OP_RETURN does not match persisted epoch provenance";
         return false;
@@ -2097,6 +2344,19 @@ void ConfigurableAIOracle::processTokenEvolutionAnchorQueue()
             {
                 loadedDurablePrepared = true;
 
+                const OversizedLegacyRecoveryResult rescue =
+                    recoverOversizedLegacyPrepared07E(
+                        *blockchain, *storage, record, tokenID, epoch,
+                        expectedOpReturn, preparedRaw,
+                        authenticatedSigningWallet);
+                if (rescue != OversizedLegacyRecoveryResult::NotApplicable) {
+                    // Replaced: submit from the persisted replacement next pass.
+                    // Retain: no state mutation; investigate the safety gate.
+                    ++cursor;
+                    ++processedThisPass;
+                    continue;
+                }
+
                 try {
                     const nlohmann::json prepared =
                         nlohmann::json::parse(preparedRaw);
@@ -2104,8 +2364,11 @@ void ConfigurableAIOracle::processTokenEvolutionAnchorQueue()
                     if (!prepared.is_object() ||
                         prepared.value("format", "") !=
                             "TRU_TOKEN_EVOLVE_ANCHOR_PREPARED_V1" ||
+                        prepared.value("status", "") != "prepared" ||
                         prepared.value("tokenID", "") != tokenID ||
                         prepared.value("epoch", 0ULL) != epoch ||
+                        prepared.value("record_hash", "") !=
+                            sha256_hex(record.dump()) ||
                         prepared.value("new_metadata_hash", "") !=
                             expectedNewHash)
                     {

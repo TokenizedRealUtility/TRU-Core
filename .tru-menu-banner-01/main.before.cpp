@@ -4948,19 +4948,6 @@ static void truDrawMenuLine(std::stringstream& ss,
     ss << colorText(text, 96, false);
 }
 
-// TRU-CLI-MENU-BANNER-01: fixed-width build/navigation line.
-// Keep menu row counts unchanged; u8 rails are single terminal columns.
-static std::string truMenuBuildNavLine(std::size_t columns,
-                                        const std::string& navigation) {
-    const std::size_t inner = columns - 2;  // omit both box rails
-    std::string body = "  TRU CORE | build " +
-                       tru_version::compiledCoreVersion() +
-                       " | " + navigation;
-    if (body.size() > inner) body.resize(inner);
-    return std::string(u8"║") + body +
-           std::string(inner - body.size(), ' ') + u8"║";
-}
-
 void displayMenu(int rows, std::mutex &coutMutex)
 {
     std::lock_guard<std::mutex> lock(coutMutex);
@@ -4987,7 +4974,7 @@ void displayMenu(int rows, std::mutex &coutMutex)
     // sequential public CLI navigation.
     const std::vector<std::string> fullLines = {
         "╔═════════════════════════════ T R U   C O R E ══════════════════════════════╗",
-        truMenuBuildNavLine(78, "MENU: code + ENTER / M switches deck"),
+        "║  MENU NAVIGATION // command code + ENTER // M switches deck view           ║",
         "╠════════════════════════════════════════════════════════════════════════════╣",
         "╠════════════════════════ WALLET // IDENTITY & VALUE ════════════════════════╣",
         "║                                                                            ║",
@@ -5024,7 +5011,7 @@ void displayMenu(int rows, std::mutex &coutMutex)
 
     const std::vector<std::string> compactLines = {
         "╔═══════════════ T R U   C O R E // Q U I C K   N A V ═══════════════╗",
-        truMenuBuildNavLine(70, "NAV: code + ENTER / M full"),
+        "║  MENU NAVIGATION // command code + ENTER // M returns full deck    ║",
         "╠════════════════════════════════════════════════════════════════════╣",
         "╠══════════════════════════════ WALLET ══════════════════════════════╣",
         "║                                                                    ║",

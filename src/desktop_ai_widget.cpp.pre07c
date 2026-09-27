@@ -1,6 +1,5 @@
 #include "desktop_ai_widget.h"
 #include "tru_evolution_scenarios_07.h"  // manual scenario presets only
-#include "tru_evolution_guided_07c.h"  // manual four-question wizard
 #include "token_media_file.h"
 
 #include "desktop_rpc.h"
@@ -25,7 +24,6 @@
 #include <QStandardPaths>
 #include <QStyle>
 #include <QDialog>
-#include <QDialogButtonBox>
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
@@ -1229,11 +1227,10 @@ void DesktopAIWidget::evolveToken(
             "local API credentials are never sent to Core.");
     }
 
-    // TRU-AI-EVOLVE-07C: one four-question guided form, plus free-form custom.
-    // All answers are issuer claims; the canonical Core still constrains fields
-    // and separately requires original-issuer approval for an exact commit.
+    // TRU-AI-EVOLVE-07 manual scenario selector. No automatic external event
+    // trigger or third-party evidence authentication is implied by these prompts.
     QStringList presetLabels;
-    presetLabels << "Custom / free-form prompt" << "Custom / guided wizard";
+    presetLabels << "Custom / manual evolution";
     std::vector<const tru_evolve_scenarios07::Scenario*> eligibleScenarios;
     for (const auto& scenario : tru_evolve_scenarios07::scenarios) {
         if (!tru_evolve_scenarios07::availableFor(scenario, type.toStdString()))
@@ -1243,9 +1240,9 @@ void DesktopAIWidget::evolveToken(
     }
     bool scenarioOk = false;
     const QString selectedPreset = QInputDialog::getItem(
-        this, "Evolve " + name + " - Guided Templates",
-        "Choose a guided template or design your own. All external milestones "
-        "and references are issuer-reported claims:",
+        this, "Evolve " + name + " - Scenario",
+        "Choose a manual scenario. Real-world milestones are issuer claims, not "
+        "verified external evidence:",
         presetLabels, 0, false, &scenarioOk);
     if (!scenarioOk) return;
     const int selectedIndex = presetLabels.indexOf(selectedPreset);
@@ -1254,71 +1251,27 @@ void DesktopAIWidget::evolveToken(
     bool ok = false;
     QString trigger;
     if (selectedIndex == 0) {
-        trigger = QInputDialog::getMultiLineText(
+        trigger = QInputDialog::getText(
             this, "Evolve " + name,
-            "Custom evolution trigger / instruction (no automatic validation):",
-            "manual evolution", &ok);
+            "Custom evolution trigger / instruction:",
+            QLineEdit::Normal, "manual evolution", &ok);
         if (!ok) return;
     } else {
-        const auto* scenario = selectedIndex >= 2
-            ? eligibleScenarios.at(static_cast<size_t>(selectedIndex - 2))
-            : nullptr;
-        const auto& guide = scenario
-            ? tru_evolve_guided07c::forScenario(*scenario)
-            : tru_evolve_guided07c::customGuide;
-        QString customName;
-        if (!scenario) {
-            customName = QInputDialog::getText(
-                this, "My custom guided template", "Give your template a name:",
-                QLineEdit::Normal, QString(), &ok);
-            if (!ok) return;
-        }
-        QDialog wizard(this);
-        wizard.setWindowTitle("TRU AI Evolve — " + selectedPreset);
-        wizard.setMinimumWidth(640);
-        auto* layout = new QVBoxLayout(&wizard);
-        auto* intro = new QLabel(
-            "Four questions. Only the milestone is required. No sensor or "
-            "external verification is performed. Your text can be sent "
-            "to the selected AI provider; do not enter sensitive records.", &wizard);
-        intro->setWordWrap(true);
-        layout->addWidget(intro);
-        auto* form = new QFormLayout();
-        QLineEdit milestone(&wizard), change(&wizard), evidence(&wizard), art(&wizard);
-        milestone.setMaxLength(160);
-        change.setMaxLength(100);
-        evidence.setMaxLength(80);
-        art.setMaxLength(100);
-        milestone.setPlaceholderText(scenario
-            ? QString::fromUtf8(scenario->example)
-            : "Describe your actual milestone");
-        evidence.setPlaceholderText("Public link or ID only; not verified");
-        form->addRow(QString::fromUtf8(guide.milestone), &milestone);
-        form->addRow(QString::fromUtf8(guide.change), &change);
-        form->addRow(QString::fromUtf8(guide.evidence), &evidence);
-        form->addRow(QString::fromUtf8(guide.appearance), &art);
-        layout->addLayout(form);
-        auto* buttons = new QDialogButtonBox(
-            QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &wizard);
-        buttons->button(QDialogButtonBox::Ok)->setText("Preview only");
-        QObject::connect(buttons, &QDialogButtonBox::accepted,
-                         &wizard, &QDialog::accept);
-        QObject::connect(buttons, &QDialogButtonBox::rejected,
-                         &wizard, &QDialog::reject);
-        layout->addWidget(buttons);
-        if (wizard.exec() != QDialog::Accepted) return;
-        const tru_evolve_guided07c::Answers answers{
-            milestone.text().toStdString(), change.text().toStdString(),
-            evidence.text().toStdString(), art.text().toStdString()};
+        const auto* scenario = eligibleScenarios.at(
+            static_cast<size_t>(selectedIndex - 1));
+        const QString note = QInputDialog::getMultiLineText(
+            this, "Issuer-reported event - " + selectedPreset,
+            QString::fromUtf8(scenario->example) + "\n\n"
+            "Describe what actually happened (1..640 printable UTF-8 bytes). "
+            "External evidence is NOT automatically authenticated:",
+            QString(), &ok);
+        if (!ok) return;
         try {
-            trigger = QString::fromStdString(scenario
-                ? tru_evolve_guided07c::composeScenario(
-                    *scenario, type.toStdString(), answers)
-                : tru_evolve_guided07c::composeCustom(
-                    customName.toStdString(), type.toStdString(), answers));
+            trigger = QString::fromStdString(
+                tru_evolve_scenarios07::composeTrigger(
+                    *scenario, type.toStdString(), note.toStdString()));
         } catch (const std::exception& e) {
-            QMessageBox::warning(this, "Guided template refused",
-                                 QString::fromUtf8(e.what()));
+            QMessageBox::warning(this, "Scenario refused", QString::fromUtf8(e.what()));
             return;
         }
     }

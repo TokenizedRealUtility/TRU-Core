@@ -40,11 +40,6 @@
 #include <algorithm>
 
 class TruDesktopStudio07 final:public QWidget {
-public:
-    // Present the already implemented issuance and contract flows on distinct
-    // top-level tabs. The underlying RPC/signing code remains unchanged.
-    enum class Surface { Full, Tokens, Contracts };
-private:
     DesktopRpc* rpc_;
     DesktopWalletWidget* wallet_;
     QComboBox *type_=nullptr,*kind_=nullptr;
@@ -742,22 +737,15 @@ private:
           });
     }
 public:
-    explicit TruDesktopStudio07(DesktopRpc* rpc,DesktopWalletWidget* wallet,
-                                QWidget* parent=nullptr, Surface surface=Surface::Full)
+    explicit TruDesktopStudio07(DesktopRpc* rpc,DesktopWalletWidget* wallet,QWidget* parent=nullptr)
       :QWidget(parent),rpc_(rpc),wallet_(wallet) {
         auto* root=new QVBoxLayout(this);
-        auto* headline=new QLabel(
-            surface==Surface::Tokens ? "TRU / CREATE TOKENS + TRUSCRIPTS" :
-            surface==Surface::Contracts ? "TRU / SMART CONTRACT STUDIO" :
-            "TRU / CREATOR STUDIO");
+        auto* headline=new QLabel("TRU / CREATOR STUDIO  ·  v0.07B TEST");
         headline->setObjectName("truAssetTitle");root->addWidget(headline);
         notice_=new QLabel("All writes require LOCAL CORE and an unlocked STANDALONE WALLET. "
             "Keys stay inside the desktop wallet. Review each transaction before broadcast.");
         notice_->setWordWrap(true);root->addWidget(notice_);
-        auto* tabs=new QTabWidget;
-        tabs->setUsesScrollButtons(true);
-        tabs->setElideMode(Qt::ElideRight);
-        root->addWidget(tabs,1);
+        auto* tabs=new QTabWidget;root->addWidget(tabs,1);
         // Mint FT / NFT / SFT / NCFT
         auto* tokens=new QWidget;auto* tf=new QFormLayout(tokens);
         type_=new QComboBox;type_->addItems({"FT","NFT","SFT","NCFT"});tf->addRow("TOKEN CLASS",type_);
@@ -773,17 +761,6 @@ public:
         desc_=new QLineEdit;desc_->setMaxLength(200);tf->addRow("Description",desc_);
         image_=new QLineEdit;image_->setPlaceholderText("https://... (optional)");tf->addRow("HTTPS artwork URL",image_);
         mint_=new QPushButton("REVIEW & MINT TOKEN");tf->addRow(mint_);
-        auto* typeHint=new QLabel;
-        typeHint->setWordWrap(true);
-        typeHint->setObjectName("truTokenClassHint");
-        tf->addRow(typeHint);
-        QObject::connect(type_,&QComboBox::currentTextChanged,this,[typeHint](const QString& t){
-            if(t=="FT") typeHint->setText("FT · Fungible token. Eight decimal places in the existing issuance workflow.");
-            else if(t=="NFT") typeHint->setText("NFT · Unique token, issuance supply must equal one; zero decimal places.");
-            else if(t=="SFT") typeHint->setText("SFT · Semi-fungible token. Eight decimal places in the existing issuance workflow.");
-            else typeHint->setText("NCFT · NCFT token class, zero decimal places. Review your Core's NCFT semantics before issuance.");
-        });
-        typeHint->setText("FT · Fungible token. Eight decimal places in the existing issuance workflow.");
         auto* tnote=new QLabel("NCFT/SFT issuance does not automatically delegate editing. "
             "Use the issuer authorization workflow for future artwork changes.");tnote->setWordWrap(true);tf->addRow(tnote);
         tabs->addTab(tokens,"Mint FT / NFT / SFT / NCFT");
@@ -915,16 +892,5 @@ public:
         vDisclaimer->setWordWrap(true);
         vv->addWidget(vCast);vv->addWidget(vDisclaimer);
         tabs->addTab(vp,"Voting V1");
-
-        // Keep removed pages parented to QTabWidget: busy() still holds their
-        // pointers, and no hidden action can be triggered from the UI.
-        if(surface==Surface::Tokens) {
-            for(int index=tabs->count()-1;index>=2;--index)
-                tabs->removeTab(index);
-        } else if(surface==Surface::Contracts) {
-            tabs->removeTab(1); // TRUScript minting belongs on Create Tokens.
-            tabs->removeTab(0); // Token minting belongs on Create Tokens.
-        }
-        tabs->setCurrentIndex(0);
     }
 };

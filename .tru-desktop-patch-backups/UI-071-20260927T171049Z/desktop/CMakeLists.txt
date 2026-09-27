@@ -15,16 +15,6 @@ else()
     message(FATAL_ERROR "TRU_DESKTOP_QT_MAJOR must be 5 or 6")
 endif()
 set(_tru_qt "Qt${TRU_DESKTOP_QT_MAJOR}")
-# TRU-UI-071: one compiled Desktop version source for Linux/Windows/macOS.
-# Reconfigure after VERSION changes; the value is embedded in the binary.
-file(STRINGS "${CMAKE_CURRENT_LIST_DIR}/../VERSION" TRU_DESKTOP_REPO_VERSION LIMIT_COUNT 1)
-string(STRIP "${TRU_DESKTOP_REPO_VERSION}" TRU_DESKTOP_REPO_VERSION)
-if(NOT TRU_DESKTOP_REPO_VERSION MATCHES "^[0-9]+\.[0-9]+\.[0-9]+$")
-    message(FATAL_ERROR "Invalid three-part TRU Desktop VERSION: ${TRU_DESKTOP_REPO_VERSION}")
-endif()
-file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
-configure_file("${CMAKE_CURRENT_LIST_DIR}/tru_desktop_version.h.in"
-               "${CMAKE_CURRENT_BINARY_DIR}/generated/tru_desktop_version.h" @ONLY)
 
 # DESKTOP-WALLET-01 crypto/storage dependencies.
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
@@ -56,7 +46,6 @@ add_executable(tru_desktop WIN32
     "${TRU_DESKTOP_SRC}/wallet_encryption_v1.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/assets/tru_desktop.qrc")
 target_include_directories(tru_desktop PRIVATE
-    "${CMAKE_CURRENT_BINARY_DIR}/generated"
     "${TRU_DESKTOP_SRC}"
     "${TRU_SODIUM_INCLUDE_DIR}"
     "${TRU_WALLY_INCLUDE_DIR}"
@@ -77,11 +66,20 @@ if(MINGW)
 endif()
 if(APPLE)
     set(TRU_DESKTOP_BUNDLE_ID "com.tokenizedrealutility.desktop" CACHE STRING "macOS desktop bundle identifier")
-    # Packaging metadata follows the same repo version used in the header.
+    # Packaging metadata follows the repository VERSION file.
     # This affects only the macOS application bundle; it does not alter
     # blockchain consensus, validation, P2P, wallet, or RPC behavior.
+    set(_tru_version_file "${CMAKE_CURRENT_LIST_DIR}/../VERSION")
+    if(NOT EXISTS "${_tru_version_file}")
+        message(FATAL_ERROR "TRU VERSION file not found: ${_tru_version_file}")
+    endif()
+    file(STRINGS "${_tru_version_file}" TRU_DESKTOP_REPO_VERSION LIMIT_COUNT 1)
+    string(STRIP "${TRU_DESKTOP_REPO_VERSION}" TRU_DESKTOP_REPO_VERSION)
+    if(NOT TRU_DESKTOP_REPO_VERSION MATCHES "^[0-9]+\.[0-9]+\.[0-9]+$")
+        message(FATAL_ERROR "Invalid TRU VERSION for macOS bundle: ${TRU_DESKTOP_REPO_VERSION}")
+    endif()
     set(TRU_DESKTOP_APP_VERSION "${TRU_DESKTOP_REPO_VERSION}"
-        CACHE STRING "macOS desktop package version" FORCE)
+        CACHE STRING "macOS desktop package version")
     set_target_properties(tru_desktop PROPERTIES
         MACOSX_BUNDLE TRUE
         OUTPUT_NAME "TRU Core Desktop"

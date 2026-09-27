@@ -35,7 +35,7 @@ bool writeTokenEvolutionOnChain(
 
 // TOKEN-AI-02D: read-only runtime proof helper. It recomputes the
 // transaction ID and validates that the committed OP_RETURN is exactly the
-// canonical TRU_EVOLVE_V1 payload for the supplied persisted epoch record.
+// exact historical TRU_EVOLVE_V1 or compact TRU_EVOLVE_V2 payload.
 bool verifyTokenEvolutionAnchorTransaction(
     const Transaction& tx,
     const nlohmann::json& evolutionRecord,

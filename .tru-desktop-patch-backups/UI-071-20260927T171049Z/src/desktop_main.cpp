@@ -1,9 +1,4 @@
 #include "desktop_panel.h"
-#if __has_include("tru_desktop_version.h")
-#include "tru_desktop_version.h"
-#else
-#define TRU_DESKTOP_BUILD_VERSION "source"
-#endif
 #include <QApplication>
 #include <QFont>
 #include <QTimer>
@@ -27,12 +22,7 @@ int main(int argc, char** argv) {
         "QTabBar::tab:selected {background:#205269;color:#72f0db;}"
         "QTabWidget::pane {border:1px solid #294056;}");
     DesktopPanel desktop;
-    // Explicit native window controls; no fixed-size constraint.
-    desktop.setWindowFlags(Qt::Window | Qt::WindowTitleHint |
-                           Qt::WindowSystemMenuHint | Qt::WindowMinMaxButtonsHint |
-                           Qt::WindowCloseButtonHint);
-    desktop.setWindowTitle(QString("TRU Core Desktop v%1").arg(TRU_DESKTOP_BUILD_VERSION));
-    desktop.setMinimumSize(720, 520);
+    desktop.setWindowTitle("TRU Desktop — RPC Client");
     desktop.resize(1120, 780);
     desktop.show();
     // A deterministic screenshot hook is useful for package QA; no connection,

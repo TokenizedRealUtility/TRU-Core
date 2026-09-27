@@ -1,10 +1,4 @@
 #include "desktop_panel.h"
-#include "tru_desktop_studio_07.h"
-#if __has_include("tru_desktop_version.h")
-#include "tru_desktop_version.h"
-#else
-#define TRU_DESKTOP_BUILD_VERSION "source"
-#endif
 #include "desktop_assets_widget.h"
 #include "desktop_ai_widget.h"
 #include "desktop_wallet_widget.h"
@@ -29,10 +23,6 @@
 #include <QIcon>
 #include <QPushButton>
 #include <QRadioButton>
-#include <QFrame>
-#include <QScrollArea>
-#include <QSizePolicy>
-#include <QTabBar>
 #include <QSettings>
 #include <QSplitter>
 #include <QTabWidget>
@@ -88,19 +78,6 @@ QString readable(const QJsonValue& v) {
     if (v.isDouble()) return QString::number(v.toDouble(), 'g', 15);
     if (v.isBool()) return v.toBool() ? "true" : "false";
     return "—";
-}
-// Isolates each page's internal minimum size from the top-level window.
-// Page contents scroll when the user makes the desktop compact.
-QScrollArea* desktopScrollablePage(QWidget* content) {
-    auto* view=new QScrollArea;
-    view->setWidgetResizable(true);
-    view->setFrameShape(QFrame::NoFrame);
-    view->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-    view->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-    view->setMinimumSize(0,0);
-    view->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Expanding);
-    view->setWidget(content);
-    return view;
 }
 QLabel* makeMetric(QHBoxLayout* row, const QString& title) {
     auto box = new QGroupBox(title);
@@ -225,11 +202,6 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
         QLabel#truLogo {
             background: transparent;
             padding: 0px;
-        }
-        QLabel#truVersionBadge {
-            background:#102c40; color:#74f7dd; font-size:12px;
-            font-weight:700; padding:4px 9px;
-            border:1px solid #286d80; border-radius:7px;
         }
         QLabel#truBrand {
             color: #73ecff;
@@ -698,7 +670,7 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
     setObjectName("truAppRoot");
     QTimer::singleShot(0, this, [this] {
         if (window()) {
-            window()->setWindowTitle(QString("TRU Core Desktop v%1").arg(TRU_DESKTOP_BUILD_VERSION));
+            window()->setWindowTitle("TRU Desktop");
             window()->setWindowIcon(QIcon(":/tru/assets/tru_logo.png"));
         }
     });
@@ -728,10 +700,6 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
     auto brand = new QLabel("TRU  /  CORE DESKTOP");
     brand->setObjectName("truBrand");
     brandRow->addWidget(brand, 0, Qt::AlignVCenter);
-    auto* versionBadge = new QLabel(QString("v%1").arg(TRU_DESKTOP_BUILD_VERSION));
-    versionBadge->setObjectName("truVersionBadge");
-    versionBadge->setToolTip("Version of this Desktop application, not the connected Core node.");
-    brandRow->addWidget(versionBadge, 0, Qt::AlignVCenter);
     brandRow->addStretch();
 
     auto mainnetBadge = new QLabel("TRU MAINNET");
@@ -750,17 +718,12 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
         "Switch TRU Desktop between dark and light appearance. "
         "The preference is saved on this computer.");
 
-    // The large title and right-side badges previously shared one inflexible
-    // minimum width, preventing users on smaller desktops from resizing.
+    brandRow->addWidget(mainnetBadge, 0, Qt::AlignVCenter);
+    brandRow->addWidget(modeBadge_, 0, Qt::AlignVCenter);
+    brandRow->addWidget(securityBadge_, 0, Qt::AlignVCenter);
+    brandRow->addWidget(themeToggle, 0, Qt::AlignVCenter);
+
     root->addLayout(brandRow);
-    auto* statusRow = new QHBoxLayout;
-    statusRow->setSpacing(8);
-    statusRow->addStretch();
-    statusRow->addWidget(mainnetBadge, 0, Qt::AlignVCenter);
-    statusRow->addWidget(modeBadge_, 0, Qt::AlignVCenter);
-    statusRow->addWidget(securityBadge_, 0, Qt::AlignVCenter);
-    statusRow->addWidget(themeToggle, 0, Qt::AlignVCenter);
-    root->addLayout(statusRow);
 
     connection_ = new QLabel(
         "Configure a local or secure remote TRU node connection."
@@ -772,11 +735,7 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
     root->addWidget(connection_);
 
     pages_ = new QTabWidget;
-    pages_->setUsesScrollButtons(true);
-    pages_->setElideMode(Qt::ElideRight);
-    pages_->tabBar()->setExpanding(false);
-    pages_->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Expanding);
-    root->addWidget(pages_,1);
+    root->addWidget(pages_);
     auto overview = new QWidget;
     auto overviewLayout = new QVBoxLayout(overview);
     auto metrics = new QHBoxLayout;
@@ -825,7 +784,7 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
     sourceNote->setObjectName("truSourceNote");
     sourceNote->setWordWrap(true);
     overviewLayout->addWidget(sourceNote);
-    pages_->addTab(desktopScrollablePage(overview), "Overview");
+    pages_->addTab(overview, "Overview");
     connect(refreshButton, &QPushButton::clicked, this, [this]{ refreshOverview(); });
 
     auto tools = new QWidget;
@@ -867,7 +826,7 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
     actions->addStretch();
     actions->addWidget(clear);
     toolsLayout->addLayout(actions);
-    pages_->addTab(desktopScrollablePage(tools), "Advanced");
+    pages_->addTab(tools, "Advanced");
     connect(clear, &QPushButton::clicked, output_, &QPlainTextEdit::clear);
     connect(run_, &QPushButton::clicked, this, [this]{ runOperation(); });
     connect(category_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this] {
@@ -1029,33 +988,21 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
     help->setWordWrap(true);
     form->addRow(help);
 
-    auto* configPage = desktopScrollablePage(config);
-    pages_->addTab(configPage, "Connection");
+    pages_->addTab(config, "Connection");
 
     // DESKTOP-WALLET-01: independent local-key wallet.
     // UI-02 adds only presentation and read-only asset discovery.
     auto* walletPage = new DesktopWalletWidget(&rpc_, pages_);
-    pages_->insertTab(1, desktopScrollablePage(walletPage), "Wallet");
+    pages_->insertTab(1, walletPage, "Wallet");
 
     auto* assetsPage =
         new DesktopAssetsWidget(&rpc_, walletPage, pages_);
-    pages_->insertTab(2, desktopScrollablePage(assetsPage), "Assets");
+    pages_->insertTab(2, assetsPage, "Assets");
 
     auto* aiPage =
         new DesktopAIWidget(&rpc_, walletPage, pages_);
-    pages_->insertTab(3, desktopScrollablePage(aiPage), "AI");
+    pages_->insertTab(3, aiPage, "AI");
     aiPage->applyTheme(initialTheme);
-
-    // Existing audited local-signing issuance + contract workflows, now
-    // discoverable without burying them inside the Assets gallery.
-    auto* creatorPage = new TruDesktopStudio07(
-        &rpc_, walletPage, pages_, TruDesktopStudio07::Surface::Tokens);
-    pages_->insertTab(4, desktopScrollablePage(creatorPage), "Create Tokens");
-    auto* contractsPage = new TruDesktopStudio07(
-        &rpc_, walletPage, pages_, TruDesktopStudio07::Surface::Contracts);
-    pages_->insertTab(5, desktopScrollablePage(contractsPage), "Smart Contracts");
-    pages_->setTabToolTip(4,"Create FT, NFT, SFT and NCFT; inscribe TRUScripts. Requires local Core.");
-    pages_->setTabToolTip(5,"Create experimental Hash/Time/Data contracts; inspect and redeem, or use Voting V1.");
 
     connect(themeToggle, &QPushButton::clicked, this,
             [this, themeToggle, aiPage, darkThemeSheet, lightThemeOverrides] {
@@ -1077,10 +1024,10 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
 
     // Keep consumer-facing pages first; direct RPC remains available
     // as the Advanced workspace rather than defining the wallet UI.
-    const int configIndex = pages_->indexOf(configPage);
+    const int configIndex = pages_->indexOf(config);
     if (configIndex >= 0) {
         pages_->removeTab(configIndex);
-        pages_->insertTab(6, configPage, "Connection");
+        pages_->insertTab(4, config, "Connection");
     }
 
     connect(

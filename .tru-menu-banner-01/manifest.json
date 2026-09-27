@@ -1,0 +1,8 @@
+{
+  "installed_sha256": "9e6c90f3318445ec6878fc4b6ac09b14a0abe2856ceddcb9162bf7815448966d",
+  "installed_utc": "2026-09-27T13:16:19.750753+00:00",
+  "name": "TRU-CLI-MENU-BANNER-01",
+  "original_sha256": "8791c40953613329821a79df265bf284fd07243de7feef8c9dd210fa49c505d7",
+  "original_state": "core-before",
+  "target": "src/main.cpp"
+}
