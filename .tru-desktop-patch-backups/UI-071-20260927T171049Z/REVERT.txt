@@ -1,2 +1,0 @@
-Rollback (only if patched files have not been edited):
-python3 /home/gw878/patches/TRU_DESKTOP_UI_071_CREATOR_RESIZE/apply_patch.py --repo /home/gw878/TRU-Core --rollback /home/gw878/TRU-Core/.tru-desktop-patch-backups/UI-071-20260927T171049Z

@@ -78,12 +78,11 @@ Thumbs.db
 .vscode/
 *.swp
 swap/agent/swap_agent/
-scripts
 
 # TRU packaged-patch backup workspace
 /.tru_patch_backups/
 .tru_patch_state/
-
+/ scripts
 # Local TRU patch rollback/build artifacts
 .tru-patches/
 build-gui-desktop01/
