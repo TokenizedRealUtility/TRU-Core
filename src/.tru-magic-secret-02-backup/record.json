@@ -1,0 +1,59 @@
+{
+  "target": "TRU-Core",
+  "files": [
+    {
+      "path": "rpc_server.cpp",
+      "before": "d3d0d21ac77532de750fb014e68d0fe05bd408b2424e6bfbbaa0c4da8538fc11",
+      "after": "e05feb92b302f8e53692bdd09b0526205466a9445caba3432920ad2ddc21cfe0",
+      "mode": 436
+    },
+    {
+      "path": "blockchain.cpp",
+      "before": "6afc50a46bd9590908f231756693f2f35e6970245bafd8971863159cbf8086e4",
+      "after": "75c0853722e971487d6b188205fda1f47d7fbd130651c8b91216fc1ca1eb66d5",
+      "mode": 436
+    },
+    {
+      "path": "wallet.cpp",
+      "before": "23f36a6eb6f6cb5c0c9f9f118b865d382e85fbdc12038d29bc827255c4a46bc7",
+      "after": "a27adcf7fbfc27a16efebc597fdb7fafdfbc4c6d7e364353ece81cc1efb1dad0",
+      "mode": 436
+    },
+    {
+      "path": "desktop_panel.cpp",
+      "before": "63a30038e13f0f3de94005c4c33288c3df6ac477dac15032fa6d8b455b122224",
+      "after": "c63e932e29ee698592205582a3e8897f6a7123c51348e09ec94a0d6c12089f9d",
+      "mode": 420
+    },
+    {
+      "path": "main.cpp",
+      "before": "9e6c90f3318445ec6878fc4b6ac09b14a0abe2856ceddcb9162bf7815448966d",
+      "after": "37c17e589561c6d88620ae5e7860a11e605791ac186ab38cf699365bc75a1d12",
+      "mode": 436
+    },
+    {
+      "path": "magic_secret_service_v2.h",
+      "before": null,
+      "after": "6293227088fe1edd8325f72afc711554fa968ef5ff9087078c80552f0ab7cb90",
+      "mode": 420
+    },
+    {
+      "path": "magic_secret_v2.h",
+      "before": null,
+      "after": "5f6da95073cd707d9b13a0065e883c5a4f30af369472352360b91eb1de1bedfd",
+      "mode": 420
+    },
+    {
+      "path": "magic_secret_cli_v2.h",
+      "before": null,
+      "after": "29f9861b9cb95856cc23b42119efbda5d72e787fcfab49d9b34b0d2e348305ea",
+      "mode": 420
+    },
+    {
+      "path": "magic_secret_widget_v2.h",
+      "before": null,
+      "after": "a176d8762861694ac64f79a428b9c48ba4991de263b4308e5d54d5df5aae857e",
+      "mode": 420
+    }
+  ]
+}

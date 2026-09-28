@@ -22921,7 +22921,7 @@ void Blockchain::startExplorerServer(int port, int rpcPort) {
         // Self-custody token / TRUScript / DID reads and unsigned builders.
         "tokenmetadisplay", "gettokenmetadata", "gettokenutxo", "getTRUScripts",
         "getTRUScriptDetails", "getcontracts", "getDIDMapping", "registerDIDSigned",
-        "listmagiclocks", "getmagicsecret", "preparemagicsecret", "verifytokenmetadata", "verifytokenevolution",
+        "listmagiclocks", "verifytokenmetadata", "verifytokenevolution",
         "createrawtransaction", "createsendtokentransaction",
         "createburntokentransaction", "createcontracttransaction",
         "createTransferTRUScriptTransaction",
@@ -22947,7 +22947,6 @@ void Blockchain::startExplorerServer(int port, int rpcPort) {
     };
 
     const std::unordered_set<std::string> highCostGatewayMethods = {
-        "getmagicsecret", "preparemagicsecret",
         "submitblock", "sendrawtransaction", "sendrawtransactionWeb",
         "issuetokensigned", "registerDIDSigned", "inscribeTRUScriptSigned",
         "createcontracttransaction", "createsendtokentransaction",

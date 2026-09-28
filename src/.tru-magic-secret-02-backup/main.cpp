@@ -1,4 +1,3 @@
-#include "magic_secret_cli_v2.h"
 #ifdef BUILD_WITH_QT
 #include <QtWidgets/QApplication>
 #include <QInputDialog>
@@ -294,7 +293,6 @@ using nlohmann::json;
 // only while the top-level command prompt is active; nested data-entry prompts
 // pause it automatically.
 static std::atomic<bool>         g_cliContentFocus{false};
-static std::atomic<bool>         g_cliMagicSession{false};
 static std::atomic<bool>         g_cliMenuPromptActive{false};
 static std::atomic<unsigned int> g_cliInputDepth{0};
 
@@ -536,7 +534,6 @@ static void paintCliSyncStatus(const std::string& status,
     if (row <= 0) return;
 
     std::lock_guard<std::mutex> lock(coutMutex);
-    if (g_cliMagicSession.load(std::memory_order_acquire)) return;
     fmt::print("\033[s");
     fmt::print("\033[{};1H\033[K  {}",
                row, colorText("[SYNC] " + status, 90));
@@ -4819,7 +4816,7 @@ static bool truDeckHighlightToken(const std::string& token)
     if (token.empty()) return false;
     if (token[0] >= '0' && token[0] <= '9') return true;
     return token == "C" || token == "M" || token == "sync" ||
-           token == "hashredeem" || token == "timeredeem" || token == "magic";
+           token == "hashredeem" || token == "timeredeem";
 }
 
 static std::string truColorizeDeckBody(const std::string& body)
@@ -5010,7 +5007,6 @@ void displayMenu(int rows, std::mutex &coutMutex)
         "║  22 List       23 Update K/V           24 Vote      25 Voting Results      ║",
         "║  26 Mint Tokens    27 Token Supply                                         ║",
         "║  hashredeem Hash Redeem      timeredeem Time Redeem                        ║",
-        "║  magic   Create / Open Private Magic Secrets                               ║",
         "╠════════════════════════════════════════════════════════════════════════════╣",
         "╠═════════════════════════ NETWORK // CHAIN & PEERS ═════════════════════════╣",
         "║                                                                            ║",
@@ -5039,10 +5035,9 @@ void displayMenu(int rows, std::mutex &coutMutex)
         "║                                                                    ║",
         "║  10 Vault  11 SC  12 Dbg  13 Issue  14 Script  15 Vault            ║",
         "║  16 Send  17 AITools  18 SendTok  burntoken Burn                   ║",
-        "║  19 New   20 Bridge  21 Query  22 List  23 K/V  24 Vote            ║",
-        "║  25 Results   26 Mint   27 Supply                                  ║",
+        "║  19 New  20 Bridge  21 Query  22 List  23 K/V  24 Vote            ║",
+        "║  25 Results  26 Mint  27 Supply                                   ║",
         "║  hashredeem HLock      timeredeem TLock                            ║",
-        "║  magic  Private Secrets                                            ║",
         "╠════════════════════════════════════════════════════════════════════╣",
         "╠═════════════════════════ CHAIN / COMPUTE ══════════════════════════╣",
         "║                                                                    ║",
@@ -10662,57 +10657,6 @@ void startCLI(Blockchain &chain, P2PNode &node, Wallet &wallet,
                     "[CLI] Hash Lock redemption failed: " +
                     std::string(e.what()));
             }
-            continue;
-        }
-
-        else if (choice == "magic")
-        {
-            // A temporary screen prevents menu/sync paint from overwriting secrets.
-            // Sync continues; only its terminal status painting is suppressed.
-            struct MagicScreenGuard {
-                std::mutex& output;
-                ~MagicScreenGuard() {
-                    clearCliResultState();
-                    std::lock_guard<std::mutex> lock(output);
-                    std::cout << "\033[2J\033[H" << std::flush;
-                    g_cliMagicSession.store(false, std::memory_order_release);
-                    g_cliFullscreenView.store(false, std::memory_order_release);
-                    g_cliContentFocus.store(false, std::memory_order_release);
-                }
-            } screen{coutMutex};
-            g_cliMagicSession.store(true, std::memory_order_release);
-            g_cliFullscreenView.store(true, std::memory_order_release);
-            g_cliContentFocus.store(true, std::memory_order_release);
-            auto say = [&](const std::string& message) {
-                std::lock_guard<std::mutex> lock(coutMutex);
-                std::cout << "\033[2J\033[H" << message << "\n\n" << std::flush;
-            };
-            auto ask = [&](const std::string& prompt) {
-                {
-                    std::lock_guard<std::mutex> lock(coutMutex);
-                    std::cout << prompt << std::flush;
-                }
-                std::string value; signalAwareGetline(value); return value;
-            };
-            try {
-                say("TRU MAGIC SECRETS\nCreate: publish an encrypted message.\nOpen: use the transaction ID and creator-issued code.");
-                auto report = [&](const tru_magic_v2::Progress& p) {
-                    if(dispatchPendingSignalEvents()) return false;
-                    std::ostringstream progress;
-                    progress << (p.found ? "MAGIC WORK FOUND" : "GRINDING MAGIC SECRET")
-                             << "\nAttempts: " << p.attempts << " | "
-                             << (p.seconds > 0 ? uint64_t(p.attempts/p.seconds) : 0)
-                             << " H/s | " << std::fixed << std::setprecision(2)
-                             << p.seconds << " seconds\nHash: " << p.digest.substr(0,32);
-                    say(progress.str());
-                    return g_running.load(std::memory_order_acquire);
-                };
-                tru_magic_cli_v2::run(chain,wallet,ask,say,report);
-            } catch(const std::exception& e) {
-                say(std::string("Magic Secret: ")+e.what());
-            }
-            if(g_running.load(std::memory_order_acquire))
-                ask("Copy what you need, then press Enter to return to the menu: ");
             continue;
         }
 

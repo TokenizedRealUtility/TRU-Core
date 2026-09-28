@@ -1,0 +1,23 @@
+{
+  "target": "TRU-Core",
+  "files": [
+    {
+      "path": "magic_secret_receipt_v2.h",
+      "before": null,
+      "after": "d9531d1ed6db1d4ec29fa2dc612118b8ce171dcda9f70af9ca7d8420fa573ba2",
+      "mode": 420
+    },
+    {
+      "path": "magic_secret_cli_v2.h",
+      "before": "29f9861b9cb95856cc23b42119efbda5d72e787fcfab49d9b34b0d2e348305ea",
+      "after": "66a6306a63c9a193e0763257e810052e320d5a2ac9ea560761b253c59d5cda28",
+      "mode": 420
+    },
+    {
+      "path": "main.cpp",
+      "before": "37c17e589561c6d88620ae5e7860a11e605791ac186ab38cf699365bc75a1d12",
+      "after": "e3c1f8b5150121bf8c542646e7db95862d1981b228da926def8c689432fad41f",
+      "mode": 436
+    }
+  ]
+}

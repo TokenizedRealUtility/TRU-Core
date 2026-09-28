@@ -1,4 +1,3 @@
-#include "magic_secret_service_v2.h"
 #include "rpc_server.h"
 #include "rpc_utils.h"  // authenticated RPC transport
 #include "blockchain.h"
@@ -6911,8 +6910,6 @@ static json handleCreateTokenTransaction(Blockchain &chain, const json &params, 
 // Handle Create MagicLock
 //========================
 static json handleCreateMagicLock(Blockchain &chain, Wallet &wallet, const json &params, int id) {
-    if(params.contains("secretData") && params["secretData"] != "")
-        return makeError(-32602,"Legacy secret encryption disabled. Use MagicLock V2 local encryption and preparemagicsecret/publishmagicsecret.");
     if (!params.contains("amount") || !params.contains("targetPrefix")) {
         return makeError(-32602, "Missing required parameters: amount, targetPrefix");
     }
@@ -9767,7 +9764,6 @@ static bool consumeRpcBucket(std::unordered_map<std::string, RpcRateBucket>& buc
 }
 
 static double rpcMethodCost(const std::string& method) {
-    if(method=="getmagicsecret" || method=="preparemagicsecret" || method=="publishmagicsecret") return 20.0;
     static const std::unordered_set<std::string> expensive = {
         "submitblock", "sendtoaddress", "sendrawtransaction", "sendrawtransactionWeb",
         "signrawtransactionwithkey", "signrawtransactionwithkeyWeb",
@@ -10004,17 +10000,6 @@ void startRPCServer(Blockchain &chain, Wallet &wallet, P2PNode &node, int port,
         else if (m=="sendrawtransactionWeb")  response=handleSendTransactionWeb(chain,params,id);
         else if (m=="sendrawtransaction")  response=handleSendTransaction(chain,params,id);
         else if (m=="sendtoaddress") response=handleSendToAddressLocal(chain,wallet,params,id,req.remote_addr,port);
-        else if (m=="preparemagicsecret" || m=="getmagicsecret" || m=="publishmagicsecret") {
-            try {
-                if(m=="getmagicsecret") response=makeResult(id,tru_magic_service_v2::get(chain,params));
-                else if(m=="preparemagicsecret") response=makeResult(id,tru_magic_service_v2::preparedJson(tru_magic_service_v2::prepare(chain,params)));
-                else if(!rpcEnvEnabled("TRU_RPC_WALLET_SEND_ENABLE") || !rpcLocalPeer(req.remote_addr))
-                    response=makeError(-32070,"publishmagicsecret requires loopback RPC and TRU_RPC_WALLET_SEND_ENABLE=1");
-                else if(rpcMaxSendAtoms()<tru_magic_service_v2::FEE)
-                    response=makeError(-32072,"Magic secret fee exceeds operator wallet send cap");
-                else response=makeResult(id,tru_magic_service_v2::publish(chain,wallet,params));
-            } catch(const std::exception& e) { response=makeError(-32080,e.what()); }
-        }
         else if (m== "startmining")        response=handleStartMining(chain, params);
         else if (m=="getmempooltransactions") response=handleGetMempoolTransactions(chain,id);
         else if (m=="getrawmempool")       response=handleGetRawMempool(chain,params,id);

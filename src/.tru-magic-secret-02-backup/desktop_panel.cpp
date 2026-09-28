@@ -1,4 +1,3 @@
-#include "magic_secret_widget_v2.h"
 #include "desktop_panel.h"
 #include "tru_desktop_studio_07.h"
 #if __has_include("tru_desktop_version.h")
@@ -1055,8 +1054,6 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
     auto* contractsPage = new TruDesktopStudio07(
         &rpc_, walletPage, pages_, TruDesktopStudio07::Surface::Contracts);
     pages_->insertTab(5, desktopScrollablePage(contractsPage), "Smart Contracts");
-    auto* magicPage = new TruMagicSecretWidgetV2(&rpc_, walletPage, pages_);
-    pages_->insertTab(6, desktopScrollablePage(magicPage), "Magic Secrets");
     pages_->setTabToolTip(4,"Create FT, NFT, SFT and NCFT; inscribe TRUScripts. Requires local Core.");
     pages_->setTabToolTip(5,"Create experimental Hash/Time/Data contracts; inspect and redeem, or use Voting V1.");
 
@@ -1083,7 +1080,7 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
     const int configIndex = pages_->indexOf(configPage);
     if (configIndex >= 0) {
         pages_->removeTab(configIndex);
-        pages_->insertTab(7, configPage, "Connection");
+        pages_->insertTab(6, configPage, "Connection");
     }
 
     connect(

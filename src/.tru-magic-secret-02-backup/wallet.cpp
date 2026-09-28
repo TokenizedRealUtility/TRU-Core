@@ -9480,7 +9480,6 @@ static std::string extractPkhHex(const std::string& scriptHex) {
 std::string Wallet::createMagicLock(uint64_t amount, const std::string& targetPrefix, 
                                     const std::string& secretData, 
                                     const std::string& dataType) {
-    if(!secretData.empty()) throw std::runtime_error("Legacy secret encryption disabled; use the magic command or MagicLock V2 wallet tab");
     std::string sender = getCurrentAddress();
     
     Logger::log("[createMagicLock] Creating MagicLock with secret data");
