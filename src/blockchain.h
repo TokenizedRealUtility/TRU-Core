@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <memory>
 #include <queue>
+#include <deque>  // CADENCE-HASHRATE-TELEMETRY-01 bounded observation FIFO
 #include "globals.h"   // FIX: shared COINBASE_MATURITY (single source of truth)
 #include "utxo.h"
 #include "block.h"
@@ -128,6 +129,10 @@ public:
     std::string getBestTipHash() const;
     void getBestTipSnapshot(std::string& hashOut, int& heightOut) const;
     uint32_t getDifficulty() const;
+    // TRU-DATA-PROVIDER-01: read-only listing metadata and accounting.
+    nlohmann::json getDataProviderChainV1() const;
+    nlohmann::json getDataProviderHealthV1() const;
+    nlohmann::json getDataProviderSupplyV1() const;
     uint64_t getBlockReward() const;
 
     bool loadChainState();
@@ -216,7 +221,11 @@ public:
     std::vector<std::string> getTransactionsForAddress(const std::string& address) const;
 
     std::vector<TokenData> getAllTokens() const;
-    ExtendedTokenData fetchTokenMetadata(const std::string& key) const;
+    ExtendedTokenData fetchTokenMetadata(const std::string& key,
+        const std::string& tokenID = "", TokenType type = TokenType::NONE,
+        const std::string& metaHash = "") const;
+    bool resolveTokenMetadataAtOutpoint(const std::string& txid,
+        uint32_t controllingVout, nlohmann::json& metadata) const;
     bool isValidAddress(const std::string& addr) const;
 
    uint32_t getCurrentBlockTime() const;
@@ -608,6 +617,10 @@ private:
     //bool running_ = true;                      // Flag to control processor thread
 
     void processQueue();
+    // CADENCE-HASHRATE-TELEMETRY-01: bounded process-local observation cache.
+    void recordBlockObservationNonConsensus(
+        const std::string& blockHash,
+        uint64_t observedAt);
     void invalidateCachesForAcceptedMempoolTransaction(const Transaction& tx);
     std::vector<Block> chain;
     std::unordered_map<std::string, BlockIndexEntry> blockIndex;
@@ -652,6 +665,14 @@ private:
     // EXPLORER-LOCK-02: display/telemetry-only maps never participate in
     // consensus state and must not extend chain-lock hold times.
     mutable std::shared_mutex derivedStatsMutex_;
+
+    // CADENCE-HASHRATE-TELEMETRY-01: process-local first-seen wall-clock time
+    // for validated blocks. Keyed by block hash so a side block promoted during
+    // a reorg preserves its original observation. This map is intentionally
+    // non-durable and MUST NOT participate in consensus, MTP, retargeting,
+    // chainwork, or block acceptance.
+    std::unordered_map<std::string, uint64_t> blockObservedAt_;
+    std::deque<std::string> blockObservationOrder_;
 
     std::unordered_map<std::string, AddressStats> addressCache;
     mutable std::shared_mutex addressCacheMutex;

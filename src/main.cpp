@@ -11,10 +11,12 @@
 #include "blockchain.h"
 #include "p2p.h"
 #include "wallet.h"
+#include "cli_address_selection_v1.h"  // CLI-ADDRESS-SELECT-01
 #include "tx.h"
 #include "mempool.h"
 #include "utils.h"
 #include "rpc_server.h"
+#include "axon_wallet_handoff_lock.h"  // AXON UX-03B shared local funding lock
 #include "rpc_utils.h"  // RPC transport authentication
 #include "ai_oracle_service.h"
 #include "ai_providers.h"          // TOKEN-AI-03A wallet evolution provider factories
@@ -37,6 +39,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <array>
 #include <thread>
 #include <atomic>
 #include <chrono>
@@ -85,6 +88,7 @@
 #include <fcntl.h>   // open() for miner log redirect
 #include <future>
 #include <filesystem>
+#include <fstream>  // AXON UX-03B local non-secret funding journal
 #include <termios.h>
 #include <unistd.h>
 #include "script_interpreter.h"
@@ -2730,6 +2734,772 @@ static void truEvolutionUiShowPreviewPaged(const nlohmann::json& record,
     }
 }
 
+//============================================================================================
+// NEROMESH-AXON-MARKETPLACE-01 — public funded compute marketplace client
+//============================================================================================
+// Non-consensus integration only. Core communicates outbound over HTTPS, never exposes
+// wallet keys, and reuses the existing canonical HTLC Atomic Swap V1 wallet path. For token
+// evolution, NEROMESH supplies only a proposal. The existing issuer preview/commit path
+// remains the sole authority that can persist and anchor an evolution.
+struct TruAxonHttpResult {
+    long status{0};
+    std::string body;
+};
+
+static size_t truAxonCurlWrite(void* contents, size_t size, size_t nmemb, void* userp) {
+    const size_t n = size * nmemb;
+    static_cast<std::string*>(userp)->append(static_cast<const char*>(contents), n);
+    return n;
+}
+
+static std::string truAxonBaseUrl() {
+    std::string base = "https://tru.neromesh.space";
+    if (const char* env = std::getenv("TRU_NEROMESH_URL")) {
+        if (*env) base = env;
+    }
+    while (!base.empty() && base.back() == '/') base.pop_back();
+    const bool local = base.rfind("http://127.0.0.1", 0U) == 0U ||
+                       base.rfind("http://localhost", 0U) == 0U;
+    if (base.rfind("https://", 0U) != 0U && !local)
+        throw std::runtime_error("NEROMESH URL must use HTTPS (except localhost testing)");
+    return base;
+}
+
+static nlohmann::json truAxonHttpJson(
+    const std::string& method,
+    const std::string& path,
+    const std::string& bearer = "",
+    const nlohmann::json& body = nullptr)
+{
+    if (path.empty() || path.front() != '/')
+        throw std::runtime_error("Invalid NEROMESH path");
+    CURL* curl = curl_easy_init();
+    if (!curl) throw std::runtime_error("Unable to initialize HTTPS client");
+
+    TruAxonHttpResult out;
+    struct curl_slist* headers = nullptr;
+    headers = curl_slist_append(headers, "Accept: application/json");
+    if (!bearer.empty()) {
+        const std::string auth = "Authorization: Bearer " + bearer;
+        headers = curl_slist_append(headers, auth.c_str());
+    }
+    std::string encoded;
+    if (method == "POST") {
+        headers = curl_slist_append(headers, "Content-Type: application/json");
+        encoded = body.is_null() ? "{}" : body.dump();
+        curl_easy_setopt(curl, CURLOPT_POST, 1L);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, encoded.c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(encoded.size()));
+    }
+    const std::string url = truAxonBaseUrl() + path;
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, truAxonCurlWrite);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &out.body);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "TRU-Core/AXON-MARKETPLACE-01");
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+    const CURLcode rc = curl_easy_perform(curl);
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &out.status);
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+    if (rc != CURLE_OK)
+        throw std::runtime_error("NEROMESH HTTPS request failed: " + std::string(curl_easy_strerror(rc)));
+
+    nlohmann::json parsed;
+    try { parsed = nlohmann::json::parse(out.body); }
+    catch (...) { throw std::runtime_error("NEROMESH returned non-JSON HTTP " + std::to_string(out.status)); }
+    if (out.status < 200 || out.status >= 300) {
+        const std::string message = parsed.value("error", parsed.value("detail", "NEROMESH request rejected"));
+        throw std::runtime_error("NEROMESH HTTP " + std::to_string(out.status) + ": " + message);
+    }
+    return parsed;
+}
+
+
+
+//============================================================================================
+// NEROMESH-AXON-UX-03B — short-lived tru:// wallet handoff consumer
+//============================================================================================
+// The handoff URI carries only an AXI intent ID + short-lived axc capability. The configured
+// NEROMESH origin remains authoritative; the URI cannot redirect Core to an arbitrary host.
+// Customer/worker credentials, wallet keys and HTLC preimages never cross this boundary.
+struct TruAxonWalletHandoffRef {
+    std::string intentId;
+    std::string gateway;
+    std::string capability;
+};
+
+static std::string truAxonPercentDecode(const std::string& input) {
+    std::string out;
+    out.reserve(input.size());
+    auto nibble=[](char c)->int {
+        if(c>='0'&&c<='9') return c-'0';
+        if(c>='a'&&c<='f') return c-'a'+10;
+        if(c>='A'&&c<='F') return c-'A'+10;
+        return -1;
+    };
+    for(size_t i=0;i<input.size();++i) {
+        if(input[i]=='%') {
+            if(i+2>=input.size()) throw std::runtime_error("Malformed percent escape in AXON wallet handoff");
+            const int a=nibble(input[i+1]), b=nibble(input[i+2]);
+            if(a<0||b<0) throw std::runtime_error("Malformed percent escape in AXON wallet handoff");
+            const char decoded=static_cast<char>((a<<4)|b);
+            if(decoded=='\0' || decoded=='\r' || decoded=='\n')
+                throw std::runtime_error("Unsafe byte in AXON wallet handoff");
+            out.push_back(decoded); i+=2;
+        } else out.push_back(input[i]);
+    }
+    return out;
+}
+
+static std::string truAxonConfiguredAuthority() {
+    const std::string base=truAxonBaseUrl();
+    const auto scheme=base.find("://");
+    if(scheme==std::string::npos) throw std::runtime_error("Invalid configured NEROMESH URL");
+    const auto start=scheme+3U;
+    const auto slash=base.find('/',start);
+    const std::string authority=base.substr(start,slash==std::string::npos?std::string::npos:slash-start);
+    if(authority.empty() || authority.find('@')!=std::string::npos || authority.find_first_of("?#")!=std::string::npos)
+        throw std::runtime_error("Invalid configured NEROMESH authority");
+    std::string lower=authority;
+    std::transform(lower.begin(),lower.end(),lower.begin(),[](unsigned char c){return static_cast<char>(std::tolower(c));});
+    return lower;
+}
+
+static TruAxonWalletHandoffRef truAxonParseWalletHandoffUri(const std::string& raw) {
+    static const std::string prefix="tru://axon/fund/";
+    if(raw.rfind(prefix,0U)!=0U || raw.size()>1024U)
+        throw std::runtime_error("Expected a tru://axon/fund/AXI-... wallet handoff URI");
+    const auto q=raw.find('?',prefix.size());
+    const auto h=raw.find('#',prefix.size());
+    if(q==std::string::npos || h==std::string::npos || q>=h)
+        throw std::runtime_error("AXON wallet handoff is missing gateway/capability fields");
+    TruAxonWalletHandoffRef ref;
+    ref.intentId=raw.substr(prefix.size(),q-prefix.size());
+    const std::string query=raw.substr(q+1U,h-q-1U);
+    const std::string fragment=raw.substr(h+1U);
+    if(query.rfind("gateway=",0U)!=0U || query.find('&')!=std::string::npos ||
+       fragment.rfind("cap=",0U)!=0U || fragment.find('&')!=std::string::npos)
+        throw std::runtime_error("Unsupported AXON wallet handoff fields");
+    ref.gateway=truAxonPercentDecode(query.substr(8U));
+    ref.capability=truAxonPercentDecode(fragment.substr(4U));
+    if(ref.intentId.size()!=20U || ref.intentId.rfind("AXI-",0U)!=0U ||
+       !std::all_of(ref.intentId.begin()+4,ref.intentId.end(),[](unsigned char c){return std::isxdigit(c)!=0 && (std::isdigit(c)||std::isupper(c));}))
+        throw std::runtime_error("Invalid AXON wallet intent ID");
+    if(ref.capability.rfind("axc_",0U)!=0U || ref.capability.size()<36U || ref.capability.size()>128U ||
+       !std::all_of(ref.capability.begin()+4,ref.capability.end(),[](unsigned char c){return std::isalnum(c)||c=='_'||c=='-';}))
+        throw std::runtime_error("Invalid AXON wallet capability");
+    std::string gatewayLower=ref.gateway;
+    std::transform(gatewayLower.begin(),gatewayLower.end(),gatewayLower.begin(),[](unsigned char c){return static_cast<char>(std::tolower(c));});
+    if(gatewayLower!=truAxonConfiguredAuthority())
+        throw std::runtime_error("AXON wallet handoff gateway does not match configured NEROMESH origin");
+    ref.gateway=gatewayLower;
+    return ref;
+}
+
+static void truAxonValidateWalletIntent(const nlohmann::json& status, const TruAxonWalletHandoffRef& ref) {
+    if(status.value("intent_id","")!=ref.intentId || status.value("schema","")!="AXON_WALLET_HANDOFF_V1")
+        throw std::runtime_error("NEROMESH returned a mismatched wallet handoff");
+    if(!status.contains("handoff") || !status["handoff"].is_object())
+        throw std::runtime_error("NEROMESH wallet handoff payload is missing");
+    const auto& h=status["handoff"];
+    if(h.value("schema","")!="AXON_WALLET_HANDOFF_V1" || h.value("network","")!="TRU" ||
+       h.value("noncustodial",false)!=true || h.value("wallet_signs_locally",false)!=true)
+        throw std::runtime_error("Unsupported or unsafe AXON wallet handoff schema");
+    const std::string job=h.value("job_id","");
+    if(job.size()!=16U || job.rfind("AXN-",0U)!=0U)
+        throw std::runtime_error("Invalid AXON Job ID in wallet handoff");
+    const std::string digest=status.value("intent_sha256","");
+    if(digest.size()!=64U || !isHex(digest))
+        throw std::runtime_error("AXON wallet handoff fingerprint is malformed");
+}
+
+static std::filesystem::path truAxonHandoffJournalPath(const std::string& intentId) {
+    const char* home=std::getenv("HOME");
+    if(!home || !*home) throw std::runtime_error("HOME is unavailable for AXON funding journal");
+    std::filesystem::path dir=std::filesystem::path(home)/".tru"/"axon-wallet-handoffs";
+    std::filesystem::create_directories(dir);
+    std::filesystem::permissions(dir, std::filesystem::perms::owner_all,
+        std::filesystem::perm_options::replace);
+    return dir/(intentId+".json");
+}
+
+static nlohmann::json truAxonLoadHandoffJournal(const std::string& intentId) {
+    const auto path=truAxonHandoffJournalPath(intentId);
+    if(!std::filesystem::exists(path)) return nlohmann::json::object();
+    std::ifstream in(path);
+    if(!in) throw std::runtime_error("Cannot read AXON funding journal");
+    nlohmann::json j; in>>j;
+    if(!j.is_object() || j.value("intent_id","")!=intentId)
+        throw std::runtime_error("AXON funding journal is corrupt");
+    return j;
+}
+
+static void truAxonSaveHandoffJournal(const nlohmann::json& j) {
+    const std::string intentId=j.value("intent_id","");
+    const auto path=truAxonHandoffJournalPath(intentId);
+    const auto tmp=path.string()+".tmp";
+    {
+        std::ofstream out(tmp,std::ios::trunc);
+        if(!out) throw std::runtime_error("Cannot write AXON funding journal");
+        out<<j.dump(2)<<"\n"; out.flush();
+        if(!out) throw std::runtime_error("Cannot flush AXON funding journal");
+    }
+    std::filesystem::permissions(tmp,
+        std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+        std::filesystem::perm_options::replace);
+    std::error_code ec;
+    std::filesystem::remove(path,ec);
+    ec.clear();
+    std::filesystem::rename(tmp,path,ec);
+    if(ec) throw std::runtime_error("Cannot commit AXON funding journal: "+ec.message());
+    std::filesystem::permissions(path,
+        std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+        std::filesystem::perm_options::replace);
+}
+
+static std::string truAxonCanonicalHandoffScript(
+    const std::string& hashHex,const std::string& claimHex,
+    const std::string& refundHex,std::uint32_t refundTime)
+{
+    std::vector<unsigned char> hb,cb,rb;
+    if(!tru_contract_call::DecodeScriptHexStrict(hashHex,hb)||hb.size()!=20U ||
+       !tru_contract_call::DecodeScriptHexStrict(claimHex,cb)||cb.size()!=33U ||
+       !tru_contract_call::DecodeScriptHexStrict(refundHex,rb)||rb.size()!=33U)
+        throw std::runtime_error("Malformed AXON HTLC funding plan");
+    std::array<unsigned char,20> h{}; std::array<unsigned char,33> c{},r{};
+    std::copy(hb.begin(),hb.end(),h.begin()); std::copy(cb.begin(),cb.end(),c.begin()); std::copy(rb.begin(),rb.end(),r.begin());
+    std::vector<unsigned char> script; tru_contract_call::CanonicalHtlcAtomicSwapV1Info info;
+    if(!tru_contract_call::BuildCanonicalHtlcAtomicSwapV1Script(h,c,r,refundTime,script,&info))
+        throw std::runtime_error("AXON HTLC funding plan is not canonical");
+    return bytesToHex(script);
+}
+
+static void truAxonFundWalletHandoff(Wallet& wallet, int rows, std::mutex& coutMutex) {
+    std::lock_guard<std::mutex> fundingGuard(g_truAxonWalletHandoffFundingMutex);
+    const std::string uri=readLineTrimmed("Paste tru:// AXON wallet handoff URI:",rows,coutMutex);
+    const auto ref=truAxonParseWalletHandoffUri(uri);
+    auto status=truAxonHttpJson("GET","/api/v1/market/wallet-intents/"+ref.intentId,ref.capability);
+    truAxonValidateWalletIntent(status,ref);
+    const auto handoff=status.at("handoff");
+    const std::string state=status.value("offer_state","");
+    if(status.value("revoked",false)) throw std::runtime_error("This wallet handoff was replaced/revoked");
+    if(status.value("expired",false) && state!="FUNDING_PENDING" && state!="FUNDED")
+        throw std::runtime_error("This wallet handoff expired; create a new handoff on NEROMESH");
+    if(status.contains("funding_outpoints")) {
+        const auto& o=status["funding_outpoints"];
+        std::ostringstream done;
+        done<<"=== AXON WALLET HANDOFF — ALREADY FUNDED ===\n\n"
+            <<"Job   : "<<handoff.value("job_id","")<<"\nState : "<<state<<"\n"
+            <<"20%   : "<<o["compute"].value("txid","")<<":"<<o["compute"].value("vout",1)<<"\n"
+            <<"80%   : "<<o["acceptance"].value("txid","")<<":"<<o["acceptance"].value("vout",1)<<"\n\n"
+            <<"No new HTLCs were created.";
+        displayResult(done.str(),rows,coutMutex,92); return;
+    }
+    if(state!="RESERVED" && state!="AWAITING_FUNDING")
+        throw std::runtime_error("AXON offer is not waiting for wallet funding (state="+state+")");
+
+    std::ostringstream review;
+    review<<"=== AXON WALLET HANDOFF ===\n\n"
+          <<"Intent       : "<<ref.intentId<<"\n"
+          <<"Job          : "<<handoff.value("job_id","")<<"\n"
+          <<"Work type    : "<<handoff.value("job_type","")<<"\n"
+          <<"Total        : "<<handoff.value("total_tru","")<<" TRU\n"
+          <<"Compute 20%  : "<<handoff.value("compute_tru","")<<" TRU\n"
+          <<"Accept 80%   : "<<handoff.value("acceptance_tru","")<<" TRU\n"
+          <<"Worker key   : "<<handoff.value("worker_claim_pubkey","")<<"\n"
+          <<"Fingerprint  : "<<status.value("intent_sha256","")<<"\n\n"
+          <<"Core will derive YOUR refund key locally, freeze the canonical 20/80 plan,\n"
+          <<"sign/broadcast both HTLCs, and return only the public outpoints to NEROMESH.\n"
+          <<"The axc capability is never written to the funding journal.\n\nType FUND to continue.";
+    displayResult(review.str(),rows,coutMutex,93);
+    if(readLineTrimmed("Confirmation:",rows,coutMutex)!="FUND") return;
+
+    wallet.requirePrivateAccess("AXON wallet handoff funding");
+    const std::string refundAddress=wallet.getCurrentAddress();
+    const auto refundBytes=wallet.getPublicKeyForAddress(refundAddress);
+    if(refundBytes.size()!=33U || (refundBytes[0]!=0x02 && refundBytes[0]!=0x03))
+        throw std::runtime_error("Current wallet address does not expose a compressed refund public key");
+    const std::string refundPubkey=bytesToHex(refundBytes);
+    const std::uint32_t suggestedRefundTime=static_cast<std::uint32_t>(std::time(nullptr)+48*3600);
+    auto prepared=truAxonHttpJson("POST","/api/v1/market/wallet-intents/"+ref.intentId+"/prepare",ref.capability,
+                                  {{"refund_pubkey",refundPubkey},{"refund_time",suggestedRefundTime}});
+    truAxonValidateWalletIntent(prepared,ref);
+    if(!prepared.contains("funding_plan") || !prepared["funding_plan"].is_object())
+        throw std::runtime_error("NEROMESH did not return a frozen funding plan");
+    const auto plan=prepared.at("funding_plan");
+    const auto compute=plan.at("compute"), acceptance=plan.at("acceptance");
+    const std::string frozenRefund=compute.at("refund_pubkey").get<std::string>();
+    const auto frozenTime=compute.at("refund_time").get<std::uint32_t>();
+    if(frozenRefund!=refundPubkey || acceptance.at("refund_pubkey").get<std::string>()!=frozenRefund ||
+       acceptance.at("refund_time").get<std::uint32_t>()!=frozenTime ||
+       compute.at("claim_pubkey").get<std::string>()!=handoff.value("worker_claim_pubkey","") ||
+       acceptance.at("claim_pubkey").get<std::string>()!=handoff.value("worker_claim_pubkey","") ||
+       compute.at("amount_atoms").get<std::uint64_t>()!=handoff.at("compute_atoms").get<std::uint64_t>() ||
+       acceptance.at("amount_atoms").get<std::uint64_t>()!=handoff.at("acceptance_atoms").get<std::uint64_t>())
+        throw std::runtime_error("FAIL CLOSED: wallet handoff changed while funding was prepared");
+
+    if(truAxonCanonicalHandoffScript(compute.at("secret_hash160").get<std::string>(),
+          compute.at("claim_pubkey").get<std::string>(),frozenRefund,frozenTime)!=compute.at("script_hex").get<std::string>() ||
+       truAxonCanonicalHandoffScript(acceptance.at("secret_hash160").get<std::string>(),
+          acceptance.at("claim_pubkey").get<std::string>(),frozenRefund,frozenTime)!=acceptance.at("script_hex").get<std::string>())
+        throw std::runtime_error("FAIL CLOSED: NEROMESH HTLC script is not the local canonical script");
+
+    nlohmann::json journal=truAxonLoadHandoffJournal(ref.intentId);
+    if(journal.empty()) journal={{"schema","TRU_AXON_WALLET_HANDOFF_JOURNAL_V1"},{"intent_id",ref.intentId},
+        {"intent_sha256",prepared.value("intent_sha256","")},{"job_id",handoff.value("job_id","")},
+        {"refund_pubkey",frozenRefund},{"refund_time",frozenTime}};
+    if(journal.value("intent_sha256","")!=prepared.value("intent_sha256","") ||
+       journal.value("job_id","")!=handoff.value("job_id","") || journal.value("refund_pubkey","")!=frozenRefund)
+        throw std::runtime_error("FAIL CLOSED: local AXON funding journal does not match this handoff");
+
+    HtlcAtomicSwapCreateResult c,a;
+    bool haveC=journal.contains("compute_txid") && journal["compute_txid"].is_string();
+    bool haveA=journal.contains("acceptance_txid") && journal["acceptance_txid"].is_string();
+    if(!haveC) {
+        c=wallet.createHtlcAtomicSwapV1(compute.at("secret_hash160").get<std::string>(),
+            compute.at("claim_pubkey").get<std::string>(),frozenRefund,frozenTime,
+            compute.at("amount_atoms").get<std::uint64_t>());
+        if(c.scriptHex!=compute.at("script_hex").get<std::string>())
+            throw std::runtime_error("FAIL CLOSED: compute HTLC script differs from frozen NEROMESH plan");
+        journal["compute_txid"]=c.txid; journal["compute_vout"]=c.contractVout;
+        truAxonSaveHandoffJournal(journal); haveC=true;
+    }
+    if(!haveA) {
+        a=wallet.createHtlcAtomicSwapV1(acceptance.at("secret_hash160").get<std::string>(),
+            acceptance.at("claim_pubkey").get<std::string>(),frozenRefund,frozenTime,
+            acceptance.at("amount_atoms").get<std::uint64_t>());
+        if(a.scriptHex!=acceptance.at("script_hex").get<std::string>())
+            throw std::runtime_error("FAIL CLOSED: acceptance HTLC script differs from frozen NEROMESH plan");
+        journal["acceptance_txid"]=a.txid; journal["acceptance_vout"]=a.contractVout;
+        truAxonSaveHandoffJournal(journal); haveA=true;
+    }
+    const std::string cTx=journal.at("compute_txid").get<std::string>();
+    const std::string aTx=journal.at("acceptance_txid").get<std::string>();
+    const int cV=journal.value("compute_vout",1), aV=journal.value("acceptance_vout",1);
+    nlohmann::json recorded;
+    try {
+        recorded=truAxonHttpJson("POST","/api/v1/market/wallet-intents/"+ref.intentId+"/funding",ref.capability,
+            {{"compute_txid",cTx},{"compute_vout",cV},{"acceptance_txid",aTx},{"acceptance_vout",aV}});
+    } catch(const std::exception& e) {
+        std::ostringstream recovery;
+        recovery<<"=== AXON WALLET HANDOFF — FUNDING BROADCAST / REGISTRATION PENDING ===\n\n"
+                <<"20% : "<<cTx<<":"<<cV<<"\n80% : "<<aTx<<":"<<aV<<"\n\n"
+                <<"DO NOT FUND AGAIN. These exact outpoints are saved locally and will be reused on retry.\n"
+                <<"Retry this SAME handoff URI after connectivity returns.\n\nLast error: "<<e.what();
+        displayResult(recovery.str(),rows,coutMutex,93); return;
+    }
+    journal["registered"]=true; journal["server_state"]=recorded.value("offer_state",recorded.value("state",""));
+    truAxonSaveHandoffJournal(journal);
+    std::ostringstream ok;
+    ok<<"=== AXON WALLET HANDOFF FUNDED ===\n\n"
+      <<"Job   : "<<handoff.value("job_id","")<<"\n"
+      <<"20%   : "<<cTx<<":"<<cV<<"\n80%   : "<<aTx<<":"<<aV<<"\n"
+      <<"State : "<<recorded.value("offer_state",recorded.value("state","FUNDING_PENDING"))<<"\n\n"
+      <<"NEROMESH now reconciles propagation/confirmation automatically. DO NOT fund again.";
+    displayResult(ok.str(),rows,coutMutex,92);
+}
+
+static std::string truAxonReadHidden(const std::string& prompt, int rows, std::mutex& coutMutex) {
+    (void)rows;
+    if (!::isatty(STDIN_FILENO))
+        throw std::runtime_error("Customer token entry requires an interactive terminal");
+    struct termios oldTermios {};
+    if (::tcgetattr(STDIN_FILENO, &oldTermios) != 0)
+        throw std::runtime_error("Unable to read terminal settings");
+    struct termios hidden = oldTermios;
+    hidden.c_lflag &= static_cast<tcflag_t>(~ECHO);
+    if (::tcsetattr(STDIN_FILENO, TCSAFLUSH, &hidden) != 0)
+        throw std::runtime_error("Unable to disable terminal echo");
+    std::string value;
+    {
+        std::lock_guard<std::mutex> lock(coutMutex);
+        std::cout << prompt << std::flush;
+    }
+    const bool ok = static_cast<bool>(std::getline(std::cin, value));
+    const int restored = ::tcsetattr(STDIN_FILENO, TCSAFLUSH, &oldTermios);
+    {
+        std::lock_guard<std::mutex> lock(coutMutex);
+        std::cout << std::endl;
+    }
+    if (restored != 0) throw std::runtime_error("Unable to restore terminal echo");
+    if (!ok) return {};
+    return value;
+}
+
+static std::string truAxonCustomerToken(int rows, std::mutex& coutMutex, std::string& sessionToken) {
+    if (!sessionToken.empty()) return sessionToken;
+    std::string token = truAxonReadHidden("YOUR CUSTOMER ACCESS TOKEN (nmc_...): ", rows, coutMutex);
+    if (token.rfind("nmc_", 0U) != 0U || token.size() < 12U)
+        throw std::runtime_error("Invalid nmc_ customer token");
+    sessionToken = std::move(token);
+    return sessionToken;
+}
+
+static const nlohmann::json* truAxonFindOffer(const nlohmann::json& mine, const std::string& jobID) {
+    if (!mine.contains("offers") || !mine["offers"].is_array()) return nullptr;
+    for (const auto& o : mine["offers"])
+        if (o.is_object() && o.value("job_id", "") == jobID) return &o;
+    return nullptr;
+}
+
+static void truAxonShowOpenMarketplace(int rows, std::mutex& coutMutex) {
+    const auto response = truAxonHttpJson("GET", "/api/v1/market/offers");
+    std::ostringstream report;
+    report << "=== AXON COMPUTE MARKETPLACE — OPEN OFFERS ===\n\n";
+    const auto offers = response.value("offers", nlohmann::json::array());
+    if (!offers.is_array() || offers.empty()) report << "No open offers.\n";
+    else for (const auto& o : offers) {
+        report << o.value("job_id", "") << "  " << o.value("job_type", "")
+               << "  " << o.value("total_tru", "") << " TRU\n"
+               << "  20% compute: " << o.value("compute_tru", "")
+               << "  | 80% acceptance: " << o.value("acceptance_tru", "") << "\n";
+        const std::string tokenID = (o.contains("token_id") && o["token_id"].is_string())
+            ? o["token_id"].get<std::string>() : std::string{};
+        if (!tokenID.empty()) {
+            const std::string tokenType = (o.contains("token_type") && o["token_type"].is_string())
+                ? o["token_type"].get<std::string>() : std::string{};
+            report << "  Token: " << tokenID << " [" << tokenType << "]\n";
+        }
+        report << "\n";
+    }
+    report << "Workers explicitly choose offers; being online does not auto-accept marketplace work.";
+    displayResult(report.str(), rows, coutMutex, 96);
+}
+
+static void truAxonCreateOffer(Wallet& wallet, int rows, std::mutex& coutMutex, std::string& sessionToken) {
+    const std::string token = truAxonCustomerToken(rows, coutMutex, sessionToken);
+    displayResult("=== CREATE AXON WORK CONTRACT ===\n1. General AI Compute\n2. TRU Token Evolution Proposal\n0. Cancel", rows, coutMutex, 96);
+    const std::string kind = readLineTrimmed("Select [0/1/2]:", rows, coutMutex);
+    if (kind == "0" || kind.empty()) return;
+
+    nlohmann::json input;
+    std::string jobType;
+    if (kind == "1") {
+        jobType = "text.generate";
+        const std::string prompt = readLineTrimmed("Work request / prompt:", rows, coutMutex);
+        if (prompt.size() < 3U) throw std::runtime_error("Prompt is too short");
+        input = {{"prompt", prompt}, {"max_output_tokens", 256}};
+    } else if (kind == "2") {
+        jobType = "tru.evolve.preview";
+        const auto owned = truEvolutionUiOwnedTokens(wallet);
+        std::ostringstream choices;
+        choices << "=== TARGET TRU TOKEN ===\n"
+                << "A. Enter any public SFT/NCFT Token ID (customer does not need to own it)\n";
+        for (size_t i=0;i<owned.size();++i)
+            choices << (i+1U) << ". " << owned[i].name << " [" << owned[i].tokenType << "] " << owned[i].tokenID << " (local authority)\n";
+        choices << "0. Cancel\n\nNEROMESH resolves the actual evolution authority from TRU before publishing the offer.";
+        displayResult(choices.str(), rows, coutMutex, 96);
+        const std::string selected = readLineTrimmed("Select A, local token number, or 0:", rows, coutMutex);
+        if (selected == "0" || selected.empty()) return;
+        std::string targetID, targetType;
+        if (selected == "A" || selected == "a") {
+            targetID = readLineTrimmed("Public TRU Token ID:", rows, coutMutex);
+            targetType = readLineTrimmed("Token type [SFT/NCFT]:", rows, coutMutex);
+            std::transform(targetType.begin(),targetType.end(),targetType.begin(),[](unsigned char c){return static_cast<char>(std::toupper(c));});
+            if (targetID.empty() || targetID.size()>80U || (targetType!="SFT" && targetType!="NCFT"))
+                throw std::runtime_error("Token ID/type must identify a public SFT or NCFT");
+        } else {
+            size_t idx = 0;
+            try { const auto n=std::stoul(selected); if(n==0||n>owned.size()) throw std::out_of_range("token"); idx=n-1; }
+            catch (...) { throw std::runtime_error("Invalid token selection"); }
+            targetID=owned[idx].tokenID; targetType=owned[idx].tokenType;
+        }
+        const std::string milestone = readLineTrimmed("Issuer/customer-reported milestone or evolution request:", rows, coutMutex);
+        if (milestone.size() < 3U) throw std::runtime_error("Milestone is too short");
+        input = {{"token_id", targetID}, {"token_type", targetType},
+                 {"milestone", milestone}, {"max_output_tokens", 256}};
+    } else throw std::runtime_error("Invalid work-contract type");
+
+    const std::string rewardText = readLineTrimmed("Total reward in TRU [minimum 0.01000000]:", rows, coutMutex);
+    std::uint64_t rewardAtoms=0; std::string reason;
+    if (!parseTRUAmountExact(rewardText, rewardAtoms, reason) || rewardAtoms < 1000000ULL)
+        throw std::runtime_error("Reward must be an exact amount of at least 0.01000000 TRU: " + reason);
+
+    const auto created = truAxonHttpJson("POST", "/api/v1/market/offers", token,
+        {{"job_type", jobType}, {"privacy_tier", "community"}, {"accept_community_processing", true},
+         {"reward_atoms", rewardAtoms}, {"input", input}});
+    std::ostringstream report;
+    report << "=== AXON OFFER POSTED ===\n\n"
+           << "Job ID        : " << created.value("job_id", "") << "\n"
+           << "State         : " << created.value("state", "") << "\n"
+           << "Total reward  : " << created.value("total_tru", "") << " TRU\n"
+           << "Compute 20%   : " << created.value("compute_tru", "") << " TRU\n"
+           << "Acceptance 80%: " << created.value("acceptance_tru", "") << " TRU\n\n"
+           << "No funds moved yet. A worker must explicitly reserve this offer first.\n"
+           << "After reservation, return here and fund the two canonical TRU HTLC legs.";
+    displayResult(report.str(), rows, coutMutex, 92);
+}
+
+static void truAxonShowMine(int rows, std::mutex& coutMutex, std::string& sessionToken) {
+    const auto mine = truAxonHttpJson("GET", "/api/v1/market/offers/mine", truAxonCustomerToken(rows, coutMutex, sessionToken));
+    std::ostringstream report;
+    report << "=== MY AXON WORK CONTRACTS ===\n\n";
+    const auto offers=mine.value("offers",nlohmann::json::array());
+    if (!offers.is_array() || offers.empty()) report << "No contracts.\n";
+    else for (const auto& o:offers) {
+        const std::string offerState=o.value("state","");
+        report << o.value("job_id","") << "  " << offerState << "  " << o.value("total_tru","") << " TRU\n"
+               << "  " << o.value("job_type","");
+        const std::string tokenID = (o.contains("token_id") && o["token_id"].is_string())
+            ? o["token_id"].get<std::string>() : std::string{};
+        const std::string workerID = (o.contains("worker_id") && o["worker_id"].is_string())
+            ? o["worker_id"].get<std::string>() : std::string{};
+        const std::string resultHash = (o.contains("result_sha256") && o["result_sha256"].is_string())
+            ? o["result_sha256"].get<std::string>() : std::string{};
+        if (!tokenID.empty()) report << "  token=" << tokenID;
+        report << "\n";
+        if (!workerID.empty()) report << "  worker reserved: " << workerID << "\n";
+        if (!resultHash.empty()) report << "  result: " << resultHash << "\n";
+        if (offerState=="FUNDING_PENDING") report << "  funding submitted; NEROMESH is monitoring TRU automatically — DO NOT FUND AGAIN\n";
+        else if (offerState=="FUNDED") report << "  funding verified; assigned worker may receive the job\n";
+        else if (offerState=="WAITING_ACCEPTANCE") report << "  result ready for customer review / acceptance\n";
+        report << "\n";
+    }
+    displayResult(report.str(), rows, coutMutex, 96);
+}
+
+static void truAxonFundOffer(Wallet& wallet, int rows, std::mutex& coutMutex, std::string& sessionToken) {
+    std::lock_guard<std::mutex> fundingGuard(g_truAxonWalletHandoffFundingMutex);
+    const std::string customer = truAxonCustomerToken(rows, coutMutex, sessionToken);
+    std::string jobID = readLineTrimmed("Reserved AXON Job ID (AXN-...):", rows, coutMutex);
+    std::transform(jobID.begin(), jobID.end(), jobID.begin(), [](unsigned char c){return static_cast<char>(std::toupper(c));});
+    const auto mine = truAxonHttpJson("GET", "/api/v1/market/offers/mine", customer);
+    const auto* offer = truAxonFindOffer(mine, jobID);
+    if (!offer) throw std::runtime_error("Job is not in this customer account");
+    const std::string state=offer->value("state","");
+
+    // Idempotency boundary: once outpoints have been submitted, this action must
+    // never create a second pair of HTLCs for the same AXON job.
+    if (state=="FUNDING_PENDING") {
+        const std::string cTx=(offer->contains("compute_funding_txid") && (*offer)["compute_funding_txid"].is_string())
+            ? (*offer)["compute_funding_txid"].get<std::string>() : std::string{};
+        const std::string aTx=(offer->contains("acceptance_funding_txid") && (*offer)["acceptance_funding_txid"].is_string())
+            ? (*offer)["acceptance_funding_txid"].get<std::string>() : std::string{};
+        std::ostringstream pending;
+        pending << "=== AXON FUNDING ALREADY SUBMITTED ===\n\n"
+                << "Job   : " << jobID << "\n"
+                << "State : FUNDING_PENDING\n";
+        if(!cTx.empty()) pending << "20%   : " << cTx << ":" << offer->value("compute_funding_vout",1) << "\n";
+        if(!aTx.empty()) pending << "80%   : " << aTx << ":" << offer->value("acceptance_funding_vout",1) << "\n";
+        pending << "\nNEROMESH is monitoring propagation and active-chain confirmation automatically.\n"
+                << "DO NOT fund this AXON Job again.";
+        displayResult(pending.str(),rows,coutMutex,92);
+        return;
+    }
+    if (state=="FUNDED" || state=="READY" || state=="RUNNING" || state=="COMPUTED" ||
+        state=="WAITING_ACCEPTANCE" || state=="ACCEPTED" || state=="REJECTED" || state=="SETTLED") {
+        displayResult("AXON Job "+jobID+" is already funded or beyond the funding stage ("+state+").\nNo new HTLCs were created.",rows,coutMutex,92);
+        return;
+    }
+    if (state!="RESERVED" && state!="AWAITING_FUNDING")
+        throw std::runtime_error("Job must be RESERVED/AWAITING_FUNDING before creating HTLC funding");
+
+    const std::string refundAddress = wallet.getCurrentAddress();
+    const auto refundBytes = wallet.getPublicKeyForAddress(refundAddress);
+    if (refundBytes.size()!=33U || (refundBytes[0]!=0x02 && refundBytes[0]!=0x03))
+        throw std::runtime_error("Current wallet address does not expose a compressed secp256k1 key");
+    const std::string refundPubkey=bytesToHex(refundBytes);
+    const std::uint32_t suggestedRefundTime=static_cast<std::uint32_t>(std::time(nullptr)+48*3600);
+    const auto plan=truAxonHttpJson("POST", "/api/v1/market/offers/"+jobID+"/funding-plan", customer,
+                                    {{"refund_pubkey",refundPubkey},{"refund_time",suggestedRefundTime}});
+    const auto compute=plan.at("compute"); const auto acceptance=plan.at("acceptance");
+    const std::string frozenRefundPubkey=compute.at("refund_pubkey").get<std::string>();
+    const std::uint32_t frozenRefundTime=compute.at("refund_time").get<std::uint32_t>();
+    if (acceptance.at("refund_pubkey").get<std::string>()!=frozenRefundPubkey ||
+        acceptance.at("refund_time").get<std::uint32_t>()!=frozenRefundTime ||
+        frozenRefundPubkey!=refundPubkey)
+        throw std::runtime_error("FAIL CLOSED: NEROMESH funding intent refund key/time mismatch");
+
+    std::ostringstream review;
+    review << "=== AXON ONE-STEP FUNDING ===\n\n"
+           << "Job             : " << jobID << "\n"
+           << "Total           : " << plan.value("total_tru","") << " TRU\n"
+           << "Compute HTLC    : " << compute.value("amount_tru","") << " TRU (20%)\n"
+           << "Acceptance HTLC : " << acceptance.value("amount_tru","") << " TRU (80%)\n"
+           << "Worker claim key: " << compute.value("claim_pubkey","") << "\n"
+           << "Refund key      : " << frozenRefundPubkey << "\n"
+           << "Refund time     : " << frozenRefundTime << "\n\n"
+           << "ONE confirmation does the rest:\n"
+           << "  1) Core signs/broadcasts both existing canonical HTLCs locally.\n"
+           << "  2) Core submits the two public outpoints once.\n"
+           << "  3) NEROMESH monitors propagation + confirmations automatically.\n\n"
+           << "NEROMESH never receives your wallet private key.\n"
+           << "Type FUND to continue.";
+    displayResult(review.str(), rows, coutMutex, 93);
+    if (readLineTrimmed("Confirmation:", rows, coutMutex)!="FUND") return;
+
+    HtlcAtomicSwapCreateResult c;
+    HtlcAtomicSwapCreateResult a;
+    try {
+        c=wallet.createHtlcAtomicSwapV1(compute.at("secret_hash160").get<std::string>(),
+              compute.at("claim_pubkey").get<std::string>(),frozenRefundPubkey,frozenRefundTime,
+              compute.at("amount_atoms").get<std::uint64_t>());
+        a=wallet.createHtlcAtomicSwapV1(acceptance.at("secret_hash160").get<std::string>(),
+              acceptance.at("claim_pubkey").get<std::string>(),frozenRefundPubkey,frozenRefundTime,
+              acceptance.at("amount_atoms").get<std::uint64_t>());
+    } catch (const std::exception& e) {
+        throw std::runtime_error(std::string("Funding interrupted: ")+e.what()+
+            ". If the first HTLC broadcast succeeded, do NOT start over; use Advanced Funding Recovery with its TXID.");
+    }
+    if (c.scriptHex != compute.at("script_hex").get<std::string>() ||
+        a.scriptHex != acceptance.at("script_hex").get<std::string>())
+        throw std::runtime_error("FAIL CLOSED: wallet-created HTLC script differs from frozen NEROMESH intent");
+
+    std::ostringstream txs;
+    txs << "=== AXON FUNDING BROADCAST ===\n\n"
+        << "20% compute TXID : " << c.txid << ":" << c.contractVout << "\n"
+        << "80% accept TXID  : " << a.txid << ":" << a.contractVout << "\n\n";
+    displayResult(txs.str()+"Submitting once to NEROMESH...", rows, coutMutex, 92);
+
+    nlohmann::json recorded;
+    std::string lastError;
+    bool submitted=false;
+    for (int attempt=0; attempt<4 && !submitted; ++attempt) {
+        try {
+            recorded=truAxonHttpJson("POST", "/api/v1/market/offers/"+jobID+"/funding", customer,
+                 {{"compute_txid",c.txid},{"compute_vout",c.contractVout},
+                  {"acceptance_txid",a.txid},{"acceptance_vout",a.contractVout}});
+            submitted=true;
+        } catch (const std::exception& e) {
+            lastError=e.what();
+            if(attempt<3) std::this_thread::sleep_for(std::chrono::seconds(2*(attempt+1)));
+        }
+    }
+    if (!submitted) {
+        displayResult(
+            "=== AXON FUNDING SAFE / REGISTRATION RECOVERY NEEDED ===\n\n"+txs.str()+
+            "The HTLC transactions were already broadcast. DO NOT FUND AGAIN.\n"
+            "Core could not reach NEROMESH after automatic retries.\n"
+            "Use Advanced Funding Recovery to submit THESE SAME outpoints.\n\nLast error: "+lastError,
+            rows,coutMutex,93);
+        return;
+    }
+    const std::string recordedState=recorded.value("state","");
+    if(recordedState=="FUNDED") {
+        displayResult("Funding verified. State: FUNDED\nThe assigned worker can now receive the job.",rows,coutMutex,92);
+    } else {
+        displayResult("Funding submitted. State: "+recordedState+
+            "\nNEROMESH is now monitoring propagation and active-chain confirmation automatically.\n"
+            "You do not need to enter TXIDs again. DO NOT fund this job again.",rows,coutMutex,92);
+    }
+}
+
+static void truAxonRegisterFunding(int rows, std::mutex& coutMutex, std::string& sessionToken) {
+    const std::string customer=truAxonCustomerToken(rows,coutMutex,sessionToken);
+    std::string jobID=readLineTrimmed("AXON Job ID:",rows,coutMutex);
+    std::transform(jobID.begin(),jobID.end(),jobID.begin(),[](unsigned char c){return static_cast<char>(std::toupper(c));});
+    const std::string cTx=readLineTrimmed("20% compute funding TXID:",rows,coutMutex);
+    const std::string cV=readLineTrimmed("20% contract vout [Enter=1]:",rows,coutMutex);
+    const std::string aTx=readLineTrimmed("80% acceptance funding TXID:",rows,coutMutex);
+    const std::string aV=readLineTrimmed("80% contract vout [Enter=1]:",rows,coutMutex);
+    const int cv=cV.empty()?1:std::stoi(cV); const int av=aV.empty()?1:std::stoi(aV);
+    const auto recorded=truAxonHttpJson("POST","/api/v1/market/offers/"+jobID+"/funding",customer,
+         {{"compute_txid",cTx},{"compute_vout",cv},{"acceptance_txid",aTx},{"acceptance_vout",av}});
+    displayResult("Funding registered. State: "+recorded.value("state","")+"\nThe assigned worker will receive the job after both outpoints are confirmed.",rows,coutMutex,92);
+}
+
+static void menuAxonMarketplace(Wallet& wallet, int rows, std::mutex& coutMutex) {
+    static std::string sessionCustomerToken;
+    while (g_running) {
+        displayResult(
+            "=== AXON COMPUTE MARKETPLACE ===\n"
+            "NEROMESH coordinates funded work; TRU provides non-custodial settlement.\n\n"
+            "1. Create Work Contract\n"
+            "2. Browse Open Marketplace\n"
+            "3. My Submitted Contracts\n"
+            "4. Fund Reserved Contract — ONE STEP\n"
+            "5. Enter / Replace Customer Access Token\n"
+            "6. Fund Wallet Handoff (tru:// AXI)\n"
+            "9. Advanced Funding Recovery (existing TXIDs only)\n"
+            "0. Back\n\n"
+            "Minimum reward: 0.01000000 TRU. Worker must explicitly accept an offer.\n"
+            "Normal funding never requires copying TXIDs back into NEROMESH.",
+            rows, coutMutex, 96);
+        const std::string action=readLineTrimmed("Select [0/1/2/3/4/5/6/9]:",rows,coutMutex);
+        if(action=="0"||action=="q"||action=="back") return;
+        try {
+            if(action=="1") truAxonCreateOffer(wallet,rows,coutMutex,sessionCustomerToken);
+            else if(action=="2") truAxonShowOpenMarketplace(rows,coutMutex);
+            else if(action=="3") truAxonShowMine(rows,coutMutex,sessionCustomerToken);
+            else if(action=="4") truAxonFundOffer(wallet,rows,coutMutex,sessionCustomerToken);
+            else if(action=="5") { std::fill(sessionCustomerToken.begin(), sessionCustomerToken.end(), '\0'); sessionCustomerToken.clear(); (void)truAxonCustomerToken(rows,coutMutex,sessionCustomerToken); displayResult("Customer token loaded for this Core session only.",rows,coutMutex,92); }
+            else if(action=="6") truAxonFundWalletHandoff(wallet,rows,coutMutex);
+            else if(action=="9") truAxonRegisterFunding(rows,coutMutex,sessionCustomerToken);
+            else displayResult("Invalid AXON Marketplace option.",rows,coutMutex,91);
+        } catch(const std::exception& e) {
+            displayResult(std::string("AXON Marketplace: ")+e.what(),rows,coutMutex,91);
+        }
+        (void)readLineTrimmed("Press Enter to continue:",rows,coutMutex);
+    }
+}
+
+static bool truAxonBuildEvolutionPreview(
+    Wallet& wallet, int rows, std::mutex& coutMutex,
+    TruEvolutionWalletToken& selectedOut, TokenEvolutionResult& resultOut, std::string& triggerOut)
+{
+    const auto owned=truEvolutionUiOwnedTokens(wallet);
+    if(owned.empty()) throw std::runtime_error("No confirmed SFT/NCFT evolution authority in this wallet");
+    std::ostringstream choices; choices << "=== NEROMESH EVOLUTION PROPOSAL INBOX ===\n";
+    for(size_t i=0;i<owned.size();++i) choices << (i+1U) << ". " << owned[i].name << " [" << owned[i].tokenType << "] " << owned[i].tokenID << "\n";
+    choices << "0. Cancel"; displayResult(choices.str(),rows,coutMutex,96);
+    const std::string n=readLineTrimmed("Token number:",rows,coutMutex); if(n=="0"||n.empty()) return false;
+    size_t idx=0; try{auto v=std::stoul(n);if(v==0||v>owned.size())throw std::out_of_range("token");idx=v-1;}catch(...){throw std::runtime_error("Invalid token selection");}
+    const auto selected=owned[idx];
+
+    Blockchain& chain=const_cast<Blockchain&>(wallet.getBlockchain());
+    LevelDBStorage* storage=chain.getStorage(); if(!storage) throw std::runtime_error("Blockchain storage unavailable");
+    ContractStorage cs(storage); TokenEvolutionEngine engine(&cs);
+    const std::string localAuthority=engine.issuerContext(selected.tokenID).at("owner").get<std::string>();
+    const auto response=truAxonHttpJson("GET","/api/v1/market/proposals?token_id="+selected.tokenID);
+    const auto proposals=response.value("proposals",nlohmann::json::array());
+    std::vector<nlohmann::json> eligible;
+    if(proposals.is_array()) for(const auto& p:proposals) {
+        if(p.value("token_type","")==selected.tokenType && p.value("target_authority","")==localAuthority)
+            eligible.push_back(p);
+    }
+    if(eligible.empty()) { displayResult("No pending AXON evolution proposals addressed to this token authority.",rows,coutMutex,96); return false; }
+    std::ostringstream list; list << "=== PROPOSALS ADDRESSED TO THIS AUTHORITY ===\n\n";
+    for(size_t i=0;i<eligible.size();++i) list << (i+1U) << ". " << eligible[i].value("job_id","") << "  reward atoms=" << eligible[i].value("total_atoms",0ULL) << "\n   " << eligible[i].value("milestone","") << "\n\n";
+    list << "0. Cancel"; displayResult(list.str(),rows,coutMutex,96);
+    const std::string pn=readLineTrimmed("Proposal number:",rows,coutMutex); if(pn=="0"||pn.empty()) return false;
+    size_t pi=0;try{auto v=std::stoul(pn);if(v==0||v>eligible.size())throw std::out_of_range("proposal");pi=v-1;}catch(...){throw std::runtime_error("Invalid proposal selection");}
+    const auto p=eligible[pi];
+    if(!p.contains("result")||!p["result"].is_object()||!p["result"].contains("text")||!p["result"]["text"].is_string())
+        throw std::runtime_error("NEROMESH proposal has no structured worker result");
+    nlohmann::json draft;
+    try{draft=nlohmann::json::parse(p["result"]["text"].get<std::string>());}catch(...){throw std::runtime_error("Worker result is not valid evolution JSON");}
+    if(draft.value("schema","")!="NEROMESH_TRU_EVOLVE_DRAFT_V1"||!draft.contains("updates")||!draft["updates"].is_object())
+        throw std::runtime_error("Worker result does not match NEROMESH_TRU_EVOLVE_DRAFT_V1");
+    nlohmann::json provenance={
+        {"schema","TRU_NEROMESH_MARKET_PROVENANCE_V1"},
+        {"market_job_id",p.value("job_id","")},
+        {"result_sha256",p.value("result_sha256","")},
+        {"worker_id",p.value("worker_id","")},
+        {"worker_label",p.value("worker_label","")},
+        {"target_authority",p.value("target_authority","")},
+        {"model_id",p.value("model_id","")},
+        {"total_atoms",p.value("total_atoms",0ULL)},
+        {"compute_atoms",p.value("compute_atoms",0ULL)},
+        {"acceptance_atoms",p.value("acceptance_atoms",0ULL)},
+        {"compute_funding_txid",p.value("compute_funding_txid","")},
+        {"acceptance_funding_txid",p.value("acceptance_funding_txid","")},
+        {"artwork_prompt",draft.value("artwork_prompt","")}
+    };
+    const std::string trigger="neromesh_market:"+p.value("job_id","");
+    auto generated=engine.evolveExternalPreview(selected.tokenID,selected.tokenType,selected.issuanceMetadata,draft["updates"],trigger,provenance);
+    if(!generated.ok) throw std::runtime_error("Core refused NEROMESH proposal: "+generated.error);
+    selectedOut=selected; resultOut=std::move(generated); triggerOut=trigger;
+    truEvolutionUiShowPreviewPaged(resultOut.record, selectedOut, "neromesh", triggerOut, rows, coutMutex);
+    displayResult("NEROMESH supplied a proposal only. Review it, then use existing option 2 COMMIT EXACT PREVIEW if you choose to evolve this token.\nThe 80% worker leg is not released until the matching evolution is confirmed on TRU.",rows,coutMutex,93);
+    return true;
+}
+
+
 static void menuTokenEvolution(Wallet& wallet, int rows, std::mutex& coutMutex) {
     struct PreviewState {
         bool valid{false};
@@ -2759,18 +3529,39 @@ static void menuTokenEvolution(Wallet& wallet, int rows, std::mutex& coutMutex) 
         menu << "\n3. View Token History\n"
              << "4. Preview Extended AI / Artwork (SFT or NCFT)\n"
              << "5. Explore Evolution Use Cases (manual templates)\n"
+             << "6. NEROMESH / AXON Proposal Inbox\n"
              << "0. Back\n\n"
              << "Preview makes an AI call but writes no TOKEN_EVOLUTION state.\n"
              << "Commit persists the exact preview; it never makes a second AI call.\n"
              << "History is token-centric and does not require current wallet ownership.";
 
         displayResult(menu.str(), rows, coutMutex, 96);
-        const std::string action = readLineTrimmed("Select [0/1/2/3/4/5]:", rows, coutMutex);
+        const std::string action = readLineTrimmed("Select [0/1/2/3/4/5/6]:", rows, coutMutex);
 
         if (action == "0" || action == "back" || action == "q") return;
 
         if (action == "3") {
             truEvolutionUiShowTokenHistory(wallet, rows, coutMutex);
+            continue;
+        }
+
+        if (action == "6") {
+            try {
+                TruEvolutionWalletToken selected;
+                TokenEvolutionResult generated;
+                std::string trigger;
+                if (truAxonBuildEvolutionPreview(wallet, rows, coutMutex, selected, generated, trigger)) {
+                    preview.valid = true;
+                    preview.token = std::move(selected);
+                    preview.result = std::move(generated);
+                    preview.provider = "neromesh";
+                    preview.trigger = std::move(trigger);
+                }
+            } catch (const std::exception& e) {
+                preview.valid = false;
+                displayResult(std::string("NEROMESH proposal refused: ") + e.what(), rows, coutMutex, 91);
+            }
+            (void)readLineTrimmed("Press Enter to continue:", rows, coutMutex);
             continue;
         }
 
@@ -3272,10 +4063,11 @@ static void menuTokenAiTools(Wallet& wallet, int rows, std::mutex& coutMutex) {
             << TRU_TOKEN_EVOLUTION_UI_DISCLAIMER << "\n\n"
             << "1. Create AI Token (SFT / NCFT)\n"
             << "2. AI Evolution\n"
+            << "3. AXON Compute Marketplace\n"
             << "0. Back";
         displayResult(menu.str(), rows, coutMutex, 96);
 
-        const std::string action = readLineTrimmed("Select [0/1/2]:", rows, coutMutex);
+        const std::string action = readLineTrimmed("Select [0/1/2/3]:", rows, coutMutex);
         if (action == "0" || action == "back" || action == "q") return;
         if (action == "1") {
             menuIssueAI_Tokens(wallet, coutMutex);
@@ -3283,6 +4075,10 @@ static void menuTokenAiTools(Wallet& wallet, int rows, std::mutex& coutMutex) {
         }
         if (action == "2") {
             menuTokenEvolution(wallet, rows, coutMutex);
+            continue;
+        }
+        if (action == "3") {
+            menuAxonMarketplace(wallet, rows, coutMutex);
             continue;
         }
 
@@ -4995,7 +5791,7 @@ void displayMenu(int rows, std::mutex &coutMutex)
         "╠════════════════════════ WALLET // IDENTITY & VALUE ════════════════════════╣",
         "║                                                                            ║",
         "║  1 Create      2 Load      3 Save      4 New Address      5 Private Keys   ║",
-        "║  6 Send TRU    7 Balance   8 My Addresses      9 Pubkeyhash                ║",
+        "║  6 Send TRU    7 Balance   8 Select Address    9 Pubkeyhash                ║",
         "╠════════════════════════════════════════════════════════════════════════════╣",
         "╠════════════════════════ TOKENS // ASSETS & SCRIPTS ════════════════════════╣",
         "║                                                                            ║",
@@ -5812,8 +6608,8 @@ void startCLI(Blockchain &chain, P2PNode &node, Wallet &wallet,
             try {
                 double balConfirmed = wallet.check_balance(false);
                 double balAll = wallet.check_balance(true);
-                displayOutput(fmt::format("[CLI] Confirmed balance: {:.8f} TRU", balConfirmed), rows, coutMutex);
-                displayOutput(fmt::format("[CLI] With unconfirmed: {:.8f} TRU", balAll), rows, coutMutex);
+                displayOutput(fmt::format("[CLI] Wallet total confirmed balance: {:.8f} TRU", balConfirmed), rows, coutMutex);
+                displayOutput(fmt::format("[CLI] Wallet total with unconfirmed: {:.8f} TRU", balAll), rows, coutMutex);
             } catch (const std::exception& e) {
                 displayOutput("[CLI] Failed to check balance: " + std::string(e.what()), rows, coutMutex);
             }
@@ -6819,43 +7615,72 @@ void startCLI(Blockchain &chain, P2PNode &node, Wallet &wallet,
             menuTokenAiTools(wallet, rows, coutMutex);
         }
         else if (choice == "14") {
-            // Show current address + QR, then list the other addresses below
+            // CLI-ADDRESS-SELECT-01: public menu 8, local authenticated selection.
             try {
-                auto allAddrs = wallet.getAllAddresses();
+                TruCliInputPaintGuard addressScreen;
+                const auto allAddrs = wallet.getAllAddresses();
                 if (allAddrs.empty()) {
                     displayOutput("[CLI] No addresses in wallet!", rows, coutMutex);
-                } else {
-                    size_t currentIdx = wallet.getCurrentIndex();
-                    std::string currentAddr = allAddrs[currentIdx];
-
-                    // Clear screen for a focused view
-                    std::cout << "\033[2J\033[H";
-
-                    // Header and current address in green
-                    std::cout << colorText("Current Address:\n", 95, true);
-                    std::cout << colorText(currentAddr, 32, true) << "\n\n";
-
-                    // QR code for current address
-                    printQRCode(currentAddr);
-
-                    // List the other addresses beneath
-                    std::cout << "\nOther Addresses (" << allAddrs.size() - 1 << "):\n";
-                    for (size_t i = 0; i < allAddrs.size(); ++i) {
-                        if (i == currentIdx) continue;
-                        std::cout << "  [" << i << "] " << allAddrs[i] << "\n";
-                    }
-
-                    // Wait for Enter to return
-                    std::cout << "\nPress Enter to return to menu...";
-                    signalAwareIgnoreLine();
-
-                    // Clear screen again before redrawing menu
-                    std::cout << "\033[2J\033[H";
+                    continue;
                 }
+                constexpr size_t pageSize = 12;
+                const size_t pages = (allAddrs.size() + pageSize - 1) / pageSize;
+                size_t page = 0;
+                std::string notice;
+                for (;;) {
+                    const std::string current = wallet.getCurrentAddress();
+                    std::cout << "\033[2J\033[H"
+                              << "MY ADDRESSES / SELECT SENDER — page "
+                              << page + 1 << "/" << pages << "\n"
+                              << "Current sender: " << current << "\n"
+                              << "Confirmed native TRU per address; send checks fees and spendability again.\n\n";
+                    const size_t end = std::min(allAddrs.size(), (page + 1) * pageSize);
+                    for (size_t i = page * pageSize; i < end; ++i) {
+                        std::string balance;
+                        try { balance = formatTRUAmountExact(chain.calculate_balance(allAddrs[i])); }
+                        catch (const std::exception&) { balance = "unavailable"; }
+                        std::cout << "[" << i << "] " << allAddrs[i]
+                                  << "  " << balance << " TRU"
+                                  << (allAddrs[i] == current ? "  < CURRENT" : "") << "\n";
+                    }
+                    if (!notice.empty()) std::cout << "\n" << notice << "\n";
+                    std::cout << "\nNumber or full wallet address = select; N/P = page; QR = current QR; Q/Enter = back.\n"
+                              << "Selection changes the sender; it sends no coins.\n> " << std::flush;
+                    std::string input;
+                    if (!signalAwareGetline(input)) break;
+                    input = trim(input);
+                    if (input.empty() || input == "q" || input == "Q" || input == "back") break;
+                    if (input == "n" || input == "N") { if (page + 1 < pages) ++page; continue; }
+                    if (input == "p" || input == "P") { if (page > 0) --page; continue; }
+                    if (input == "qr" || input == "QR") {
+                        std::cout << "\n" << current << "\n";
+                        printQRCode(current);
+                        std::cout << "Press Enter to return to addresses..." << std::flush;
+                        std::string ignored;
+                        if (!signalAwareGetline(ignored)) break;
+                        continue;
+                    }
+                    try {
+                        const size_t index = tru_cli_address_selection_v1::resolve(input, allAddrs);
+                        const auto& selected = allAddrs[index];
+                        std::cout << "\nSelect sender: " << selected << "\n";
+                        const bool changed = tru_cli_address_selection_v1::select(
+                            wallet, selected,
+                            WalletSecurityModeV1::LEGACY_PLAINTEXT,
+                            WalletSecurityModeV1::ENCRYPTED_UNLOCKED,
+                            [](std::string& secret) { return static_cast<bool>(signalAwareGetline(secret)); },
+                            std::cout);
+                        notice = changed ? "[CLI] Selected sender: " + wallet.getCurrentAddress()
+                                         : "[CLI] Selection cancelled.";
+                        page = index / pageSize;
+                    } catch (const std::exception& e) {
+                        notice = std::string("[CLI] Address selection failed: ") + e.what();
+                    }
+                }
+                displayOutput("[CLI] Current sender: " + wallet.getCurrentAddress(), rows, coutMutex);
             } catch (const std::exception& e) {
-                Logger::log("[CLI] Failed to list addresses: " + std::string(e.what()));
-                displayOutput("[CLI] Failed to list addresses: " + std::string(e.what()), rows, coutMutex);
-            } 
+                displayOutput(std::string("[CLI] Address screen failed: ") + e.what(), rows, coutMutex);
+            }
         }
         else if (choice == "15") {
             // Send token
@@ -6918,16 +7743,12 @@ void startCLI(Blockchain &chain, P2PNode &node, Wallet &wallet,
         
             try {
                 Logger::log("[CLI] Sending token: tokenID=" + tokenID + ", quantity=" + std::to_string(quantity) + 
-                            ", recipient=" + recipient + ", sender=" + senderAddress);
-        
-                // Find token UTXO to ensure the sender owns the token
-                auto [utxoTxid,controllingVout, vout] = wallet.findTokenUTXO(tokenID, senderAddress);
-                if (utxoTxid.empty()) {
-                    displayOutput("[CLI] Error: No UTXO found for tokenID=" + tokenID, rows, coutMutex);
-                    continue;
-                }
-        
-                // Send the token and get the transfer transaction ID
+                            ", recipient=" + recipient + ", preferredSender=" + senderAddress);
+
+                // TOKEN-SEND-WALLET-OWNER-01: sendToken() resolves the actual
+                // confirmed token owner across every address controlled by this
+                // wallet.  Do not reject here merely because currentIndex points
+                // at a different receive address.
                 std::string txid = wallet.sendToken(tokenID, quantity, recipient, senderAddress);
                 Logger::log("[CLI] Token transfer transaction created: txid=" + txid);
         

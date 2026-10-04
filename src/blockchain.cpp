@@ -1,4 +1,6 @@
+#include "token_continuation_metadata_v1.h"
 #include "blockchain.h"
+#include "tru_data_provider_v1.h"
 #include "tru_submission_slot.h"
 #include "tru_limits.h"  // shared block/network size limits
 #include "block.h"
@@ -50,6 +52,7 @@
 #include <algorithm>
 #include <numeric>
 #include <map>
+#include <cmath>  // CADENCE-HASHRATE-TELEMETRY-01: finite/absolute telemetry math
 #include "crypto_ecdsa.h"
 #include <optional>
 #include <memory>
@@ -112,6 +115,47 @@ static constexpr const char* UNDO_PRUNE_RULES_VERSION = "P08B4D3-U1B";
 // candidate validation at a retarget boundary.
 static constexpr int DIFFICULTY_RETARGET_INTERVAL = 60;
 static constexpr uint64_t DIFFICULTY_TARGET_SPACING = 60;
+
+// CADENCE-HASHRATE-TELEMETRY-01:
+// Non-consensus explorer/mining telemetry only. Never use these values to
+// accept/reject a block or to calculate consensus difficulty.
+static constexpr int64_t TELEMETRY_CLOCK_SKEW_WARN_SECONDS = 120;
+static constexpr int64_t TELEMETRY_LIVE_HEADER_WINDOW_SECONDS = 7200;
+static constexpr size_t TELEMETRY_MAX_BLOCK_OBSERVATIONS = 4096;
+
+static uint64_t telemetryUnixNowSeconds() {
+    const auto now = std::chrono::system_clock::now().time_since_epoch();
+    const auto seconds =
+        std::chrono::duration_cast<std::chrono::seconds>(now).count();
+    return seconds > 0 ? static_cast<uint64_t>(seconds) : 0ULL;
+}
+
+static int64_t telemetrySignedSeconds(uint64_t newer, uint64_t older) {
+    if (newer >= older) {
+        const uint64_t delta = newer - older;
+        if (delta > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+            return std::numeric_limits<int64_t>::max();
+        }
+        return static_cast<int64_t>(delta);
+    }
+    const uint64_t delta = older - newer;
+    if (delta > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+        return std::numeric_limits<int64_t>::min();
+    }
+    return -static_cast<int64_t>(delta);
+}
+
+static bool telemetryHeaderNearObservation(
+    uint32_t headerTime,
+    uint64_t observedAt) {
+
+    if (observedAt == 0) return false;
+    const int64_t skew =
+        telemetrySignedSeconds(static_cast<uint64_t>(headerTime), observedAt);
+    return skew >= -TELEMETRY_LIVE_HEADER_WINDOW_SECONDS &&
+           skew <= TELEMETRY_LIVE_HEADER_WINDOW_SECONDS;
+}
+
 static constexpr int CANDIDATE_VALIDATION_ANCESTRY_MARGIN = 8;
 static constexpr int CANDIDATE_VALIDATION_ANCESTRY_LOOKBACK =
     DIFFICULTY_RETARGET_INTERVAL + CANDIDATE_VALIDATION_ANCESTRY_MARGIN;
@@ -4156,134 +4200,123 @@ uint64_t Blockchain::getTotalIssuedTrus() const {
 }
 
 //================================================================================
+//        CADENCE-HASHRATE-TELEMETRY-01: FIRST-SEEN BLOCK OBSERVATION
+//================================================================================
+void Blockchain::recordBlockObservationNonConsensus(
+    const std::string& blockHash,
+    uint64_t observedAt) {
+
+    if (blockHash.empty() || observedAt == 0) return;
+
+    std::unique_lock<std::shared_mutex> statsWrite(derivedStatsMutex_);
+    if (blockObservedAt_.find(blockHash) != blockObservedAt_.end()) {
+        return;
+    }
+
+    blockObservedAt_.emplace(blockHash, observedAt);
+    blockObservationOrder_.push_back(blockHash);
+
+    while (blockObservationOrder_.size() >
+           TELEMETRY_MAX_BLOCK_OBSERVATIONS) {
+        const std::string oldest =
+            std::move(blockObservationOrder_.front());
+        blockObservationOrder_.pop_front();
+        blockObservedAt_.erase(oldest);
+    }
+}
+
+//================================================================================
 //                      GET NETWORK HASH RATE
 //================================================================================
 double Blockchain::getNetworkHashrate(int numBlocks) const {
-    std::shared_lock<std::shared_mutex> lock(mtx);
-    
-    int currentHeight = bestTipHeight.load();
-    
-    if (currentHeight < 2) {
-        Logger::log("[getNetworkHashrate] Insufficient blocks (height=" + std::to_string(currentHeight) + ")");
-        return 0.0;
-    }
-
-    // Calculate reported hash rate from active miners with longer timeout
+    // CADENCE-HASHRATE-TELEMETRY-01:
+    // Keep miner-report and active-chain snapshots short and independent.
+    // The old implementation held mtx and recursively called getBlockByHeight(),
+    // then treated compact `bits` as a scalar difficulty. Both behaviors were
+    // telemetry bugs; neither is consensus code.
+    int currentHeight = 0;
     double reportedHashrate = 0.0;
-    auto now = std::chrono::steady_clock::now();
-    
-    Logger::log("[getNetworkHashrate] Checking " + std::to_string(minerHashRates.size()) + " registered miners");
-    
-    for (const auto& [address, rate] : minerHashRates) {
-        auto it = minerLastActivity.find(address);
-        if (it != minerLastActivity.end()) {
-            auto timeSinceActivity = now - it->second;
-            // Increased timeout from 1 to 3 minutes for more stable reporting
-            if (timeSinceActivity < std::chrono::minutes(2)) {
-                reportedHashrate += rate;
-                Logger::log("[getNetworkHashrate] Active miner " + address + 
-                           ": " + std::to_string(rate) + " H/s");
-            } else {
-                Logger::log("[getNetworkHashrate] Inactive miner " + address + 
-                           " (last activity: " + 
-                           std::to_string(std::chrono::duration_cast<std::chrono::seconds>(timeSinceActivity).count()) + "s ago)");
-            }
-        }
-    }
-    
-    // Calculate theoretical hashrate from blockchain data
-    int N = std::min(std::max(numBlocks, 2), std::min(currentHeight, 144));
-    std::vector<Block> recentBlocks;
-    
-    for (int i = currentHeight - N + 1; i <= currentHeight; ++i) {
-        auto optionalBlk = getBlockByHeight(i);
-        if (!optionalBlk.has_value()) {
-            continue;
-        }
-        recentBlocks.push_back(optionalBlk.value());
-    }
+    const auto now = std::chrono::steady_clock::now();
 
-    double blockchainHashrate = 0.0;
-
-    if (recentBlocks.size() >= 2)
     {
-        uint32_t startTime = recentBlocks.front().header.timestamp;
-        uint32_t endTime = recentBlocks.back().header.timestamp;
+        std::shared_lock<std::shared_mutex> chainRead(mtx);
+        currentHeight = bestTipHeight.load();
 
-        if (endTime > startTime)
-        {
-            double totalTime = static_cast<double>(endTime - startTime);
-            int totalBlocks = recentBlocks.size() - 1;
+        Logger::log(
+            "[getNetworkHashrate] Checking " +
+            std::to_string(minerHashRates.size()) +
+            " registered miners");
 
-            if (totalTime > 0 && totalBlocks > 0)
-            {
-                double avgBlockTime = totalTime / totalBlocks;
+        for (const auto& [address, rate] : minerHashRates) {
+            auto it = minerLastActivity.find(address);
+            if (it == minerLastActivity.end()) continue;
 
-                // More accurate hashrate calculation
-                // Instead of using raw difficulty, calculate based on expected hashes
-                // For SHA-256, expected hashes = 2^256 / target
-                uint32_t bits = recentBlocks.back().header.bits;
-
-                // Convert bits to actual target value more accurately
-                int shift = (bits >> 24) & 0xff;
-                uint32_t mantissa = bits & 0x00ffffff;
-
-                // Calculate approximate hashrate based on target
-                // This gives a more realistic estimate
-                if (shift > 0 && mantissa > 0)
-                {
-                    // Simplified calculation that gives more reasonable results
-                    double targetDifficulty = (0x1d00ffff / static_cast<double>(bits)) * 1000000;
-                    blockchainHashrate = targetDifficulty / avgBlockTime;
+            const auto timeSinceActivity = now - it->second;
+            if (timeSinceActivity < std::chrono::minutes(2)) {
+                if (std::isfinite(rate) && rate > 0.0) {
+                    reportedHashrate += rate;
                 }
+                Logger::log(
+                    "[getNetworkHashrate] Active miner " + address +
+                    ": " + std::to_string(rate) + " H/s");
+            } else {
+                Logger::log(
+                    "[getNetworkHashrate] Inactive miner " + address +
+                    " (last activity: " +
+                    std::to_string(
+                        std::chrono::duration_cast<std::chrono::seconds>(
+                            timeSinceActivity).count()) +
+                    "s ago)");
             }
         }
     }
 
-    // Improved priority logic
+    if (currentHeight < 2) {
+        Logger::log(
+            "[getNetworkHashrate] Insufficient blocks (height=" +
+            std::to_string(currentHeight) + ")");
+        return reportedHashrate;
+    }
+
+    const int requested =
+        std::min(std::max(numBlocks, 2), std::min(currentHeight, 144));
+    const int startHeight = std::max(1, currentHeight - requested + 1);
+
+    const double blockchainHashrate =
+        calculateHashrateForRange(startHeight, currentHeight);
+
+    // The active-chain work/time estimate represents all producers, including
+    // miners that do not publish local telemetry. Reported hash rate is retained
+    // as a diagnostic/fallback; it is no longer blended into the network total.
     double finalHashrate = 0.0;
-    
-    if (reportedHashrate > 0) {
-        // Use reported hashrate as primary source
-        finalHashrate = reportedHashrate;
-        
-        Logger::log("[getNetworkHashrate] Using reported hashrate: " + std::to_string(reportedHashrate) + " H/s");
-        
-        // Only blend with blockchain calculation if wildly different AND blockchain rate is reasonable
-        if (blockchainHashrate > 0) {
-            double ratio = reportedHashrate / blockchainHashrate;
-            
-            // More reasonable ratio checking (factor of 5 instead of 10)
-            if (ratio > 5.0 || ratio < 0.2) {
-                Logger::log("[getNetworkHashrate] Large discrepancy detected - ratio: " + std::to_string(ratio));
-                
-                // Weight reported hashrate more heavily since it's real-time
-                finalHashrate = (reportedHashrate * 0.8) + (blockchainHashrate * 0.2);
-                
-                Logger::log("[getNetworkHashrate] Using weighted average: " + std::to_string(finalHashrate) + " H/s");
-            }
-        }
-    } else if (blockchainHashrate > 0) {
-        // No active miners reporting, fall back to blockchain calculation
+    std::string source = "none";
+
+    if (std::isfinite(blockchainHashrate) && blockchainHashrate > 0.0) {
         finalHashrate = blockchainHashrate;
-        Logger::log("[getNetworkHashrate] No active miners, using blockchain hashrate: " + std::to_string(blockchainHashrate) + " H/s");
-    } else {
-        // No data available
-        finalHashrate = 0.0;
-        Logger::log("[getNetworkHashrate] No hashrate data available");
+        source = "chain-work";
+    } else if (std::isfinite(reportedHashrate) && reportedHashrate > 0.0) {
+        finalHashrate = reportedHashrate;
+        source = "reported-fallback";
     }
-    
-    // Add minimum threshold to avoid tiny values
-    if (finalHashrate < 100.0) { // 1 MH/s minimum
-        Logger::log("[getNetworkHashrate] Hashrate below minimum threshold, using blockchain calculation");
-        finalHashrate = std::max(blockchainHashrate, 100.0);
+
+    if (blockchainHashrate > 0.0 && reportedHashrate > 0.0) {
+        const double ratio = reportedHashrate / blockchainHashrate;
+        Logger::log(
+            "[getNetworkHashrate] Diagnostic reported/chain ratio=" +
+            std::to_string(ratio) +
+            " (reported telemetry is not blended into network estimate)");
     }
-    
-    Logger::log("[getNetworkHashrate] FINAL RESULT - Total: " + std::to_string(finalHashrate) + 
-               " H/s, Reported: " + std::to_string(reportedHashrate) + 
-               " H/s, Blockchain: " + std::to_string(blockchainHashrate) + " H/s");
-    
-    return std::max(0.0, finalHashrate);
+
+    Logger::log(
+        "[getNetworkHashrate] FINAL RESULT - Total: " +
+        std::to_string(finalHashrate) +
+        " H/s, Reported: " + std::to_string(reportedHashrate) +
+        " H/s, Blockchain: " + std::to_string(blockchainHashrate) +
+        " H/s, Source: " + source);
+
+    return std::isfinite(finalHashrate) && finalHashrate > 0.0
+        ? finalHashrate
+        : 0.0;
 }
 //================================================================================
 //
@@ -5795,27 +5828,148 @@ std::vector<unsigned char> Blockchain::buildHeaderBytes(const BlockHeader &hdr) 
 //================================================================================
 
 double Blockchain::calculateHashrateForRange(int startHeight, int endHeight) const {
-    if (endHeight - startHeight < 1) return 0.0;
-    
-    auto startBlock = getBlockByHeight(startHeight);
-    auto endBlock = getBlockByHeight(endHeight);
-    
-    if (!startBlock || !endBlock) return 0.0;
-    
-    double timeDiff = static_cast<double>(endBlock->header.timestamp - startBlock->header.timestamp);
-    if (timeDiff <= 0) return 0.0;
-    
-    int numBlocks = endHeight - startHeight;
-    double avgBlockTime = timeDiff / numBlocks;
-    
-    uint32_t bits = endBlock->header.bits; // Use latest difficulty
-    uint64_t target = bitsToTarget(bits);
-    if (target == 0) return 0.0;
-    
-    double difficulty = static_cast<double>(MAX_TARGET_64BIT) / static_cast<double>(target);
-    double hashrate = (difficulty * 4294967296.0) / avgBlockTime;
-    
-    return hashrate;
+    // CADENCE-HASHRATE-TELEMETRY-01B:
+    // Hash rate = exact expected chain work / elapsed seconds.
+    //
+    // IMPORTANT: do not require the oldest/newest block in the requested
+    // window to have process-local observation timestamps. Immediately after a
+    // restart that caused the 01 implementation to fall back to miner header
+    // timestamps even when several consecutive blocks had already been
+    // observed locally. A fast/slow miner clock could therefore distort the
+    // estimate until the full 10-block window had rolled over.
+    //
+    // 01B instead sums exact work only across consecutive block transitions
+    // for which BOTH blocks have trustworthy local first-seen timestamps. Once
+    // two or more observed intervals exist, header clocks are completely out of
+    // the network-hashrate estimate. Header-median remains a restart-only
+    // fallback when there is not yet enough live observation data.
+    if (startHeight < 1 || endHeight <= startHeight) return 0.0;
+
+    std::vector<Block> blocks;
+    {
+        std::shared_lock<std::shared_mutex> chainRead(mtx);
+        const int tip = bestTipHeight.load();
+        if (endHeight > tip) endHeight = tip;
+        if (endHeight <= startHeight) return 0.0;
+
+        blocks.reserve(static_cast<size_t>(endHeight - startHeight + 1));
+        for (int height = startHeight; height <= endHeight; ++height) {
+            const size_t idx = static_cast<size_t>(height - 1);
+            if (idx >= chain.size()) return 0.0;
+            if (static_cast<int>(chain[idx].height) != height) return 0.0;
+            blocks.push_back(chain[idx]);
+        }
+    }
+
+    if (blocks.size() < 2) return 0.0;
+
+    std::unordered_map<std::string, uint64_t> observed;
+    {
+        std::shared_lock<std::shared_mutex> statsRead(derivedStatsMutex_);
+        for (const auto& block : blocks) {
+            auto it = blockObservedAt_.find(block.blockHash);
+            if (it != blockObservedAt_.end()) {
+                observed.emplace(block.blockHash, it->second);
+            }
+        }
+    }
+
+    long double observedElapsed = 0.0L;
+    long double observedWork = 0.0L;
+    size_t observedIntervals = 0;
+
+    try {
+        for (size_t i = 1; i < blocks.size(); ++i) {
+            auto prevIt = observed.find(blocks[i - 1].blockHash);
+            auto curIt = observed.find(blocks[i].blockHash);
+            if (prevIt == observed.end() || curIt == observed.end()) continue;
+            if (curIt->second <= prevIt->second) continue;
+            if (!telemetryHeaderNearObservation(
+                    blocks[i - 1].header.timestamp, prevIt->second) ||
+                !telemetryHeaderNearObservation(
+                    blocks[i].header.timestamp, curIt->second)) {
+                continue;
+            }
+
+            observedElapsed += static_cast<long double>(
+                curIt->second - prevIt->second);
+            observedWork +=
+                computeBlockWork256(blocks[i].header.bits)
+                    .convert_to<long double>();
+            ++observedIntervals;
+        }
+    } catch (const std::exception& e) {
+        Logger::log(
+            std::string("[calculateHashrateForRange] invalid observed target/work: ") +
+            e.what());
+        return 0.0;
+    }
+
+    // Two intervals is the minimum used by the public stats route. It lets a
+    // restarted explorer become truthful quickly without presenting a single
+    // lucky/slow block as a stable network-rate estimate.
+    if (observedIntervals >= 2 &&
+        observedElapsed > 0.0L &&
+        std::isfinite(static_cast<double>(observedElapsed)) &&
+        observedWork > 0.0L) {
+
+        const long double rate = observedWork / observedElapsed;
+        const double result = static_cast<double>(rate);
+        if (std::isfinite(result) && result > 0.0) {
+            return result;
+        }
+    }
+
+    // Restart-only fallback. Use signed positive header intervals and a robust
+    // median so negative/outlier header deltas cannot wrap or dominate. This is
+    // explicitly telemetry only; consensus difficulty and timestamp rules are
+    // untouched.
+    std::vector<int64_t> positiveHeaderDeltas;
+    positiveHeaderDeltas.reserve(blocks.size() - 1);
+
+    for (size_t i = 1; i < blocks.size(); ++i) {
+        const int64_t delta =
+            static_cast<int64_t>(blocks[i].header.timestamp) -
+            static_cast<int64_t>(blocks[i - 1].header.timestamp);
+        if (delta > 0) positiveHeaderDeltas.push_back(delta);
+    }
+
+    if (positiveHeaderDeltas.empty()) return 0.0;
+
+    std::sort(positiveHeaderDeltas.begin(), positiveHeaderDeltas.end());
+    long double medianDelta = 0.0L;
+    const size_t mid = positiveHeaderDeltas.size() / 2;
+    if ((positiveHeaderDeltas.size() & 1U) != 0U) {
+        medianDelta = static_cast<long double>(positiveHeaderDeltas[mid]);
+    } else {
+        medianDelta =
+            (static_cast<long double>(positiveHeaderDeltas[mid - 1]) +
+             static_cast<long double>(positiveHeaderDeltas[mid])) /
+            2.0L;
+    }
+    if (medianDelta <= 0.0L) return 0.0;
+
+    long double totalWork = 0.0L;
+    try {
+        for (size_t i = 1; i < blocks.size(); ++i) {
+            totalWork +=
+                computeBlockWork256(blocks[i].header.bits)
+                    .convert_to<long double>();
+        }
+    } catch (const std::exception& e) {
+        Logger::log(
+            std::string("[calculateHashrateForRange] invalid fallback target/work: ") +
+            e.what());
+        return 0.0;
+    }
+
+    const long double elapsedSeconds =
+        medianDelta * static_cast<long double>(blocks.size() - 1);
+    if (!(elapsedSeconds > 0.0L) || !(totalWork > 0.0L)) return 0.0;
+
+    const long double rate = totalWork / elapsedSeconds;
+    const double result = static_cast<double>(rate);
+    return std::isfinite(result) && result > 0.0 ? result : 0.0;
 }
 
 static uint64_t bitsToTargetHelper(uint32_t bits) {
@@ -6097,15 +6251,40 @@ void Blockchain::storeTokenMetadata(const std::string& txid, const ExtendedToken
 //            FETCH TOKEN META DATA
 //===================================================================================
 
-ExtendedTokenData Blockchain::fetchTokenMetadata(const std::string& key) const {
-    ExtendedTokenData tokenData;
+bool Blockchain::resolveTokenMetadataAtOutpoint(
+    const std::string& txid, uint32_t controllingVout,
+    nlohmann::json& metadata) const {
+    Transaction tx;
+    tru_token_continuation::Branch branch;
+    if (!getTransaction(txid, tx) ||
+        !tru_token_continuation::branch(tx, controllingVout, branch)) return false;
+    return tru_token_continuation::resolve(
+        [this](const std::string& k, std::string& v) {
+            return dbStorage.getWithDataChecksum(k, v);
+        }, generateMetaHash, txid, branch, metadata);
+}
+
+ExtendedTokenData Blockchain::fetchTokenMetadata(const std::string& key,
+    const std::string& tokenID, TokenType type, const std::string& metaHash) const {
+    ExtendedTokenData tokenData{};
     tokenData.meta.data["name"] = "Token_" + tokenData.tokenID; // Default
     tokenData.meta.data["description"] = "No metadata recorded"; // Default
 
     Logger logger;
     logger.log("[fetchTokenMetadata] Attempting to fetch metadata with key=" + key);
     std::string value;
-    if (!dbStorage.getWithDataChecksum(key, value)) {
+    if (!tokenID.empty() && !metaHash.empty() && key.rfind("tokenMetadata:", 0) == 0) {
+        tru_token_continuation::Branch branch;
+        branch.tokenID = tokenID;
+        branch.type = tokenTypeToString(type);
+        branch.metaHash = metaHash;
+        nlohmann::json resolved;
+        if (!tru_token_continuation::resolve(
+                [this](const std::string& k, std::string& v) {
+                    return dbStorage.getWithDataChecksum(k, v);
+                }, generateMetaHash, key.substr(14), branch, resolved)) return tokenData;
+        value = resolved.dump();
+    } else if (!dbStorage.getWithDataChecksum(key, value)) {
         logger.log("[fetchTokenMetadata] No metadata found for key=" + key + ", using defaults");
         return tokenData;
     }
@@ -6306,7 +6485,7 @@ Blockchain::Blockchain(const std::string &utxoDB, const std::string &genesisAddr
       networkType("mainnet"),
       maxSupply(21'000'000),
       halvingInterval(210'000),
-      targetBlockTime(600),
+      targetBlockTime(DIFFICULTY_TARGET_SPACING),
       p2pPort(tru_network::MAINNET_P2P_PORT),
       rpcPort(tru_network::MAINNET_RPC_PORT),
       //difficulty(0x1d00ffff),
@@ -16836,6 +17015,11 @@ bool Blockchain::connectTipBlock(
     // private confirmed-state connector.
     Logger::log("[connectTipBlock] Attempting to connect block: " + blk.blockHash);
 
+    // CADENCE-HASHRATE-TELEMETRY-01: capture local wall time before validation.
+    // It is process-local observational metadata only and never participates in
+    // block validity, MTP, retargeting, chainwork, or persistence.
+    const uint64_t telemetryObservedAt = telemetryUnixNowSeconds();
+
     if (!validationOnly_ &&
         reorgExecutionHalted_.load(std::memory_order_acquire)) {
         Logger::log(
@@ -17246,6 +17430,48 @@ bool Blockchain::connectTipBlock(
     Logger::log("[connectTipBlock] Released unique mutex for block: " + blk.blockHash);
 
     if (!validationOnly_) {
+        // CADENCE-HASHRATE-TELEMETRY-01:
+        // Record the first local observation only for an ordinary direct-tip
+        // connect. Reorg promotion/recovery must not fabricate a new "arrival"
+        // time for an older side block. Side-block first-seen time is recorded
+        // after indexSideChainBlock() succeeds in submitBlockInternal().
+        if (promotedSideBlockHash == nullptr &&
+            reorgTipPublishMarkerPayload == nullptr &&
+            !recoveryPublishOnly &&
+            telemetryObservedAt != 0) {
+
+            recordBlockObservationNonConsensus(
+                blk.blockHash, telemetryObservedAt);
+
+            uint64_t firstObservedAt = telemetryObservedAt;
+            {
+                std::shared_lock<std::shared_mutex> statsRead(derivedStatsMutex_);
+                auto it = blockObservedAt_.find(blk.blockHash);
+                if (it != blockObservedAt_.end()) {
+                    firstObservedAt = it->second;
+                }
+            }
+
+            const int64_t clockSkew =
+                telemetrySignedSeconds(
+                    static_cast<uint64_t>(blk.header.timestamp),
+                    firstObservedAt);
+            if (clockSkew > TELEMETRY_CLOCK_SKEW_WARN_SECONDS ||
+                clockSkew < -TELEMETRY_CLOCK_SKEW_WARN_SECONDS) {
+                Logger::log(
+                    "[CADENCE-HASHRATE-TELEMETRY-01] CLOCK-SKEW block=" +
+                    blk.blockHash +
+                    " height=" + std::to_string(blk.height) +
+                    " headerTime=" +
+                    std::to_string(blk.header.timestamp) +
+                    " observedAt=" +
+                    std::to_string(firstObservedAt) +
+                    " skewSeconds=" +
+                    std::to_string(clockSkew) +
+                    " consensusAction=NONE");
+            }
+        }
+
         // Compute hashrate and update miner statistics only for the real active
         // chain. These are non-consensus derived values and the validation
         // sandbox deliberately carries no historical chain[] vector.
@@ -17458,8 +17684,36 @@ bool Blockchain::applyBlock(
     Logger::log("[applyBlock] Phase 1 complete: Collected " +
                 std::to_string(consolidatedMetadata.size()) + " metadata entries");
 
-    // PHASE 1.5: Check for duplicate token issuances
+    // TRU-TOKEN-CONTINUATION-01: resolve parents without recursively taking mtx.
+    // Only confirmed live controls qualify; same-block parents fail closed here.
+    std::unordered_map<std::string, const Transaction*> metadataTransactions;
+    std::unordered_set<std::string> neededMetadataParents;
+    for (const auto& tx : blk.transactions) {
+        metadataTransactions.emplace(tx.txid, &tx);
+        if (consolidatedMetadata.count(tx.txid)) {
+            for (const auto& in : tx.vin) neededMetadataParents.insert(in.txid);
+        }
+    }
+    std::unordered_map<std::string, const Transaction*> metadataParents;
+    for (auto it = chain.rbegin(); it != chain.rend() && !neededMetadataParents.empty(); ++it) {
+        for (const auto& tx : it->transactions) {
+            if (neededMetadataParents.erase(tx.txid)) metadataParents.emplace(tx.txid, &tx);
+        }
+    }
+    const auto readContinuationInput = [&](const TxIn& in,
+            tru_token_continuation::Branch& branch) {
+        if (in.vout <= 0) return false;
+        auto parent = metadataParents.find(in.txid);
+        if (parent == metadataParents.end()) return false;
+        UTXO live;
+        return utxoSet.getUTXO(in.txid, static_cast<uint32_t>(in.vout), live) &&
+            tru_token_continuation::branch(*parent->second,
+                static_cast<uint32_t>(in.vout), branch) &&
+            live.scriptPubKey == parent->second->vout[in.vout].scriptPubKey;
+    };
+    std::unordered_set<std::string> continuationMetadata;
 
+    // PHASE 1.5: Check for duplicate token issuances
     std::unordered_set<std::string> processedTokenIssuances;
     std::vector<std::string> toErase; // Collect keys to erase
 
@@ -17477,6 +17731,18 @@ bool Blockchain::applyBlock(
             if (metadata.contains("tokenID"))
             {
                 std::string tokenID = metadata["tokenID"].get<std::string>();
+
+                const auto txIt = metadataTransactions.find(txid);
+                std::string canonicalIssuance;
+                if (txIt != metadataTransactions.end() &&
+                    dbStorage.getWithDataChecksum("tokenIssuance:" + tokenID, canonicalIssuance) &&
+                    canonicalIssuance != txid &&
+                    tru_token_continuation::continuation(*txIt->second, metadata,
+                        readContinuationInput, generateMetaHash)) {
+                    continuationMetadata.insert(txid);
+                    Logger::log("[TRU-TOKEN-CONTINUATION-01] Retaining continuation metadata tx=" + txid);
+                    continue;
+                }
 
                 // reject a second issuance of the same tokenID
                 // WITHIN this block before consulting LevelDB.
@@ -18494,6 +18760,9 @@ bool Blockchain::applyBlock(
     Logger::log("[applyBlock] Phase 4: Processing token operations");
     for (const auto &[txid, metadata] : consolidatedMetadata)
     {
+        // Continuations have already been indexed per output by Phase 2.
+        // Never run issuance bookkeeping or overwrite original issuer authority.
+        if (continuationMetadata.count(txid)) continue;
         try
         {
             if (!metadata.is_object())
@@ -19822,6 +20091,11 @@ bool Blockchain::submitBlockFromNetwork(
 bool Blockchain::submitBlockInternal(
     const Block& block,
     const std::string& sourceKey) {
+    // CADENCE-HASHRATE-TELEMETRY-01: earliest process-local time at which this
+    // submission entered the authoritative acceptance pipeline.
+    const uint64_t telemetrySubmissionObservedAt =
+        telemetryUnixNowSeconds();
+
     if (reorgExecutionHalted_.load(std::memory_order_acquire)) {
         Logger::log(
             "[Patch08B.4B.1 v2] REJECT: block submission disabled after partial controlled reorg failure");
@@ -19894,6 +20168,16 @@ bool Blockchain::submitBlockInternal(
         const bool sideAccepted = indexSideChainBlock(block, sourceKey);
         if (!sideAccepted) {
             return false;
+        }
+
+        // CADENCE-HASHRATE-TELEMETRY-01: only a VALIDATED/ACCEPTED side block
+        // earns first-seen metadata. This prevents an untrusted peer from
+        // filling telemetry memory with rejected block hashes. If the block is
+        // later promoted by a controlled reorg, connectTipBlock() preserves
+        // this earlier observation rather than inventing a promotion time.
+        if (telemetrySubmissionObservedAt != 0) {
+            recordBlockObservationNonConsensus(
+                block.blockHash, telemetrySubmissionObservedAt);
         }
 
         // only a freshly accepted/persisted side tip can enter
@@ -23024,6 +23308,9 @@ void Blockchain::startExplorerServer(int port, int rpcPort) {
 //========================================================================================
 //				STATS
 //========================================================================================
+// TRU-DATA-PROVIDER-01
+#include "tru_data_provider_v1_routes.inc"
+
 g_explorerServer.Get("/api/stats", [&](const httplib::Request&, httplib::Response& res) {
     res.set_header("Access-Control-Allow-Origin", "*");
 
@@ -23057,14 +23344,161 @@ g_explorerServer.Get("/api/stats", [&](const httplib::Request&, httplib::Respons
     }
 
     int activeMinersCount = 0;
+    double reportedHashrate = 0.0;
     {
         std::shared_lock<std::shared_mutex> lock(mtx);
         auto now = std::chrono::steady_clock::now();
         auto timeoutDuration = std::chrono::minutes(2);
         for (const auto& [minerAddr, lastActivity] : minerLastActivity) {
-            if (now - lastActivity < timeoutDuration) ++activeMinersCount;
+            if (now - lastActivity < timeoutDuration) {
+                ++activeMinersCount;
+                auto rateIt = minerHashRates.find(minerAddr);
+                if (rateIt != minerHashRates.end() &&
+                    std::isfinite(rateIt->second) &&
+                    rateIt->second > 0.0) {
+                    reportedHashrate += rateIt->second;
+                }
+            }
         }
     }
+
+    // CADENCE-HASHRATE-TELEMETRY-01: build a small, lock-bounded cadence
+    // snapshot. "observed" intervals use local first-seen wall time; header
+    // median is retained only as a restart-compatible fallback.
+    nlohmann::json cadence = {
+        {"targetSeconds", DIFFICULTY_TARGET_SPACING},
+        {"windowBlocks", 0},
+        {"observedIntervals", 0},
+        {"headerIntervals", 0},
+        {"clockSkewedBlocks", 0},
+        {"averageObservedSeconds", nullptr},
+        {"medianHeaderSeconds", nullptr},
+        {"effectiveSeconds", nullptr},
+        {"effectiveSource", "unavailable"}
+    };
+
+    {
+        std::vector<Block> cadenceBlocks;
+        {
+            std::shared_lock<std::shared_mutex> chainRead(mtx);
+            const int tip = bestTipHeight.load();
+            if (tip > 0 && !chain.empty()) {
+                const int start = std::max(1, tip - 9);
+                cadenceBlocks.reserve(
+                    static_cast<size_t>(tip - start + 1));
+                for (int h = start; h <= tip; ++h) {
+                    const size_t idx = static_cast<size_t>(h - 1);
+                    if (idx >= chain.size()) break;
+                    cadenceBlocks.push_back(chain[idx]);
+                }
+            }
+        }
+
+        std::unordered_map<std::string, uint64_t> observed;
+        {
+            std::shared_lock<std::shared_mutex> statsRead(derivedStatsMutex_);
+            for (const auto& block : cadenceBlocks) {
+                auto it = blockObservedAt_.find(block.blockHash);
+                if (it != blockObservedAt_.end()) {
+                    observed.emplace(block.blockHash, it->second);
+                }
+            }
+        }
+
+        std::vector<int64_t> observedIntervals;
+        std::vector<int64_t> positiveHeaderIntervals;
+        size_t clockSkewed = 0;
+
+        for (const auto& block : cadenceBlocks) {
+            auto it = observed.find(block.blockHash);
+            if (it == observed.end()) continue;
+            const int64_t skew = telemetrySignedSeconds(
+                static_cast<uint64_t>(block.header.timestamp),
+                it->second);
+            if (skew > TELEMETRY_CLOCK_SKEW_WARN_SECONDS ||
+                skew < -TELEMETRY_CLOCK_SKEW_WARN_SECONDS) {
+                ++clockSkewed;
+            }
+        }
+
+        for (size_t i = 1; i < cadenceBlocks.size(); ++i) {
+            const int64_t headerDelta =
+                static_cast<int64_t>(
+                    cadenceBlocks[i].header.timestamp) -
+                static_cast<int64_t>(
+                    cadenceBlocks[i - 1].header.timestamp);
+            if (headerDelta > 0) {
+                positiveHeaderIntervals.push_back(headerDelta);
+            }
+
+            auto prevIt =
+                observed.find(cadenceBlocks[i - 1].blockHash);
+            auto curIt =
+                observed.find(cadenceBlocks[i].blockHash);
+            if (prevIt != observed.end() &&
+                curIt != observed.end() &&
+                curIt->second > prevIt->second &&
+                telemetryHeaderNearObservation(
+                    cadenceBlocks[i - 1].header.timestamp,
+                    prevIt->second) &&
+                telemetryHeaderNearObservation(
+                    cadenceBlocks[i].header.timestamp,
+                    curIt->second)) {
+                observedIntervals.push_back(
+                    static_cast<int64_t>(
+                        curIt->second - prevIt->second));
+            }
+        }
+
+        cadence["windowBlocks"] = cadenceBlocks.size();
+        cadence["observedIntervals"] = observedIntervals.size();
+        cadence["headerIntervals"] = positiveHeaderIntervals.size();
+        cadence["clockSkewedBlocks"] = clockSkewed;
+
+        if (!observedIntervals.empty()) {
+            long double sum = 0.0L;
+            for (const int64_t v : observedIntervals) {
+                sum += static_cast<long double>(v);
+            }
+            const double avg =
+                static_cast<double>(
+                    sum / observedIntervals.size());
+            cadence["averageObservedSeconds"] = avg;
+            cadence["effectiveSeconds"] = avg;
+            cadence["effectiveSource"] = "observed";
+        }
+
+        if (!positiveHeaderIntervals.empty()) {
+            std::sort(
+                positiveHeaderIntervals.begin(),
+                positiveHeaderIntervals.end());
+            const size_t mid =
+                positiveHeaderIntervals.size() / 2;
+            double median = 0.0;
+            if ((positiveHeaderIntervals.size() & 1U) != 0U) {
+                median = static_cast<double>(
+                    positiveHeaderIntervals[mid]);
+            } else {
+                median =
+                    (static_cast<double>(
+                         positiveHeaderIntervals[mid - 1]) +
+                     static_cast<double>(
+                         positiveHeaderIntervals[mid])) /
+                    2.0;
+            }
+            cadence["medianHeaderSeconds"] = median;
+            if (cadence["effectiveSource"] == "unavailable") {
+                cadence["effectiveSeconds"] = median;
+                cadence["effectiveSource"] = "header-median";
+            }
+        }
+    }
+
+    const int networkObservedIntervals = cadence.value("observedIntervals", 0);
+    const char* networkHashrateAuthority =
+        networkObservedIntervals >= 2
+            ? "EXACT_CHAINWORK_OVER_OBSERVED_TIME"
+            : "EXACT_CHAINWORK_OVER_ROBUST_HEADER_TIME";
 
     nlohmann::json j = {
         {"height", getBestTipHeight()},
@@ -23075,9 +23509,13 @@ g_explorerServer.Get("/api/stats", [&](const httplib::Request&, httplib::Respons
         {"totalTransactions", getTotalTransactions()},
         {"activeAddresses", getActiveAddresses().size()},
         {"activeMiners", activeMinersCount},
+        {"reportedHashrate", reportedHashrate},
         {"issuedTokens", getIssuedTokens()},
         {"totalIssuedTrus", this->getTotalIssuedTrus()},
         {"networkHashrate", this->getNetworkHashrate(10)},
+        {"networkHashrateAuthority", networkHashrateAuthority},
+        {"targetBlockTime", DIFFICULTY_TARGET_SPACING},
+        {"cadence", cadence},
         {"blockchainSize", this->getBlockchainSize()},
         {"latestBlockSize", getBlockSize(getBestTipHash())},
         {"explorerCache", "EXPLORER-MINERS-03"}
@@ -23140,14 +23578,84 @@ g_explorerServer.Get("/api/blocks", [&](const httplib::Request&, httplib::Respon
             }
         }
 
+        std::unordered_map<std::string, uint64_t> observed;
+        {
+            std::shared_lock<std::shared_mutex> statsRead(derivedStatsMutex_);
+            for (const auto& block : recentBlocks) {
+                auto it = blockObservedAt_.find(block.blockHash);
+                if (it != blockObservedAt_.end()) {
+                    observed.emplace(block.blockHash, it->second);
+                }
+            }
+        }
+
         nlohmann::json j = nlohmann::json::array();
-        for (const auto& b : recentBlocks) {
-            j.push_back({
+        for (size_t i = 0; i < recentBlocks.size(); ++i) {
+            const auto& b = recentBlocks[i];
+
+            nlohmann::json row = {
                 {"height", b.height},
                 {"hash", b.blockHash},
+                // Canonical consensus/header time remains unchanged.
                 {"timestamp", b.header.timestamp},
-                {"size", b.serialize().size()}
-            });
+                {"size", b.serialize().size()},
+                {"targetSpacingSeconds", DIFFICULTY_TARGET_SPACING},
+                {"observedAt", nullptr},
+                {"clockSkewSeconds", nullptr},
+                {"clockSkewed", false},
+                {"headerSpacingSeconds", nullptr},
+                {"observedSpacingSeconds", nullptr},
+                {"cadenceSeconds", nullptr},
+                {"cadenceSource", "unavailable"}
+            };
+
+            auto observedIt = observed.find(b.blockHash);
+            if (observedIt != observed.end()) {
+                row["observedAt"] = observedIt->second;
+                const int64_t skew =
+                    telemetrySignedSeconds(
+                        static_cast<uint64_t>(b.header.timestamp),
+                        observedIt->second);
+                row["clockSkewSeconds"] = skew;
+                row["clockSkewed"] =
+                    skew > TELEMETRY_CLOCK_SKEW_WARN_SECONDS ||
+                    skew < -TELEMETRY_CLOCK_SKEW_WARN_SECONDS;
+            }
+
+            if (i > 0) {
+                const auto& prev = recentBlocks[i - 1];
+                const int64_t headerSpacing =
+                    static_cast<int64_t>(b.header.timestamp) -
+                    static_cast<int64_t>(prev.header.timestamp);
+                row["headerSpacingSeconds"] = headerSpacing;
+
+                auto prevObservedIt =
+                    observed.find(prev.blockHash);
+                if (observedIt != observed.end() &&
+                    prevObservedIt != observed.end() &&
+                    observedIt->second > prevObservedIt->second &&
+                    telemetryHeaderNearObservation(
+                        prev.header.timestamp,
+                        prevObservedIt->second) &&
+                    telemetryHeaderNearObservation(
+                        b.header.timestamp,
+                        observedIt->second)) {
+
+                    const uint64_t observedSpacing =
+                        observedIt->second - prevObservedIt->second;
+                    row["observedSpacingSeconds"] =
+                        observedSpacing;
+                    row["cadenceSeconds"] = observedSpacing;
+                    row["cadenceSource"] = "observed";
+                } else if (headerSpacing > 0) {
+                    // Restart-compatible fallback only. New frontends should
+                    // prefer cadenceSource=observed whenever available.
+                    row["cadenceSeconds"] = headerSpacing;
+                    row["cadenceSource"] = "header";
+                }
+            }
+
+            j.push_back(std::move(row));
         }
         res.set_content(j.dump(), "application/json");
     } catch (const std::exception& e) {
@@ -24302,14 +24810,35 @@ g_explorerServer.Get("/api/hashrate_history", [&](const httplib::Request& req, h
         }
 
         if (hashrate > 0.0) {
-            const auto blockOpt = getBlockByHeight(static_cast<uint64_t>(height));
-            const uint32_t timestamp = blockOpt ? blockOpt->header.timestamp : 0;
-            j.push_back({
+            const auto blockOpt =
+                getBlockByHeight(static_cast<uint64_t>(height));
+            const uint32_t timestamp =
+                blockOpt ? blockOpt->header.timestamp : 0;
+
+            nlohmann::json row = {
                 {"height", height},
                 {"hashrate", hashrate},
                 {"hashrate_gh", hashrate / 1e9},
-                {"timestamp", timestamp}
-            });
+                {"timestamp", timestamp},
+                {"observedAt", nullptr},
+                {"clockSkewSeconds", nullptr}
+            };
+
+            if (blockOpt) {
+                std::shared_lock<std::shared_mutex> statsRead(
+                    derivedStatsMutex_);
+                auto obsIt =
+                    blockObservedAt_.find(blockOpt->blockHash);
+                if (obsIt != blockObservedAt_.end()) {
+                    row["observedAt"] = obsIt->second;
+                    row["clockSkewSeconds"] =
+                        telemetrySignedSeconds(
+                            static_cast<uint64_t>(timestamp),
+                            obsIt->second);
+                }
+            }
+
+            j.push_back(std::move(row));
         }
     }
 
@@ -24976,104 +25505,14 @@ g_explorerServer.Get(
 // -----------------------------------------------------------------------------------------------------------
 //                                      TRU PRICE API
 // -----------------------------------------------------------------------------------------------------------
-g_explorerServer.Get("/api/price/tru", [&](const httplib::Request&, httplib::Response& res) {
+g_explorerServer.Get("/api/price/tru", [](const httplib::Request&, httplib::Response& res) {
+    // TRU-DATA-PROVIDER-01: no fabricated price, volume or circulating supply.
     res.set_header("Access-Control-Allow-Origin", "*");
-    
-    try {
-        Logger::log("[Explorer /api/price/tru] Fetching TRU price");
-        
-        // Hardcoded price for now
-        double truPrice = 0.00;
-        
-        /* 
-        // TODO: CoinMarketCap API Integration
-        // Uncomment and configure when ready to use
-        
-        // CoinMarketCap API configuration
-        const std::string CMC_API_KEY = "YOUR_COINMARKETCAP_API_KEY";
-        const std::string CMC_API_URL = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest";
-        
-        // Make HTTP request to CoinMarketCap
-        httplib::Client cmcClient("pro-api.coinmarketcap.com", 443);
-        cmcClient.set_connection_timeout(5);
-        
-        httplib::Headers headers = {
-            {"X-CMC_PRO_API_KEY", CMC_API_KEY},
-            {"Accept", "application/json"}
-        };
-        
-        // Assuming TRU has a CMC ID (replace with actual ID)
-        auto cmcRes = cmcClient.Get("/v1/cryptocurrency/quotes/latest?symbol=TRU", headers);
-        
-        if (cmcRes && cmcRes->status == 200) {
-            try {
-                nlohmann::json cmcData = nlohmann::json::parse(cmcRes->body);
-                if (cmcData["data"]["TRU"]["quote"]["USD"]["price"].is_number()) {
-                    truPrice = cmcData["data"]["TRU"]["quote"]["USD"]["price"].get<double>();
-                    Logger::log("[Explorer /api/price/tru] CoinMarketCap price: $" + std::to_string(truPrice));
-                }
-            } catch (const std::exception& e) {
-                Logger::log("[Explorer /api/price/tru] CoinMarketCap parse error: " + std::string(e.what()));
-            }
-        } else {
-            Logger::log("[Explorer /api/price/tru] CoinMarketCap API request failed");
-        }
-        */
-        
-        /*
-        // TODO: CoinGecko API Integration (Alternative)
-        // Uncomment and configure when ready to use
-        
-        // CoinGecko API configuration (no API key required for basic requests)
-        httplib::Client geckoClient("api.coingecko.com", 443);
-        geckoClient.set_connection_timeout(5);
-        
-        // Replace 'tru-token-id' with actual CoinGecko ID for TRU
-        auto geckoRes = geckoClient.Get("/api/v3/simple/price?ids=tru-token-id&vs_currencies=usd");
-        
-        if (geckoRes && geckoRes->status == 200) {
-            try {
-                nlohmann::json geckoData = nlohmann::json::parse(geckoRes->body);
-                if (geckoData["tru-token-id"]["usd"].is_number()) {
-                    truPrice = geckoData["tru-token-id"]["usd"].get<double>();
-                    Logger::log("[Explorer /api/price/tru] CoinGecko price: $" + std::to_string(truPrice));
-                }
-            } catch (const std::exception& e) {
-                Logger::log("[Explorer /api/price/tru] CoinGecko parse error: " + std::string(e.what()));
-            }
-        } else {
-            Logger::log("[Explorer /api/price/tru] CoinGecko API request failed");
-        }
-        */
-        
-        // Build response
-        nlohmann::json priceJson = {
-            {"tru_usd", truPrice},
-            {"source", "hardcoded"},  // Change to "coinmarketcap" or "coingecko" when using real API
-            {"timestamp", std::chrono::duration_cast<std::chrono::seconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count()},
-            {"currency", "USD"}
-        };
-        
-        // Optional: Add more price data fields that might be useful later
-        priceJson["market_data"] = {
-            {"price_change_24h", 0.0},
-            {"price_change_percentage_24h", 0.0},
-            {"market_cap", 0.0},
-            {"volume_24h", 0.0},
-            {"circulating_supply", getTotalIssuedTrus()},  // Using your existing function
-            {"last_updated", std::chrono::duration_cast<std::chrono::seconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count()}
-        };
-        
-        res.set_content(priceJson.dump(2), "application/json");
-        Logger::log("[Explorer /api/price/tru] Response sent with price: $" + std::to_string(truPrice));
-        
-    } catch (const std::exception& e) {
-        Logger::log("[Explorer /api/price/tru] Error: " + std::string(e.what()));
-        res.status = 500;
-        res.set_content("{\"error\":\"Failed to fetch price data\"}", "application/json");
-    }
+    res.set_header("Cache-Control", "no-store");
+    res.set_content(nlohmann::json{{"tru_usd",nullptr},{"source","unavailable"},
+        {"currency","USD"},{"market_data",{{"market_cap",nullptr},{"volume_24h",nullptr},
+        {"circulating_supply",nullptr}}},
+        {"reason","No verified external USD market-price source configured"}}.dump(), "application/json");
 });
 
 // -----------------------------------------------------------------------------------------------------------
@@ -25480,3 +25919,6 @@ g_explorerServer.Get("/api/submitblock", [&](const httplib::Request&, httplib::R
     //g_explorerServer.listen("0.0.0.0", port);
     g_explorerServer.listen("::", port);
 }
+
+// TRU-DATA-PROVIDER-01
+#include "tru_data_provider_v1_impl.inc"

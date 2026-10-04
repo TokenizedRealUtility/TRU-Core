@@ -757,6 +757,128 @@ TokenEvolutionResult TokenEvolutionEngine::evolvePreview(
     return result;
 }
 
+
+TokenEvolutionResult TokenEvolutionEngine::evolveExternalPreview(
+    const std::string& tokenID,
+    const std::string& tokenType,
+    const json& currentMetadata,
+    const json& proposedUpdates,
+    const std::string& trigger,
+    const json& externalProvenance
+) {
+    TokenEvolutionResult result;
+    if (tokenType != "SFT" && tokenType != "NCFT") {
+        result.error = "External evolution preview is limited to SFT and NCFT";
+        return result;
+    }
+    if (tokenID.empty()) { result.error = "tokenID is required"; return result; }
+    if (!externalProvenance.is_object() ||
+        externalProvenance.value("schema", "") != "TRU_NEROMESH_MARKET_PROVENANCE_V1") {
+        result.error = "NEROMESH provenance schema missing or unsupported";
+        return result;
+    }
+    const std::string marketJob = externalProvenance.value("market_job_id", "");
+    const std::string resultHash = externalProvenance.value("result_sha256", "");
+    if (marketJob.rfind("AXN-", 0U) != 0U || marketJob.size() != 16U ||
+        !isLowerHex(resultHash, 64U)) {
+        result.error = "NEROMESH market job/result provenance is malformed";
+        return result;
+    }
+
+    json editorContext;
+    try { editorContext = issuerContext(tokenID); }
+    catch (const std::exception& e) { result.error = e.what(); return result; }
+
+    json baseMetadata = currentMetadata;
+    json latest = loadLatest(tokenID);
+    if (!latest.empty()) {
+        if (!latest.contains("metadata") || !latest["metadata"].is_object()) {
+            result.error = "Latest evolution record is missing metadata"; return result;
+        }
+        const json& latestMetadata = latest["metadata"];
+        const std::string actualLatestHash = sha256Hex(latestMetadata.dump());
+        const std::string recordedLatestHash = latest.value("new_metadata_hash", "");
+        if (recordedLatestHash.empty() || actualLatestHash != recordedLatestHash) {
+            result.error = "Latest evolution metadata hash mismatch; refusing external preview";
+            return result;
+        }
+        uint64_t persistedEpoch = 0;
+        try { persistedEpoch = latest.at("epoch_after").get<uint64_t>(); }
+        catch (...) { result.error = "Latest evolution record has invalid epoch_after"; return result; }
+        if (parseEpoch(latestMetadata) != persistedEpoch) {
+            result.error = "Latest evolution epoch mismatch between record and metadata"; return result;
+        }
+        baseMetadata = latestMetadata;
+    } else {
+        baseMetadata["evolution_epoch"] = "0";
+    }
+
+    const std::string providerName = "neromesh";
+    const std::string providerVersion = "axon-market-v1";
+    const std::string modelID = externalProvenance.value("model_id", "qwen2.5-0.5b-instruct-q4_k_m");
+    const std::string effectiveTrigger = trigger.empty() ? "neromesh_market" : trigger;
+    json normalized = normalizeMetadata(tokenType, baseMetadata, providerName);
+    const uint64_t oldEpoch = parseEpoch(normalized);
+    if (oldEpoch == std::numeric_limits<uint64_t>::max()) {
+        result.error = "Epoch counter exhausted"; return result;
+    }
+    const uint64_t newEpoch = oldEpoch + 1U;
+
+    json updates = filterAllowedUpdates(tokenType, proposedUpdates);
+    if (updates.empty()) {
+        result.error = "NEROMESH proposal contains no allow-listed evolution fields";
+        return result;
+    }
+    json evolved = normalized;
+    for (auto it = updates.begin(); it != updates.end(); ++it) evolved[it.key()] = it.value();
+    if (sha256Hex(evolved.dump()) == sha256Hex(normalized.dump())) {
+        result.error = "NEROMESH proposal makes no permitted metadata changes";
+        return result;
+    }
+
+    evolved["ai_engine"] = providerName;
+    evolved["evolution_epoch"] = std::to_string(newEpoch);
+    const uint64_t evolutionTimestamp = static_cast<uint64_t>(std::time(nullptr));
+    evolved["last_evolution"] = "unix:" + std::to_string(evolutionTimestamp) +
+                               ";epoch:" + std::to_string(newEpoch);
+
+    const std::string previousHash = sha256Hex(normalized.dump());
+    const std::string newHash = sha256Hex(evolved.dump());
+    const std::string systemPrompt = evolutionSystemPrompt();
+    const std::string userPrompt = buildPrompt(tokenID, tokenType, normalized, effectiveTrigger);
+    const std::string requestHash = canonicalRequestHashV1(
+        tokenID, tokenType, oldEpoch, providerName, providerVersion, modelID,
+        effectiveTrigger, previousHash, systemPrompt, userPrompt, 500U, 400U);
+
+    json record = {
+        {"format", "TRU_TOKEN_EVOLVE_V1"},
+        {"record_format_version", 2U},
+        {"status", "preview"},
+        {"tokenID", tokenID},
+        {"type", tokenType},
+        {"writer_type", "ai"},
+        {"provider", providerName},
+        {"provider_version", providerVersion},
+        {"model_id", modelID},
+        {"request_hash", requestHash},
+        {"input_metadata_hash", previousHash},
+        {"trigger", effectiveTrigger},
+        {"epoch_before", oldEpoch},
+        {"epoch_after", newEpoch},
+        {"previous_metadata_hash", previousHash},
+        {"new_metadata_hash", newHash},
+        {"timestamp", evolutionTimestamp},
+        {"updated_fields", updates},
+        {"metadata", evolved},
+        {"external_provenance", externalProvenance},
+        {"issuer_context", editorContext}
+    };
+    result.ok = true;
+    result.metadata = evolved;
+    result.record = record;
+    return result;
+}
+
 std::string TokenEvolutionEngine::buildMediaPrompt(
     const std::string& tokenID, const std::string& tokenType, const json& parent,
     const std::string& trigger, const json& inputs) const {
@@ -1900,6 +2022,8 @@ json TokenEvolutionEngine::verifyHistory(
             recordFormatVersion >= 2U ? record.value("request_hash", "") : "";
         epochReport["input_metadata_hash"] =
             (recordFormatVersion == 2U || mediaV4) ? record.value("input_metadata_hash", "") : "";
+        if (record.contains("external_provenance") && record["external_provenance"].is_object())
+            epochReport["external_provenance"] = record["external_provenance"];
         epochReport["external_claim_hash"] =
             externalV3 ? record.value("external_claim_hash", "") : "";
         epochReport["writer_id"] =

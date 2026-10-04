@@ -1,3 +1,4 @@
+#include "token_continuation_metadata_v1.h"
 #include "wallet.h"
 #include <cstring>
 #include <cstdio>
@@ -7330,10 +7331,10 @@ std::string Wallet::transferExtendedToken(
                 ", quantity=" + std::to_string(quantityToSend) +
                 ", to=" + newOwnerAddress);
 
-    std::string sender = getCurrentAddress();
-    if (sender.empty()) {
-        throw std::runtime_error("No sender address");
-    }
+    // TOKEN-SEND-WALLET-OWNER-01: the token outpoint determines the
+    // controlling address.  The wallet's currentIndex is only a UI/default
+    // selection and must not be treated as token ownership.
+    std::string sender;
 
     if (isLocalChain) {
         if (!blockchainPtr || !blockchainPtr->mempool) {
@@ -7361,9 +7362,17 @@ std::string Wallet::transferExtendedToken(
         std::string utxoOwner = j["owner"].get<std::string>();
         std::string tokenTypeStr = j.value("type", "FT");
 
-        if (utxoOwner != sender) {
-            throw std::runtime_error("Sender does not own UTXO");
+        // TOKEN-SEND-WALLET-OWNER-01: bind the transfer to the confirmed
+        // token-control record, not getCurrentAddress().  signTransaction()
+        // already derives the correct key independently for every input.
+        sender = utxoOwner;
+        if (sender.empty() || !ownsAddress(sender)) {
+            throw std::runtime_error(
+                "Token UTXO owner is not controlled by this wallet: " + sender);
         }
+        Logger::log(
+            "[TOKEN-SEND-WALLET-OWNER-01] Token owner resolved from confirmed UTXO: " +
+            sender + " for " + oldTxid + ":" + std::to_string(oldVout));
         if (quantityToSend > utxoAmount) {
             throw std::runtime_error("Insufficient token amount");
         }
@@ -7376,13 +7385,13 @@ std::string Wallet::transferExtendedToken(
             oldData.type = TokenType::FT;
         }
 
-        // Fetch metadata
-        std::string metadataKey = "tokenMetadata:" + oldTxid;
-        std::string metadataValue;
-        if (!storage->getWithDataChecksum(metadataKey, metadataValue)) {
-            throw std::runtime_error("Metadata not found");
+        // TRU-TOKEN-CONTINUATION-01: recover historical split branches read-only.
+        nlohmann::json metadataJson;
+        if (!blockchainPtr->resolveTokenMetadataAtOutpoint(oldTxid, oldVout, metadataJson) ||
+            metadataJson.value("tokenID", "") != truncatedTokenID ||
+            metadataJson.value("type", "") != tokenTypeStr) {
+            throw std::runtime_error("Token metadata missing or does not match confirmed branch");
         }
-        nlohmann::json metadataJson = nlohmann::json::parse(metadataValue);
         if (metadataJson.contains("meta") && metadataJson["meta"].is_object()) {
             oldData.meta.data = metadataJson["meta"];
         } else {
@@ -7416,16 +7425,60 @@ std::string Wallet::transferExtendedToken(
             }
         }
 
-        auto [feeTxid, feeVout] = findOneCoinUtxo(sender);
-        if (feeTxid.empty()) {
-            throw std::runtime_error("No fee UTXO available");
-        }
-        uint64_t coinValue = getUtxoValueInAtoms(*blockchainPtr, feeTxid, feeVout);
         uint64_t fee = WALLET_MIN_BASE_FEE;
         uint64_t minRequired = fee + ((utxoAmount - quantityToSend) > 0 ? 1 : 0);
-        if (coinValue < minRequired) {
-            throw std::runtime_error("Insufficient fee funds");
+
+        // TOKEN-SEND-WALLET-OWNER-01: token ownership and fee funding are
+        // separate concerns.  Prefer the token owner for backwards-compatible
+        // layout, then the selected address, then any wallet-owned address.
+        // signTransaction() signs each input with its own controlling key.
+        std::vector<std::string> feeCandidates;
+        auto addFeeCandidate = [&](const std::string& addr) {
+            if (!addr.empty() && ownsAddress(addr) &&
+                std::find(feeCandidates.begin(), feeCandidates.end(), addr) == feeCandidates.end()) {
+                feeCandidates.push_back(addr);
+            }
+        };
+        addFeeCandidate(sender);
+        try { addFeeCandidate(getCurrentAddress()); } catch (...) {}
+        for (const auto& addr : getAllAddresses()) addFeeCandidate(addr);
+
+        std::string feePayer;
+        std::string feeTxid;
+        uint32_t feeVout = 0;
+        uint64_t coinValue = 0;
+        for (const auto& candidate : feeCandidates) {
+            try {
+                auto feeOutpoint = findOneCoinUtxo(candidate);
+                if (feeOutpoint.first.empty()) continue;
+                const uint64_t candidateValue =
+                    getUtxoValueInAtoms(*blockchainPtr, feeOutpoint.first, feeOutpoint.second);
+                if (candidateValue < minRequired) {
+                    Logger::log(
+                        "[TOKEN-SEND-WALLET-OWNER-01] Fee candidate too small: " +
+                        candidate + " value=" + std::to_string(candidateValue) +
+                        " need=" + std::to_string(minRequired));
+                    continue;
+                }
+                feePayer = candidate;
+                feeTxid = feeOutpoint.first;
+                feeVout = feeOutpoint.second;
+                coinValue = candidateValue;
+                break;
+            } catch (const std::exception& e) {
+                Logger::log(
+                    "[TOKEN-SEND-WALLET-OWNER-01] No usable fee UTXO at " +
+                    candidate + ": " + e.what());
+            }
         }
+        if (feeTxid.empty()) {
+            throw std::runtime_error(
+                "No wallet-owned fee UTXO can fund this token transfer");
+        }
+        Logger::log(
+            "[TOKEN-SEND-WALLET-OWNER-01] Fee payer=" + feePayer +
+            " tokenOwner=" + sender + " feeOutpoint=" + feeTxid + ":" +
+            std::to_string(feeVout));
 
         Transaction tx(false);
         tx.set_sender(sender);
@@ -7453,7 +7506,9 @@ std::string Wallet::transferExtendedToken(
         uint64_t leftoverCoin = coinValue - fee - ((leftoverAmt > 0 && isFungible) ? 1 : 0);
         std::size_t feeBearingVout = WALLET_NO_FEE_BEARING_VOUT;
         if (leftoverCoin > 0) {
-            std::string changeScript = createP2PKHScriptHexFromAddress(sender);
+            // Coin change belongs to the address that supplied the fee input;
+            // token change above remains bound to the actual token owner.
+            std::string changeScript = createP2PKHScriptHexFromAddress(feePayer);
             tx.vout.emplace_back(leftoverCoin, changeScript);
             feeBearingVout = tx.vout.size() - 1;
         }
@@ -7523,9 +7578,14 @@ std::string Wallet::transferExtendedToken(
         std::string utxoOwner = tokenUtxo["owner"].get<std::string>();
         std::string tokenTypeStr = tokenUtxo["type"].get<std::string>();
 
-        if (utxoOwner != sender) {
-            throw std::runtime_error("Sender does not own UTXO, expected=" + sender + ", found=" + utxoOwner);
+        sender = utxoOwner;
+        if (sender.empty() || !ownsAddress(sender)) {
+            throw std::runtime_error(
+                "Token UTXO owner is not controlled by this wallet: " + sender);
         }
+        Logger::log(
+            "[TOKEN-SEND-WALLET-OWNER-01] RPC token owner resolved from UTXO: " +
+            sender + " for " + oldTxid + ":" + std::to_string(oldVout));
         if (quantityToSend > utxoAmount) {
             throw std::runtime_error("Insufficient token amount: requested=" + 
                 std::to_string(quantityToSend) + ", available=" + std::to_string(utxoAmount));
@@ -7550,20 +7610,44 @@ std::string Wallet::transferExtendedToken(
             oldData.meta.data = metadata["meta"];
         }
 
-        auto feeUtxos = rpcListUnspent(nodeIP, nodePort, sender);
-        if (feeUtxos.empty()) {
-            throw std::runtime_error("No fee UTXO available");
-        }
-        std::string feeTxid = feeUtxos[0].txid;
-        uint32_t feeVout = feeUtxos[0].vout;
-        uint64_t coinValue = feeUtxos[0].amount;
-
         uint64_t fee = WALLET_MIN_BASE_FEE;
         uint64_t minRequired = fee + ((utxoAmount - quantityToSend) > 0 ? 1 : 0);
-        if (coinValue < minRequired) {
-            throw std::runtime_error("Insufficient fee funds: have=" + 
-                std::to_string(coinValue) + ", need=" + std::to_string(minRequired));
+
+        std::vector<std::string> feeCandidates;
+        auto addFeeCandidate = [&](const std::string& addr) {
+            if (!addr.empty() && ownsAddress(addr) &&
+                std::find(feeCandidates.begin(), feeCandidates.end(), addr) == feeCandidates.end()) {
+                feeCandidates.push_back(addr);
+            }
+        };
+        addFeeCandidate(sender);
+        try { addFeeCandidate(getCurrentAddress()); } catch (...) {}
+        for (const auto& addr : getAllAddresses()) addFeeCandidate(addr);
+
+        std::string feePayer;
+        std::string feeTxid;
+        uint32_t feeVout = 0;
+        uint64_t coinValue = 0;
+        for (const auto& candidate : feeCandidates) {
+            const auto feeUtxos = rpcListUnspent(nodeIP, nodePort, candidate);
+            for (const auto& u : feeUtxos) {
+                if (u.txid == oldTxid && u.vout == oldVout) continue;
+                if (u.amount < minRequired || u.amount <= coinValue) continue;
+                feePayer = candidate;
+                feeTxid = u.txid;
+                feeVout = u.vout;
+                coinValue = u.amount;
+            }
+            if (!feeTxid.empty()) break;
         }
+        if (feeTxid.empty()) {
+            throw std::runtime_error(
+                "No wallet-owned RPC fee UTXO can fund this token transfer");
+        }
+        Logger::log(
+            "[TOKEN-SEND-WALLET-OWNER-01] RPC fee payer=" + feePayer +
+            " tokenOwner=" + sender + " feeOutpoint=" + feeTxid + ":" +
+            std::to_string(feeVout));
 
         Transaction tx(false);
         tx.set_sender(sender);
@@ -7589,7 +7673,8 @@ std::string Wallet::transferExtendedToken(
         uint64_t leftoverCoin = coinValue - fee - ((leftoverAmt > 0 && isFungible) ? 1 : 0);
         std::size_t feeBearingVout = WALLET_NO_FEE_BEARING_VOUT;
         if (leftoverCoin > 0) {
-            tx.vout.emplace_back(leftoverCoin, createP2PKHScriptHexFromAddress(sender));
+            tx.vout.emplace_back(
+                leftoverCoin, createP2PKHScriptHexFromAddress(feePayer));
             feeBearingVout = tx.vout.size() - 1;
         }
 
@@ -7751,14 +7836,39 @@ std::string Wallet::sendToken(const std::string& tokenID, uint64_t amount,
     std::string fullTokenID = tokenID; // Adjust if truncation is needed
     Logger::log("[sendToken] Using tokenID=" + fullTokenID);
 
-    // Find the controlling UTXO
-    auto [txid, controllingVout, tokenVout] = findTokenUTXO(fullTokenID, senderAddress);
+    // TOKEN-SEND-WALLET-OWNER-01: treat senderAddress as the preferred
+    // wallet address only.  Tokens can remain on any historical/receive address
+    // controlled by this wallet, so resolve the confirmed token owner across
+    // every wallet address before declaring the holding unavailable.
+    std::string effectiveSenderAddress = senderAddress;
+    auto tokenLocation = findTokenUTXO(fullTokenID, effectiveSenderAddress);
+    if (std::get<0>(tokenLocation).empty()) {
+        for (const auto& addr : getAllAddresses()) {
+            if (addr == senderAddress) continue;
+            auto candidate = findTokenUTXO(fullTokenID, addr);
+            if (!std::get<0>(candidate).empty()) {
+                effectiveSenderAddress = addr;
+                tokenLocation = candidate;
+                Logger::log(
+                    "[TOKEN-SEND-WALLET-OWNER-01] Preferred sender " +
+                    senderAddress + " does not hold token " + fullTokenID +
+                    "; resolved wallet owner=" + effectiveSenderAddress);
+                break;
+            }
+        }
+    }
+
+    auto [txid, controllingVout, tokenVout] = tokenLocation;
     if (txid.empty()) {
-        Logger::log("[sendToken] Error: No UTXO found for tokenID=" + fullTokenID + " and sender=" + senderAddress);
-        throw std::runtime_error("[sendToken] No UTXO found for tokenID=" + fullTokenID + " with sender=" + senderAddress);
+        Logger::log(
+            "[sendToken] Error: No wallet-owned UTXO found for tokenID=" +
+            fullTokenID);
+        throw std::runtime_error(
+            "[sendToken] No wallet-owned UTXO found for tokenID=" + fullTokenID);
     }
     Logger::log("[sendToken] Found UTXO: txid=" + txid + ", controllingVout=" +
-                std::to_string(controllingVout) + ", tokenVout=" + std::to_string(tokenVout));
+                std::to_string(controllingVout) + ", tokenVout=" + std::to_string(tokenVout) +
+                ", owner=" + effectiveSenderAddress);
 
     // Fetch token UTXO data - FIX: Use controllingVout instead of tokenVout
     nlohmann::json j;
@@ -7795,12 +7905,12 @@ std::string Wallet::sendToken(const std::string& tokenID, uint64_t amount,
         }
     } else {
         // Standalone mode: Use RPC
-        nlohmann::json params = {{"tokenID", fullTokenID}, {"address", senderAddress}};
+        nlohmann::json params = {{"tokenID", fullTokenID}, {"address", effectiveSenderAddress}};
         auto response = rpcCall("gettokenutxo", params, nodeIP, nodePort);
         if (response.contains("error") || !response.contains("result") ||
             !response["result"].is_array() || response["result"].empty()) {
             Logger::log("[sendToken] Error: RPC 'gettokenutxo' failed or returned no results for tokenID=" +
-                        fullTokenID + ", address=" + senderAddress);
+                        fullTokenID + ", address=" + effectiveSenderAddress);
             throw std::runtime_error("[sendToken] Failed to fetch token UTXO via RPC");
         }
         j = response["result"][0];
@@ -7816,20 +7926,20 @@ std::string Wallet::sendToken(const std::string& tokenID, uint64_t amount,
     }
 
     // Verify ownership
-    if (utxoOwner != senderAddress) {
-        Logger::log("[sendToken] Error: UTXO owned by " + utxoOwner + ", not sender " + senderAddress);
-        throw std::runtime_error("[sendToken] UTXO not owned by sender: owned by " + utxoOwner);
+    if (utxoOwner != effectiveSenderAddress) {
+        Logger::log("[sendToken] Error: UTXO owned by " + utxoOwner +
+                    ", not resolved sender " + effectiveSenderAddress);
+        throw std::runtime_error(
+            "[sendToken] UTXO ownership changed while preparing transfer");
     }
 
     // Fetch decimals from metadata
     int decimals = 0;
     if (isLocalChain) {
         LevelDBStorage* storage = blockchainPtr->getStorage();
-        std::string metadataKey = "tokenMetadata:" + txid;
-        std::string metadataValue;
-        if (storage->getWithDataChecksum(metadataKey, metadataValue)) {
+        nlohmann::json metadataJson;
+        if (blockchainPtr->resolveTokenMetadataAtOutpoint(txid, controllingVout, metadataJson)) {
             try {
-                nlohmann::json metadataJson = nlohmann::json::parse(metadataValue);
                 if (metadataJson.contains("meta") && metadataJson["meta"].contains("decimals")) {
                     decimals = std::stoi(metadataJson["meta"]["decimals"].get<std::string>());
                     Logger::log("[sendToken] Decimals from metadata: " + std::to_string(decimals));
@@ -7838,7 +7948,7 @@ std::string Wallet::sendToken(const std::string& tokenID, uint64_t amount,
                 Logger::log("[sendToken] Warning: Failed to parse metadata: " + std::string(e.what()) + ", assuming decimals=0");
             }
         } else {
-            Logger::log("[sendToken] Warning: Metadata not found for txid=" + txid + ", assuming decimals=0");
+            throw std::runtime_error("Token metadata missing or does not match confirmed branch");
         }
     } else {
         nlohmann::json params = {{"txid", txid}};
@@ -7876,17 +7986,14 @@ std::string Wallet::sendToken(const std::string& tokenID, uint64_t amount,
                                  ", need " + std::to_string(amountInSmallestUnits));
     }
 
-    // SEC-14R.3:
-    // senderAddress is already the wallet's selected sender supplied by the
-    // caller and ownership-validated above. Do NOT invoke the persisted
-    // current-address mutation API here; it is intentionally
-    // refused in encrypted mode by SEC-14E.3.3B.
-    //
-    // transferExtendedToken() consumes the wallet's current address for
-    // signing; the CLI/RPC send path supplies the same current sender.
-    // Therefore changing/persisting currentIndex here is redundant.
-    Logger::log("[SEC-14R.3] sendToken using authenticated current sender without persisted address mutation: " +
-                senderAddress);
+    // SEC-14R.3 + TOKEN-SEND-WALLET-OWNER-01:
+    // Never mutate/persist currentIndex just to spend a historical wallet
+    // address.  transferExtendedToken() re-derives the owner from the confirmed
+    // token-control record and signTransaction() selects each input key by its
+    // actual locking script.
+    Logger::log(
+        "[TOKEN-SEND-WALLET-OWNER-01] sendToken resolved owner without currentIndex mutation: " +
+        effectiveSenderAddress);
     std::string txidResult = transferExtendedToken(txid, controllingVout, amountInSmallestUnits, recipient);
     Logger::log("[sendToken] Transfer completed, txid=" + txidResult);
 
@@ -8459,8 +8566,9 @@ void Wallet::updateLocalUTXOSetFromChain() {
     std::vector<UTXO> allUTXOs = utxoSet.getAllUTXOs();
 
     for (const UTXO& u : allUTXOs) {
-        Logger::log("[updateLocalUTXOSetFromChain] Processing UTXO: " + u.txid + " (length=" + std::to_string(u.txid.length()) + "):" + std::to_string(u.vout));
-        Logger::log("[updateLocalUTXOSetFromChain] ScriptPubKey: " + u.scriptPubKey);
+        // CADENCE-HASHRATE-TELEMETRY-01: do not INFO-log every UTXO/script.
+        // Large-chain wallet refreshes and reorg reconciliation must remain
+        // observable by summary/error logs rather than produce O(UTXO) log IO.
 
         // First check if this is a token UTXO by examining the scriptPubKey
         if (startsWithOpReturnHex(u.scriptPubKey)) {
@@ -8526,7 +8634,6 @@ void Wallet::updateLocalUTXOSetFromChain() {
                 std::string key = u.txid + ":" + std::to_string(u.vout);
                 LocalUtxo lu = {u.txid, u.vout, u.amount, u.scriptPubKey};
                 updated.emplace(key, std::move(lu));
-                Logger::log("[updateLocalUTXOSetFromChain] Included regular UTXO " + key + " for address " + addr + ", amount: " + std::to_string(u.amount));
             }
         }
     }

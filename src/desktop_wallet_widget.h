@@ -30,6 +30,9 @@ public:
     QString currentWalletAddress() const;
     bool validateWalletAddress(const QString& address) const;
 
+    // AXON UX-03B: consume a short-lived tru:// funding handoff through a local Core.
+    void openAxonHandoff(const QString& uri);
+
     void selectSafeFeeUtxo(
         std::uint64_t minimumAtoms,
         std::function<void(QJsonObject, QString)> done);

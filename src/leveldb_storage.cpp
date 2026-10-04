@@ -1,4 +1,5 @@
 #include "leveldb_storage.h"
+#include <chrono>
 #include "contract_storage.h"
 #include <sys/stat.h>
 #include <errno.h>
@@ -970,3 +971,21 @@ bool LevelDBStorage::getContract(const std::string &key, std::string &outValue) 
     return true;
 }
 
+
+// TRU-DATA-PROVIDER-01: constant-memory, checksum-checked observational scan.
+void LevelDBStorage::iteratePrefixCheckedV1(const std::string& prefix,std::function<void(const std::string&,const std::string&)> callback) const {
+    auto mutex=getDbMutexHandle();if(!mutex)throw std::runtime_error("database unavailable");
+    std::lock_guard<std::mutex> guard(*mutex);
+    leveldb::ReadOptions opts;opts.fill_cache=false;
+    std::unique_ptr<leveldb::Iterator> it(db->NewIterator(opts));
+    const auto started=std::chrono::steady_clock::now();
+    for(it->Seek(prefix);it->Valid()&&it->key().starts_with(prefix);it->Next()) {
+        if(std::chrono::steady_clock::now()-started>std::chrono::seconds(5))throw std::runtime_error("supply scan time limit exceeded");
+        const auto raw=it->value().ToString();const auto delim=raw.find('|');
+        if(delim!=64)throw std::runtime_error("supply record checksum missing");
+        const auto value=raw.substr(delim+1);
+        if(raw.substr(0,delim)!=computeDataChecksum(value))throw std::runtime_error("supply record checksum mismatch");
+        callback(it->key().ToString().substr(prefix.size()),value);
+    }
+    if(!it->status().ok())throw std::runtime_error("supply database scan failed");
+}

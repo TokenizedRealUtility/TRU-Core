@@ -1,0 +1,23 @@
+// BSV post-Genesis HTLC. Refund time is bound to the actual spending
+// transaction using authenticated SIGHASH_ALL|FORKID preimage inspection.
+contract HostedHTLC {
+    PubKey claimKey;
+    PubKey refundKey;
+    Ripemd160 secretHash;
+    int refundTime;
+
+    public function claim(Sig signature, bytes secret) {
+        require(len(secret) == 32);
+        require(hash160(secret) == this.secretHash);
+        require(checkSig(signature, this.claimKey));
+    }
+
+    public function refund(Sig signature, SigHashPreimage preimage) {
+        require(Tx.checkPreimage(preimage));
+        require(preimage[len(preimage) - 4:] == b'41000000');
+        require(this.refundTime >= 500000000);
+        require(SigHash.nSequence(preimage) < 4294967295);
+        require(SigHash.nLocktime(preimage) >= this.refundTime);
+        require(checkSig(signature, this.refundKey));
+    }
+}

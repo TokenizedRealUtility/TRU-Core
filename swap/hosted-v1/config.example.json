@@ -1,0 +1,26 @@
+{
+  "enabled": false,
+  "publicOrigin": "https://tokenizedrealutility.com",
+  "basePath": "/easy-swap/",
+  "port": 8651,
+  "trustProxy": true,
+  "stateDir": "/home/gw878/tru-hosted-state",
+  "operatorKeyFile": "/home/gw878/tru-hosted-state/operator.key",
+  "maxActive": 100,
+  "maxTipAge": 3600,
+  "firstSeconds": 172800,
+  "secondSeconds": 86400,
+  "claimSafetySeconds": 3600,
+  "counterFundingSafetySeconds": 21600,
+  "chains": {
+    "tru": {"cli": ["/home/gw878/NEW_TRU/build-native/bin/tru-cli", "-conf=/home/gw878/NEW_TRU/tru.conf"], "genesis": "b62fba2600030d97a06916b17694bec8d97ca14c1db682b2e57b424bd6000000", "addressVersion": 65, "confirmations": 6, "fundingFee": "10000", "exitFee": "10000", "maxRecoveryScanBlocks": 10000},
+    "bsv": {"cli": ["/home/gw878/bitcoin-sv/bin/bitcoin-cli"], "genesis": "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", "addressVersion": 0, "confirmations": 6, "fundingFee": "10000", "exitFee": "10000", "electrum": {"host": "127.0.0.1", "port": 50001, "tls": false}},
+    "bsty": {"cli": ["/home/gw878/globalboost/src/globalboost-cli"], "genesis": "REPLACE_WITH_VERIFIED_BSTY_MAINNET_GENESIS", "addressVersion": 0, "confirmations": 6, "fundingFee": "10000", "exitFee": "10000", "electrum": {"host": "127.0.0.1", "port": 50002, "tls": false}}
+  },
+  "rates": {
+    "tru:bsv": {"enabled": false, "numerator": "1", "denominator": "1", "minAtoms": "100000", "maxAtoms": "1000000"},
+    "bsv:tru": {"enabled": false, "numerator": "1", "denominator": "1", "minAtoms": "100000", "maxAtoms": "1000000"},
+    "tru:bsty": {"enabled": false, "numerator": "1", "denominator": "1", "minAtoms": "100000", "maxAtoms": "1000000"},
+    "bsty:tru": {"enabled": false, "numerator": "1", "denominator": "1", "minAtoms": "100000", "maxAtoms": "1000000"}
+  }
+}

@@ -1,6 +1,7 @@
 #pragma once
 #include <QWidget>
 #include <QJsonObject>
+#include <QString>
 #include "desktop_rpc.h"
 class QComboBox;
 class QLabel;
@@ -12,12 +13,14 @@ class QPushButton;
 class QTimer;
 class QSpinBox;
 class QTabWidget;
+class DesktopWalletWidget;
 
 class DesktopPanel : public QWidget {
 public:
     explicit DesktopPanel(QWidget* parent = nullptr);
     void useLocalNode(int port, const QByteArray& token);
     DesktopRpc* rpc() { return &rpc_; }
+    void openAxonHandoff(const QString& uri);
 private:
     void refreshOverview();
     void selectOperation();
@@ -26,6 +29,7 @@ private:
     void testConnection();
     void updateConnectionMode();
     DesktopRpc rpc_;
+    DesktopWalletWidget* walletPage_ = nullptr;
     QTabWidget* pages_;
     QLineEdit *endpoint_, *cookie_, *sessionToken_;
     QRadioButton *localMode_, *remoteMode_;

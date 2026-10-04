@@ -68,6 +68,7 @@ public:
     bool exists(const std::string &txid, uint32_t vout) const;
     bool getUTXO(const std::string &txid, uint32_t vout, UTXO &utxo) const;
     std::vector<UTXO> getAllUTXOs() const;
+    nlohmann::json getDataProviderSupplyV1(uint64_t height) const;
 
     std::string getAddressFromUTXO(const std::string& txid, uint32_t vout, const Blockchain* blockchainPtr) const;
     // Debug printing

@@ -33,6 +33,18 @@ public:
         const nlohmann::json& mediaInputs = nullptr
     );
 
+    // NEROMESH-AXON-MARKETPLACE-01: construct the normal issuer-reviewable
+    // preview from a precomputed, non-authoritative AXON result. This performs
+    // no network AI call and no persistence/signing/broadcast.
+    TokenEvolutionResult evolveExternalPreview(
+        const std::string& tokenID,
+        const std::string& tokenType,
+        const nlohmann::json& currentMetadata,
+        const nlohmann::json& proposedUpdates,
+        const std::string& trigger,
+        const nlohmann::json& externalProvenance
+    );
+
     // Reconstruct against a trusted issuance root/current parent before commit.
     bool validateMediaPreview(const nlohmann::json& record,
                               const nlohmann::json& issuanceMetadata) const;
