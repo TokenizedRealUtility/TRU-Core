@@ -36,6 +36,8 @@ public:
 
     void iterateAll(std::function<void(const std::string &, const std::string &)> callback) const;
     void iteratePrefix(const std::string &prefix, std::function<void(const std::string &, const std::string &)> callback) const;
+    // Read-only, strict checksum validation. Callback MUST NOT re-enter storage.
+    void iteratePrefixCheckedV1(const std::string &prefix, std::function<void(const std::string &, const std::string &)> callback) const;
 
     void clear();
     void compact();

@@ -1,0 +1,22 @@
+[Unit]
+Description=TRU hosted swap coordinator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gw878
+WorkingDirectory=/home/gw878/NEW_TRU/swap/hosted-v1
+ExecStart=/usr/bin/flock -n /home/gw878/tru-hosted-state/service.lock /usr/bin/node src/server.js config.json
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=90
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/gw878/tru-hosted-state
+
+[Install]
+WantedBy=multi-user.target

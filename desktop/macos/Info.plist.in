@@ -12,5 +12,13 @@
     <key>CFBundleVersion</key><string>${MACOSX_BUNDLE_BUNDLE_VERSION}</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
+    <!-- AXON UX-03B: hand short-lived tru:// funding intents to TRU Core Desktop. -->
+    <key>CFBundleURLTypes</key>
+    <array>
+      <dict>
+        <key>CFBundleURLName</key><string>com.tokenizedrealutility.axon</string>
+        <key>CFBundleURLSchemes</key><array><string>tru</string></array>
+      </dict>
+    </array>
 </dict>
 </plist>

@@ -1,6 +1,8 @@
+#include "token_continuation_metadata_v1.h"
 #include "magic_secret_service_v2.h"
 #include "rpc_server.h"
 #include "rpc_utils.h"  // authenticated RPC transport
+#include "axon_wallet_handoff_lock.h"  // AXON UX-03B shared local funding lock
 #include "blockchain.h"
 #include "tru_limits.h"  // shared block/template limits
 #include "block.h"
@@ -27,6 +29,7 @@
 #include "wallet.h"
 #include <optional>
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <queue>
 #include <condition_variable>
@@ -46,6 +49,10 @@
 #include "tru_amount.h"
 #include "tru_version.h"  // UI-08 connected Core release version
 #include "peer_observability_v1.h"
+#include <curl/curl.h>  // AXON UX-03B outbound handoff fetch
+#include <openssl/sha.h>
+#include <fstream>
+#include <ctime>
 
 using json = nlohmann::json;
 httplib::Server g_rpcServer;
@@ -3812,7 +3819,30 @@ static json handleGetTokenMetadata(Blockchain& chain, const json& params, int id
     std::string metaKey = "tokenMetadata:" + txid;
     std::string metaValue;
     if (!storage->getWithDataChecksum(metaKey, metaValue)) {
-        return makeError(-32000, "No metadata found for the given txid");
+        Transaction tx;
+        if (!chain.getTransaction(txid, tx))
+            return makeError(-32000, "Confirmed token transaction not found");
+        json recovered;
+        bool found = false;
+        tru_token_continuation::Branch first;
+        for (uint32_t v = 1; v < tx.vout.size(); ++v) {
+            tru_token_continuation::Branch branch;
+            if (!tru_token_continuation::branch(tx, v, branch)) continue;
+            if (found && (branch.tokenID != first.tokenID || branch.type != first.type ||
+                          branch.metaHash != first.metaHash))
+                return makeError(-32000, "Ambiguous token metadata for transaction");
+            if (!found) {
+                if (!chain.resolveTokenMetadataAtOutpoint(txid, v, recovered))
+                    return makeError(-32000, "Token metadata missing or commitment mismatch");
+                first = branch;
+                found = true;
+            }
+        }
+        if (!found) return makeError(-32000, "No token metadata found for the given txid");
+        // Metadata is transaction-level; split quantities/owners come from gettokenutxo.
+        recovered.erase("amount");
+        recovered.erase("owner");
+        return makeResult(id, recovered);
     }
 
     // Parse and return metadata
@@ -4463,10 +4493,37 @@ static json handleSendToken(Blockchain &chain, Wallet &wallet, const json &p, in
         uint64_t amt = p["amount"].get<uint64_t>();
         auto rec = p["recipient"].get<std::string>();
         auto snd = p["senderAddress"].get<std::string>();
-        auto [utxoTx,controllingVout, utxoV] = wallet.findTokenUTXO(tid,snd);
-        wallet.setCurrentAddress(snd);
+        if (!wallet.ownsAddress(snd))
+            return makeError(-32000,"Sender address is not controlled by this wallet");
+
+        // TOKEN-SEND-WALLET-OWNER-01: senderAddress is a preferred wallet
+        // address, not proof that the token lives at currentIndex.  Preserve
+        // this RPC's raw-unit amount semantics while resolving the token across
+        // all wallet-owned addresses.  transferExtendedToken() independently
+        // binds itself to the confirmed token owner and never mutates currentIndex.
+        std::string resolvedOwner = snd;
+        auto tokenLocation = wallet.findTokenUTXO(tid, resolvedOwner);
+        if (std::get<0>(tokenLocation).empty()) {
+            for (const auto& addr : wallet.getAllAddresses()) {
+                if (addr == snd) continue;
+                auto candidate = wallet.findTokenUTXO(tid, addr);
+                if (!std::get<0>(candidate).empty()) {
+                    resolvedOwner = addr;
+                    tokenLocation = candidate;
+                    break;
+                }
+            }
+        }
+        auto [utxoTx, controllingVout, utxoV] = tokenLocation;
+        (void)utxoV;
+        if (utxoTx.empty())
+            return makeError(-32000,"No wallet-owned UTXO found for tokenID="+tid);
+
+        Logger::log(
+            "[TOKEN-SEND-WALLET-OWNER-01][RPC] resolved token owner=" +
+            resolvedOwner + " preferred=" + snd + " tokenID=" + tid);
         auto txid = wallet.transferExtendedToken(utxoTx,controllingVout,amt,rec);
-        return makeResult(id,json{{"txid",txid}});
+        return makeResult(id,json{{"txid",txid},{"from",resolvedOwner}});
     } catch(const std::exception &e) {
         return makeError(-32000,e.what());
     }
@@ -7815,6 +7872,10 @@ static json handleVerifyTokenEvolution(
             {"epoch", epochSummary.value("epoch", 0ULL)},
             {"anchor_status", epochSummary.value("anchor_status", "UNKNOWN")}
         };
+        if (epochSummary.contains("external_provenance") &&
+            epochSummary["external_provenance"].is_object()) {
+            runtimeEpoch["external_provenance"] = epochSummary["external_provenance"];
+        }
 
         const std::string localStatus =
             epochSummary.value("anchor_status", "UNKNOWN");
@@ -7927,6 +7988,15 @@ static json handleVerifyTokenEvolution(
         anchorConfirmationAcceptable;
     result["issuer_authorized"] = history.value("issuer_authorized", false);
     result["authorization_status"] = history.value("authorization_status", "UNKNOWN");
+    // AXON-MARKETPLACE-01: read-only issuer routing hint for NEROMESH.
+    // This exposes the same original issuance-owner authority already enforced
+    // by TokenEvolutionEngine; it grants no signing or mutation capability.
+    try {
+        const json authority = engine.issuerContext(tokenID);
+        result["evolution_authority"] = authority.value("owner", "");
+    } catch (...) {
+        result["evolution_authority"] = "";
+    }
     result["anchor_lineage_ok"] =
         history.value("lineage_ok", false) &&
         history.value("fully_anchored", false) &&
@@ -9774,7 +9844,8 @@ static double rpcMethodCost(const std::string& method) {
         "issuetoken", "issuetokensigned", "createcontracttransaction",
         "preparevotingv1create07b", "preparevotingv1ballot07b",
         "inscribeTRUScript", "inscribeTRUScriptSigned", "createsocialpost",
-        "createAIToken", "interactWithAIToken", "trainAIToken"
+        "createAIToken", "interactWithAIToken", "trainAIToken",
+        "axonwalletfund"
     };
     if (expensive.count(method)) return 8.0;
     if (method == "getblocktemplate") return 2.0;
@@ -9825,6 +9896,105 @@ static bool rpcEnvEnabled(const char* key) {
 static bool rpcLocalPeer(const std::string& peer) {
     return peer == "127.0.0.1" || peer == "::1" || peer == "::ffff:127.0.0.1";
 }
+
+
+//============================================================================================
+// NEROMESH-AXON-UX-03B — loopback-only wallet handoff RPC for TRU Desktop
+//============================================================================================
+namespace {
+struct RpcAxonHandoffRef { std::string intentId, gateway, capability; };
+struct RpcAxonHttpResult { long status{0}; std::string body; };
+
+static size_t rpcAxonCurlWrite(void* p,size_t s,size_t n,void* u) {
+    const size_t bytes=s*n; static_cast<std::string*>(u)->append(static_cast<const char*>(p),bytes); return bytes;
+}
+static std::string rpcAxonPct(const std::string& in) {
+    std::string out; out.reserve(in.size());
+    auto hex=[](char c){ if(c>='0'&&c<='9')return c-'0'; if(c>='a'&&c<='f')return c-'a'+10; if(c>='A'&&c<='F')return c-'A'+10; return -1; };
+    for(size_t i=0;i<in.size();++i){ if(in[i]=='%'){ if(i+2>=in.size()) throw std::runtime_error("malformed handoff escape"); int a=hex(in[i+1]),b=hex(in[i+2]); if(a<0||b<0) throw std::runtime_error("malformed handoff escape"); char c=static_cast<char>((a<<4)|b); if(c=='\0'||c=='\r'||c=='\n') throw std::runtime_error("unsafe handoff byte"); out.push_back(c); i+=2;} else out.push_back(in[i]); }
+    return out;
+}
+static std::string rpcAxonBase() {
+    std::string base="https://tru.neromesh.space";
+    if(const char* e=std::getenv("TRU_NEROMESH_URL")) if(*e) base=e;
+    while(!base.empty()&&base.back()=='/') base.pop_back();
+    const bool local=base.rfind("http://127.0.0.1",0U)==0U||base.rfind("http://localhost",0U)==0U;
+    if(base.rfind("https://",0U)!=0U&&!local) throw std::runtime_error("NEROMESH URL must use HTTPS except localhost testing");
+    const auto p=base.find("://"), start=p==std::string::npos?std::string::npos:p+3U;
+    if(start==std::string::npos || base.find('/',start)!=std::string::npos || base.find('@',start)!=std::string::npos || base.find_first_of("?#",start)!=std::string::npos)
+        throw std::runtime_error("NEROMESH URL must be an origin without path/query/userinfo");
+    return base;
+}
+static std::string rpcAxonAuthority() {
+    const auto base=rpcAxonBase(); const auto start=base.find("://")+3U; std::string a=base.substr(start);
+    std::transform(a.begin(),a.end(),a.begin(),[](unsigned char c){return static_cast<char>(std::tolower(c));}); return a;
+}
+static RpcAxonHandoffRef rpcAxonParse(const std::string& raw) {
+    const std::string pre="tru://axon/fund/"; if(raw.rfind(pre,0U)!=0U||raw.size()>1024U) throw std::runtime_error("Expected tru://axon/fund/AXI-... URI");
+    const auto q=raw.find('?',pre.size()), h=raw.find('#',pre.size()); if(q==std::string::npos||h==std::string::npos||q>=h) throw std::runtime_error("handoff missing gateway/capability");
+    RpcAxonHandoffRef r; r.intentId=raw.substr(pre.size(),q-pre.size()); const auto query=raw.substr(q+1,h-q-1), frag=raw.substr(h+1);
+    if(query.rfind("gateway=",0U)!=0U||query.find('&')!=std::string::npos||frag.rfind("cap=",0U)!=0U||frag.find('&')!=std::string::npos) throw std::runtime_error("unsupported handoff fields");
+    r.gateway=rpcAxonPct(query.substr(8)); r.capability=rpcAxonPct(frag.substr(4));
+    if(r.intentId.size()!=20U||r.intentId.rfind("AXI-",0U)!=0U||!std::all_of(r.intentId.begin()+4,r.intentId.end(),[](unsigned char c){return std::isxdigit(c)!=0&&(std::isdigit(c)||std::isupper(c));})) throw std::runtime_error("invalid AXI intent ID");
+    if(r.capability.rfind("axc_",0U)!=0U||r.capability.size()<36U||r.capability.size()>128U||!std::all_of(r.capability.begin()+4,r.capability.end(),[](unsigned char c){return std::isalnum(c)||c=='_'||c=='-';})) throw std::runtime_error("invalid axc capability");
+    std::transform(r.gateway.begin(),r.gateway.end(),r.gateway.begin(),[](unsigned char c){return static_cast<char>(std::tolower(c));});
+    if(r.gateway!=rpcAxonAuthority()) throw std::runtime_error("handoff gateway does not match configured NEROMESH origin"); return r;
+}
+static json rpcAxonHttp(const std::string& method,const std::string& path,const std::string& cap,const json& body=json()) {
+    CURL* c=curl_easy_init(); if(!c) throw std::runtime_error("cannot initialize HTTPS client"); RpcAxonHttpResult out; curl_slist* headers=nullptr;
+    headers=curl_slist_append(headers,"Accept: application/json"); const std::string auth="Authorization: Bearer "+cap; headers=curl_slist_append(headers,auth.c_str()); std::string encoded;
+    if(method=="POST"){ headers=curl_slist_append(headers,"Content-Type: application/json"); encoded=body.is_null()?"{}":body.dump(); curl_easy_setopt(c,CURLOPT_POST,1L); curl_easy_setopt(c,CURLOPT_POSTFIELDS,encoded.c_str()); curl_easy_setopt(c,CURLOPT_POSTFIELDSIZE,static_cast<long>(encoded.size())); }
+    const std::string url=rpcAxonBase()+path; curl_easy_setopt(c,CURLOPT_URL,url.c_str()); curl_easy_setopt(c,CURLOPT_HTTPHEADER,headers); curl_easy_setopt(c,CURLOPT_WRITEFUNCTION,rpcAxonCurlWrite); curl_easy_setopt(c,CURLOPT_WRITEDATA,&out.body); curl_easy_setopt(c,CURLOPT_USERAGENT,"TRU-Core/AXON-UX-03B"); curl_easy_setopt(c,CURLOPT_FOLLOWLOCATION,0L); curl_easy_setopt(c,CURLOPT_CONNECTTIMEOUT,10L); curl_easy_setopt(c,CURLOPT_TIMEOUT,30L); curl_easy_setopt(c,CURLOPT_SSL_VERIFYPEER,1L); curl_easy_setopt(c,CURLOPT_SSL_VERIFYHOST,2L);
+    const auto rc=curl_easy_perform(c); curl_easy_getinfo(c,CURLINFO_RESPONSE_CODE,&out.status); curl_slist_free_all(headers); curl_easy_cleanup(c); if(rc!=CURLE_OK) throw std::runtime_error(std::string("NEROMESH request failed: ")+curl_easy_strerror(rc));
+    json parsed; try{parsed=json::parse(out.body);}catch(...){throw std::runtime_error("NEROMESH returned non-JSON HTTP "+std::to_string(out.status));} if(out.status<200||out.status>=300) throw std::runtime_error("NEROMESH HTTP "+std::to_string(out.status)+": "+parsed.value("error",parsed.value("detail","request rejected"))); return parsed;
+}
+static void rpcAxonValidate(const json& st,const RpcAxonHandoffRef& r) {
+    if(st.value("intent_id","")!=r.intentId||st.value("schema","")!="AXON_WALLET_HANDOFF_V1"||!st.contains("handoff")||!st["handoff"].is_object()) throw std::runtime_error("mismatched AXON handoff response"); const auto& h=st["handoff"];
+    if(h.value("schema","")!="AXON_WALLET_HANDOFF_V1"||h.value("network","")!="TRU"||!h.value("noncustodial",false)||!h.value("wallet_signs_locally",false)) throw std::runtime_error("unsupported AXON handoff schema");
+    const auto dig=st.value("intent_sha256",""); if(dig.size()!=64U||!isHex(dig)) throw std::runtime_error("malformed AXON handoff fingerprint");
+}
+static std::filesystem::path rpcAxonJournalPath(const std::string& id) {
+    const char* home=std::getenv("HOME"); if(!home||!*home) throw std::runtime_error("HOME unavailable for AXON journal"); auto dir=std::filesystem::path(home)/".tru"/"axon-wallet-handoffs"; std::filesystem::create_directories(dir); std::filesystem::permissions(dir,std::filesystem::perms::owner_all,std::filesystem::perm_options::replace); return dir/(id+".json");
+}
+static json rpcAxonJournalLoad(const std::string& id) { auto p=rpcAxonJournalPath(id); if(!std::filesystem::exists(p)) return json::object(); std::ifstream in(p); json j; if(!in) throw std::runtime_error("cannot read AXON journal"); in>>j; if(!j.is_object()||j.value("intent_id","")!=id) throw std::runtime_error("AXON journal corrupt"); return j; }
+static void rpcAxonJournalSave(const json& j) { const auto p=rpcAxonJournalPath(j.value("intent_id","")); const auto tmp=p.string()+".tmp"; {std::ofstream o(tmp,std::ios::trunc); if(!o) throw std::runtime_error("cannot write AXON journal"); o<<j.dump(2)<<"\n"; o.flush(); if(!o) throw std::runtime_error("cannot flush AXON journal");} std::filesystem::permissions(tmp,std::filesystem::perms::owner_read|std::filesystem::perms::owner_write,std::filesystem::perm_options::replace); std::error_code ec; std::filesystem::remove(p,ec); ec.clear(); std::filesystem::rename(tmp,p,ec); if(ec) throw std::runtime_error("cannot commit AXON journal: "+ec.message()); std::filesystem::permissions(p,std::filesystem::perms::owner_read|std::filesystem::perms::owner_write,std::filesystem::perm_options::replace); }
+static std::string rpcAxonCanonicalScript(const std::string& hh,const std::string& ch,const std::string& rh,std::uint32_t rt) {
+    std::vector<unsigned char> hb,cb,rb; if(!tru_contract_call::DecodeScriptHexStrict(hh,hb)||hb.size()!=20U||!tru_contract_call::DecodeScriptHexStrict(ch,cb)||cb.size()!=33U||!tru_contract_call::DecodeScriptHexStrict(rh,rb)||rb.size()!=33U) throw std::runtime_error("malformed AXON HTLC plan");
+    std::array<unsigned char,20> h{}; std::array<unsigned char,33> c{},r{}; std::copy(hb.begin(),hb.end(),h.begin()); std::copy(cb.begin(),cb.end(),c.begin()); std::copy(rb.begin(),rb.end(),r.begin()); std::vector<unsigned char> script; tru_contract_call::CanonicalHtlcAtomicSwapV1Info info; if(!tru_contract_call::BuildCanonicalHtlcAtomicSwapV1Script(h,c,r,rt,script,&info)) throw std::runtime_error("non-canonical AXON HTLC plan"); return bytesToHex(script);
+}
+static json rpcAxonInspect(Wallet& wallet,const json& params,int id,const std::string& peer) {
+    try {
+        if(!rpcLocalPeer(peer)) return makeError(-32091,"AXON wallet handoff requires loopback RPC");
+        if(!params.is_object()||params.size()!=1U||!params.contains("uri")||!params["uri"].is_string()) return makeError(-32602,"axonwalletinspect requires {uri:string}");
+        const auto ref=rpcAxonParse(params["uri"].get<std::string>()); const auto st=rpcAxonHttp("GET","/api/v1/market/wallet-intents/"+ref.intentId,ref.capability); rpcAxonValidate(st,ref); const auto h=st.at("handoff");
+        std::string refundAddress=wallet.getCurrentAddress(), refundPubkey; if(!refundAddress.empty()){ auto p=wallet.getPublicKeyForAddress(refundAddress); if(p.size()==33U&&(p[0]==0x02||p[0]==0x03)) refundPubkey=bytesToHex(p); }
+        json r={{"intent_id",ref.intentId},{"intent_sha256",st.value("intent_sha256","")},{"expires_at",st.value("expires_at",0ULL)},{"expired",st.value("expired",false)},{"revoked",st.value("revoked",false)},{"offer_state",st.value("offer_state","")},{"job_id",h.value("job_id","")},{"job_type",h.value("job_type","")},{"total_tru",h.value("total_tru","")},{"compute_tru",h.value("compute_tru","")},{"acceptance_tru",h.value("acceptance_tru","")},{"worker_claim_pubkey",h.value("worker_claim_pubkey","")},{"refund_address",refundAddress},{"refund_pubkey",refundPubkey},{"noncustodial",true},{"wallet_signs_locally",true},{"capability_returned",false}};
+        if(st.contains("funding_outpoints")) r["funding_outpoints"]=st["funding_outpoints"]; return makeResult(id,r);
+    } catch(const std::exception& e){ Logger::log("[AXON-UX-03B] inspect failed: "+std::string(e.what())); return makeError(-32092,e.what()); }
+}
+static json rpcAxonFund(Wallet& wallet,const json& params,int id,const std::string& peer) {
+    std::lock_guard<std::mutex> fundingGuard(g_truAxonWalletHandoffFundingMutex);
+    try {
+        if(!rpcLocalPeer(peer)) return makeError(-32091,"AXON wallet handoff requires loopback RPC");
+        if(!params.is_object()||params.size()!=4U||!params.contains("uri")||!params["uri"].is_string()||!params.contains("expected_job_id")||!params["expected_job_id"].is_string()||!params.contains("expected_intent_sha256")||!params["expected_intent_sha256"].is_string()||params.value("confirm",false)!=true) return makeError(-32602,"axonwalletfund requires uri, expected_job_id, expected_intent_sha256, confirm:true");
+        const auto ref=rpcAxonParse(params["uri"].get<std::string>()); auto st=rpcAxonHttp("GET","/api/v1/market/wallet-intents/"+ref.intentId,ref.capability); rpcAxonValidate(st,ref); const auto h=st.at("handoff");
+        if(st.value("intent_sha256","")!=params["expected_intent_sha256"].get<std::string>()||h.value("job_id","")!=params["expected_job_id"].get<std::string>()) return makeError(-32093,"AXON handoff changed after review; inspect again");
+        if(st.contains("funding_outpoints")) return makeResult(id,json{{"already_funded",true},{"offer_state",st.value("offer_state","")},{"job_id",h.value("job_id","")},{"funding_outpoints",st["funding_outpoints"]}});
+        const std::string state=st.value("offer_state",""); if(st.value("revoked",false)||st.value("expired",false)) return makeError(-32094,"AXON wallet handoff expired/revoked"); if(state!="RESERVED"&&state!="AWAITING_FUNDING") return makeError(-32095,"AXON offer is not waiting for funding");
+        wallet.requirePrivateAccess("AXON wallet handoff funding"); const auto refundAddress=wallet.getCurrentAddress(); const auto pub=wallet.getPublicKeyForAddress(refundAddress); if(pub.size()!=33U||(pub[0]!=0x02&&pub[0]!=0x03)) return makeError(-32096,"Core wallet has no compressed refund public key"); const std::string refundPubkey=bytesToHex(pub); const auto rt=static_cast<std::uint32_t>(std::time(nullptr)+48*3600);
+        auto prep=rpcAxonHttp("POST","/api/v1/market/wallet-intents/"+ref.intentId+"/prepare",ref.capability,json{{"refund_pubkey",refundPubkey},{"refund_time",rt}}); rpcAxonValidate(prep,ref); const auto plan=prep.at("funding_plan"), cplan=plan.at("compute"), aplan=plan.at("acceptance"); const auto frozen= cplan.at("refund_pubkey").get<std::string>(); const auto ft=cplan.at("refund_time").get<std::uint32_t>();
+        if(frozen!=refundPubkey||aplan.at("refund_pubkey").get<std::string>()!=frozen||aplan.at("refund_time").get<std::uint32_t>()!=ft||cplan.at("claim_pubkey").get<std::string>()!=h.value("worker_claim_pubkey","")||aplan.at("claim_pubkey").get<std::string>()!=h.value("worker_claim_pubkey","")||cplan.at("amount_atoms").get<std::uint64_t>()!=h.at("compute_atoms").get<std::uint64_t>()||aplan.at("amount_atoms").get<std::uint64_t>()!=h.at("acceptance_atoms").get<std::uint64_t>()) return makeError(-32097,"FAIL CLOSED: frozen funding plan differs from reviewed handoff");
+        if(rpcAxonCanonicalScript(cplan.at("secret_hash160").get<std::string>(),cplan.at("claim_pubkey").get<std::string>(),frozen,ft)!=cplan.at("script_hex").get<std::string>()||rpcAxonCanonicalScript(aplan.at("secret_hash160").get<std::string>(),aplan.at("claim_pubkey").get<std::string>(),frozen,ft)!=aplan.at("script_hex").get<std::string>()) return makeError(-32097,"FAIL CLOSED: NEROMESH HTLC script is not canonical");
+        json j=rpcAxonJournalLoad(ref.intentId); if(j.empty()) j={{"schema","TRU_AXON_WALLET_HANDOFF_JOURNAL_V1"},{"intent_id",ref.intentId},{"intent_sha256",prep.value("intent_sha256","")},{"job_id",h.value("job_id","")},{"refund_pubkey",frozen},{"refund_time",ft}}; if(j.value("intent_sha256","")!=prep.value("intent_sha256","")||j.value("job_id","")!=h.value("job_id","")||j.value("refund_pubkey","")!=frozen) return makeError(-32098,"local AXON journal mismatch");
+        if(!j.contains("compute_txid")){ auto c=wallet.createHtlcAtomicSwapV1(cplan.at("secret_hash160").get<std::string>(),cplan.at("claim_pubkey").get<std::string>(),frozen,ft,cplan.at("amount_atoms").get<std::uint64_t>()); if(c.scriptHex!=cplan.at("script_hex").get<std::string>()) return makeError(-32099,"compute HTLC script mismatch"); j["compute_txid"]=c.txid; j["compute_vout"]=c.contractVout; rpcAxonJournalSave(j); }
+        if(!j.contains("acceptance_txid")){ auto a=wallet.createHtlcAtomicSwapV1(aplan.at("secret_hash160").get<std::string>(),aplan.at("claim_pubkey").get<std::string>(),frozen,ft,aplan.at("amount_atoms").get<std::uint64_t>()); if(a.scriptHex!=aplan.at("script_hex").get<std::string>()) return makeError(-32100,"acceptance HTLC script mismatch"); j["acceptance_txid"]=a.txid; j["acceptance_vout"]=a.contractVout; rpcAxonJournalSave(j); }
+        const std::string cTx=j.at("compute_txid").get<std::string>(), aTx=j.at("acceptance_txid").get<std::string>(); const int cV=j.value("compute_vout",1), aV=j.value("acceptance_vout",1);
+        auto reg=rpcAxonHttp("POST","/api/v1/market/wallet-intents/"+ref.intentId+"/funding",ref.capability,json{{"compute_txid",cTx},{"compute_vout",cV},{"acceptance_txid",aTx},{"acceptance_vout",aV}}); j["registered"]=true; j["server_state"]=reg.value("offer_state",reg.value("state","")); rpcAxonJournalSave(j);
+        return makeResult(id,json{{"job_id",h.value("job_id","")},{"intent_id",ref.intentId},{"offer_state",reg.value("offer_state",reg.value("state","FUNDING_PENDING"))},{"compute_txid",cTx},{"compute_vout",cV},{"acceptance_txid",aTx},{"acceptance_vout",aV},{"registered",true},{"automatic_reconciliation",true},{"capability_returned",false}});
+    } catch(const std::exception& e){ Logger::log("[AXON-UX-03B] fund failed: "+std::string(e.what())); return makeError(-32101,e.what()); }
+}
+} // namespace
+
 static uint64_t rpcMaxSendAtoms() {
     // Default maximum per CLI transaction is 1 TRU, including stress tests.
     // The operator may explicitly set a higher atom-denominated cap.
@@ -10004,6 +10174,8 @@ void startRPCServer(Blockchain &chain, Wallet &wallet, P2PNode &node, int port,
         else if (m=="sendrawtransactionWeb")  response=handleSendTransactionWeb(chain,params,id);
         else if (m=="sendrawtransaction")  response=handleSendTransaction(chain,params,id);
         else if (m=="sendtoaddress") response=handleSendToAddressLocal(chain,wallet,params,id,req.remote_addr,port);
+        else if (m=="axonwalletinspect") response=rpcAxonInspect(wallet,params,id,req.remote_addr);
+        else if (m=="axonwalletfund") response=rpcAxonFund(wallet,params,id,req.remote_addr);
         else if (m=="preparemagicsecret" || m=="getmagicsecret" || m=="publishmagicsecret") {
             try {
                 if(m=="getmagicsecret") response=makeResult(id,tru_magic_service_v2::get(chain,params));
@@ -10074,6 +10246,10 @@ void startRPCServer(Blockchain &chain, Wallet &wallet, P2PNode &node, int port,
         else if (m=="listmagiclocks")      response=handleListMagicLocks(chain,params,id);
         else if (m=="listaddresses")       response=handleListAddresses(wallet,params,id);
         else if (m=="getbalance")          response=handleGetBalance(chain,wallet,params,id);
+        // TRU-DATA-PROVIDER-01: ordinary authenticated read-only RPCs.
+        else if (m=="getchainsupply") response=makeResult(id,chain.getDataProviderSupplyV1());
+        else if (m=="getchainhealth") response=makeResult(id,chain.getDataProviderHealthV1());
+        else if (m=="getchainmetadata") response=makeResult(id,chain.getDataProviderChainV1());
         else if (m=="getinfo")             response=handleGetInfo(chain,wallet,node,id);
         else if (m=="getdesktopinfo")      response=handleGetDesktopInfo(chain,node,id);
         else if (m=="configureAIProvider") response=handleConfigureAIProvider(chain, params, id);

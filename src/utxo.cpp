@@ -733,12 +733,15 @@ std::vector<UTXO> UTXOSet::getAllUTXOs() const {
 
     std::vector<UTXO> all;
     all.reserve(1024);
+    size_t scanned = 0;
+    size_t malformed = 0;
 
     dbStorage.iteratePrefix("utxo:", [&](const std::string &key, const std::string &raw) {
-        // first, log *everything* coming out of LevelDB
-        Logger::log("[getAllUTXOs] 🔸 Raw entry: key=" + key + "  value=\"" + raw + "\"");
+        ++scanned;
 
-        // now split on '|'  
+        // Split on '|'. CADENCE-HASHRATE-TELEMETRY-01 removes the old
+        // per-UTXO INFO dump: one wallet/reorg refresh was generating tens of
+        // thousands of log lines as the chain grew.
         std::vector<std::string> parts;
         size_t start = 0, pos;
         while ((pos = raw.find('|', start)) != std::string::npos) {
@@ -750,6 +753,7 @@ std::vector<UTXO> UTXOSet::getAllUTXOs() const {
         // fields after parts[2] are persisted metadata
         // such as cb=1. They must not cause a valid UTXO to be discarded.
         if (parts.size() < 3) {
+            ++malformed;
             Logger::log("[getAllUTXOs] ⚠️  Unexpected format (need at least 3 parts): got " 
                         + std::to_string(parts.size()) + " — skipping");
             return;
@@ -763,6 +767,7 @@ std::vector<UTXO> UTXOSet::getAllUTXOs() const {
         try {
             amount = std::stoull(amountStr);
         } catch (const std::exception &e) {
+            ++malformed;
             Logger::log("[getAllUTXOs] ⚠️  Bad amount \"" + amountStr + "\": " + e.what());
             return;
         }
@@ -771,6 +776,7 @@ std::vector<UTXO> UTXOSet::getAllUTXOs() const {
         // key is already without "utxo:" prefix due to iteratePrefix
         auto colon = key.rfind(':');
         if (colon == std::string::npos) {
+            ++malformed;
             Logger::log("[getAllUTXOs] ⚠️  Bad key format: " + key);
             return;
         }
@@ -781,14 +787,14 @@ std::vector<UTXO> UTXOSet::getAllUTXOs() const {
         u.amount = amount;
         u.scriptPubKey = scriptHex;
 
-        Logger::log("[getAllUTXOs] ➕ Parsed UTXO: " 
-            + u.txid + ":" + std::to_string(u.vout)
-            + ", amount=" + std::to_string(u.amount)
-        );
         all.push_back(std::move(u));
     });
 
-    Logger::log("[getAllUTXOs] 🔢 Total UTXOs returned: " + std::to_string(all.size()));
+    Logger::log(
+        "[getAllUTXOs] Enumeration complete: scanned=" +
+        std::to_string(scanned) +
+        " returned=" + std::to_string(all.size()) +
+        " malformed=" + std::to_string(malformed));
     std::sort(all.begin(), all.end(), [](auto const &A, auto const &B){
         if (A.txid != B.txid) return A.txid < B.txid;
         return A.vout < B.vout;
@@ -1145,4 +1151,16 @@ bool UTXOSet::updateOffChainMetadata(const std::string &tokenID,
 
     dbStorage.iterateAll(callback);
     return updatedAtLeastOne;
+}
+
+// TRU-DATA-PROVIDER-01: strict accounting read; never changes the UTXO set.
+#include "tru_data_provider_v1.h"
+nlohmann::json UTXOSet::getDataProviderSupplyV1(uint64_t height) const {
+    std::shared_lock<std::shared_mutex> lock(mtx);
+    const auto meta=tru_data_provider_v1::metadata();
+    std::set<std::string> excluded;
+    for(const auto& s:meta["reserve_scripts"])excluded.insert(s.get<std::string>());
+    tru_data_provider_v1::Supply totals;
+    dbStorage.iteratePrefixCheckedV1("utxo:",[&](const std::string& key,const std::string& value){totals.consume(key,value,height,COINBASE_MATURITY,excluded);});
+    return totals.result(height,meta);
 }

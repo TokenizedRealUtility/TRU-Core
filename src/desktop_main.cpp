@@ -5,14 +5,67 @@
 #define TRU_DESKTOP_BUILD_VERSION "source"
 #endif
 #include <QApplication>
+#include <QFileOpenEvent>
 #include <QFont>
 #include <QTimer>
 #include <QScreen>
+#include <cstring>
+#include <functional>
+#include <utility>
+
+class TruDesktopApplication final : public QApplication {
+public:
+    using QApplication::QApplication;
+    void setAxonHandler(std::function<void(const QString&)> handler) {
+        axonHandler_ = std::move(handler);
+        if (!pendingAxon_.isEmpty()) {
+            const QString pending = pendingAxon_;
+            pendingAxon_.clear();
+            QTimer::singleShot(0, this, [this, pending] { deliverAxon(pending); });
+        }
+    }
+    void queueAxon(const QString& uri) {
+        if (!uri.startsWith("tru://axon/fund/")) return;
+        if (axonHandler_) QTimer::singleShot(0, this, [this, uri] { deliverAxon(uri); });
+        else pendingAxon_ = uri;
+    }
+protected:
+    bool event(QEvent* event) override {
+        if (event && event->type() == QEvent::FileOpen) {
+            auto* open = static_cast<QFileOpenEvent*>(event);
+            const QString uri = open->url().toString();
+            if (uri.startsWith("tru://axon/fund/")) {
+                queueAxon(uri);
+                return true;
+            }
+        }
+        return QApplication::event(event);
+    }
+private:
+    void deliverAxon(const QString& uri) { if (axonHandler_) axonHandler_(uri); }
+    QString pendingAxon_;
+    std::function<void(const QString&)> axonHandler_;
+};
+
 int main(int argc, char** argv) {
 #if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
     QApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
 #endif
-    QApplication app(argc, argv);
+    TruDesktopApplication app(argc, argv);
+    // AXON UX-03B: capture tru:// only in process memory. Never write axc_ to
+    // QSettings, wallet files or the local non-secret funding journal.
+    const QStringList launchArgs = app.arguments();
+    for (int i = 0; i < launchArgs.size(); ++i) {
+        const QString& arg = launchArgs.at(i);
+        if (arg.startsWith("tru://axon/fund/")) {
+            app.queueAxon(arg);
+            if (i < argc && argv[i]) {
+                const std::size_t n = std::strlen(argv[i]);
+                std::memset(argv[i], 0, n);
+            }
+            break;
+        }
+    }
     app.setApplicationName("TRU Core Desktop");
     app.setOrganizationName("TRUBlockchain");
     app.setFont(QFont("Sans Serif", 10));
@@ -27,6 +80,7 @@ int main(int argc, char** argv) {
         "QTabBar::tab:selected {background:#205269;color:#72f0db;}"
         "QTabWidget::pane {border:1px solid #294056;}");
     DesktopPanel desktop;
+    app.setAxonHandler([&desktop](const QString& uri) { desktop.openAxonHandoff(uri); });
     // Explicit native window controls; no fixed-size constraint.
     desktop.setWindowFlags(Qt::Window | Qt::WindowTitleHint |
                            Qt::WindowSystemMenuHint | Qt::WindowMinMaxButtonsHint |

@@ -29,6 +29,7 @@
 #include <QStandardPaths>
 #include <QStyle>
 #include <QTabWidget>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include <qrencode.h>
@@ -304,6 +305,9 @@ DesktopWalletWidget::DesktopWalletWidget(
 
     auto* send = new QPushButton("Send TRU");
     send->setObjectName("truPrimaryAction");
+    auto* axonFund = new QPushButton("Fund AXON Handoff");
+    axonFund->setObjectName("truPrimaryAction");
+    axonFund->setToolTip("Paste a short-lived tru:// AXON funding handoff. The connected local Core wallet signs; no private key is sent to NEROMESH.");
     auto* next = new QPushButton("New Address");
     auto* refresh = new QPushButton("Refresh");
     auto* create = new QPushButton("Create Wallet");
@@ -317,6 +321,7 @@ DesktopWalletWidget::DesktopWalletWidget(
     actions->addWidget(create, 1, 0);
     actions->addWidget(unlock, 1, 1);
     actions->addWidget(lock, 1, 2);
+    actions->addWidget(axonFund, 2, 0, 1, 3);
     for (int column = 0; column < 3; ++column)
         actions->setColumnStretch(column, 1);
     root->addWidget(actionsBox);
@@ -363,6 +368,13 @@ DesktopWalletWidget::DesktopWalletWidget(
             this, [this]{ refreshBalance(); });
     connect(send, &QPushButton::clicked,
             this, [this]{ sendTru(); });
+    connect(axonFund, &QPushButton::clicked,
+            this, [this]{
+        bool ok=false;
+        const QString uri=QInputDialog::getText(this,"Fund AXON Handoff",
+            "Paste tru:// AXON wallet handoff URI:",QLineEdit::Normal,{},&ok).trimmed();
+        if(ok && !uri.isEmpty()) openAxonHandoff(uri);
+    });
     connect(backup, &QPushButton::clicked,
             this, [this]{ backupWallet(); });
     connect(restore, &QPushButton::clicked,
@@ -400,6 +412,78 @@ DesktopWalletWidget::DesktopWalletWidget(
             this, [this] { showQrCodes(); });
 
     updateUi();
+
+}
+
+void DesktopWalletWidget::openAxonHandoff(const QString& uri) {
+    if(!uri.startsWith("tru://axon/fund/")) {
+        QMessageBox::critical(this,"AXON Wallet Handoff","Invalid tru:// AXON handoff URI.");
+        return;
+    }
+    if(!rpc_->endpoint().isValid() || DesktopRpc::isRemoteEndpoint(rpc_->endpoint())) {
+        QMessageBox::information(this,"AXON Wallet Handoff",
+            "UX-03B funding requires a connected LOCAL TRU Core.\n\n"
+            "Select Local Core in Connection, connect to its loopback RPC, then use Fund AXON Handoff again.\n"
+            "The website capability remains short-lived; create a new handoff if it expires.");
+        return;
+    }
+    QJsonObject inspectParams; inspectParams.insert("uri",uri);
+    rpc_->call("axonwalletinspect",objectParams(inspectParams),
+        [this,uri](const QJsonValue& value,const QByteArray&,const QString& error){
+            if(!error.isEmpty() || !value.isObject()) {
+                QMessageBox::critical(this,"AXON Wallet Handoff",error.isEmpty()?"Core returned an invalid handoff review.":error);
+                return;
+            }
+            const auto o=value.toObject();
+            if(o.value("revoked").toBool(false) || o.value("expired").toBool(false)) {
+                QMessageBox::warning(this,"AXON Wallet Handoff","This handoff is expired or revoked. Create a fresh handoff on NEROMESH.");
+                return;
+            }
+            if(o.contains("funding_outpoints")) {
+                QMessageBox::information(this,"AXON Wallet Handoff",
+                    QString("This job is already funded or funding is already submitted.\n\nJob: %1\nState: %2\n\nNo new HTLCs will be created.")
+                    .arg(o.value("job_id").toString(),o.value("offer_state").toString()));
+                return;
+            }
+            const QString summary=QString(
+                "AXON WALLET HANDOFF\n\n"
+                "Job: %1\n"
+                "Type: %2\n"
+                "Total: %3 TRU\n"
+                "Compute 20%%: %4 TRU\n"
+                "Acceptance 80%%: %5 TRU\n\n"
+                "Funding wallet (connected Core): %6\n"
+                "Worker claim key: %7\n\n"
+                "NEROMESH cannot sign or spend these funds. The local Core wallet will create and broadcast both canonical HTLCs.\n\n"
+                "Fund this AXON job now?")
+                .arg(o.value("job_id").toString(),o.value("job_type").toString(),o.value("total_tru").toString(),
+                     o.value("compute_tru").toString(),o.value("acceptance_tru").toString(),
+                     o.value("refund_address").toString(),o.value("worker_claim_pubkey").toString());
+            if(QMessageBox::question(this,"Confirm AXON Funding",summary,QMessageBox::Yes|QMessageBox::No,QMessageBox::No)!=QMessageBox::Yes) return;
+            QJsonObject fund; fund.insert("uri",uri); fund.insert("expected_job_id",o.value("job_id"));
+            fund.insert("expected_intent_sha256",o.value("intent_sha256")); fund.insert("confirm",true);
+            rpc_->call("axonwalletfund",objectParams(fund),
+                [this](const QJsonValue& funded,const QByteArray&,const QString& e){
+                    if(!e.isEmpty() || !funded.isObject()) {
+                        QMessageBox::critical(this,"AXON Funding",e.isEmpty()?"Core returned an invalid funding response.":e);
+                        return;
+                    }
+                    const auto f=funded.toObject();
+                    if(f.value("already_funded").toBool(false)) {
+                        QMessageBox::information(this,"AXON Funding",
+                            QString("This AXON job was already funded while the confirmation window was open.\n\nJob: %1\nState: %2\n\nNo new HTLCs were created.")
+                            .arg(f.value("job_id").toString(),f.value("offer_state").toString()));
+                        return;
+                    }
+                    const QString text=QString(
+                        "AXON funding submitted.\n\nJob: %1\nState: %2\n\n20%%: %3:%4\n80%%: %5:%6\n\nNEROMESH is reconciling confirmations automatically. Do not fund this job again.")
+                        .arg(f.value("job_id").toString(),f.value("offer_state").toString(),
+                             f.value("compute_txid").toString(),QString::number(f.value("compute_vout").toInt(1)),
+                             f.value("acceptance_txid").toString(),QString::number(f.value("acceptance_vout").toInt(1)));
+                    QMessageBox::information(this,"AXON Funding Submitted",text);
+                    logLine("AXON handoff funded; NEROMESH automatic reconciliation active.");
+                });
+        });
 }
 
 QStringList DesktopWalletWidget::walletAddresses() const {

@@ -1035,27 +1035,27 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
 
     // DESKTOP-WALLET-01: independent local-key wallet.
     // UI-02 adds only presentation and read-only asset discovery.
-    auto* walletPage = new DesktopWalletWidget(&rpc_, pages_);
-    pages_->insertTab(1, desktopScrollablePage(walletPage), "Wallet");
+    walletPage_ = new DesktopWalletWidget(&rpc_, pages_);
+    pages_->insertTab(1, desktopScrollablePage(walletPage_), "Wallet");
 
     auto* assetsPage =
-        new DesktopAssetsWidget(&rpc_, walletPage, pages_);
+        new DesktopAssetsWidget(&rpc_, walletPage_, pages_);
     pages_->insertTab(2, desktopScrollablePage(assetsPage), "Assets");
 
     auto* aiPage =
-        new DesktopAIWidget(&rpc_, walletPage, pages_);
+        new DesktopAIWidget(&rpc_, walletPage_, pages_);
     pages_->insertTab(3, desktopScrollablePage(aiPage), "AI");
     aiPage->applyTheme(initialTheme);
 
     // Existing audited local-signing issuance + contract workflows, now
     // discoverable without burying them inside the Assets gallery.
     auto* creatorPage = new TruDesktopStudio07(
-        &rpc_, walletPage, pages_, TruDesktopStudio07::Surface::Tokens);
+        &rpc_, walletPage_, pages_, TruDesktopStudio07::Surface::Tokens);
     pages_->insertTab(4, desktopScrollablePage(creatorPage), "Create Tokens");
     auto* contractsPage = new TruDesktopStudio07(
-        &rpc_, walletPage, pages_, TruDesktopStudio07::Surface::Contracts);
+        &rpc_, walletPage_, pages_, TruDesktopStudio07::Surface::Contracts);
     pages_->insertTab(5, desktopScrollablePage(contractsPage), "Smart Contracts");
-    auto* magicPage = new TruMagicSecretWidgetV2(&rpc_, walletPage, pages_);
+    auto* magicPage = new TruMagicSecretWidgetV2(&rpc_, walletPage_, pages_);
     pages_->insertTab(6, desktopScrollablePage(magicPage), "Magic Secrets");
     pages_->setTabToolTip(4,"Create FT, NFT, SFT and NCFT; inscribe TRUScripts. Requires local Core.");
     pages_->setTabToolTip(5,"Create experimental Hash/Time/Data contracts; inspect and redeem, or use Voting V1.");
@@ -1180,6 +1180,12 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
             }
         );
     }
+}
+
+void DesktopPanel::openAxonHandoff(const QString& uri) {
+    if (!walletPage_) return;
+    pages_->setCurrentIndex(1);
+    walletPage_->openAxonHandoff(uri);
 }
 
 void DesktopPanel::useLocalNode(

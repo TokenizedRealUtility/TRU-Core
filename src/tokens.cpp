@@ -727,13 +727,15 @@ bool parseExtendedTokenScript(const std::string& scriptPubKeyHex, const std::str
     std::vector<unsigned char> metaHashBytes(
         raw.begin() + metaOffset, raw.begin() + metaOffset + 32U);
     std::string metaHash = bytesToHex(metaHashBytes);
+    tokenData.metaHash = metaHash;
     logger.log("[parseExtendedTokenScript] Meta hash: " + metaHash);
 
     // Fetch and process metadata if blockchain pointer is available
     if (blockchainPtr) {
         try {
             std::string metaKey = "tokenMetadata:" + txid;
-            ExtendedTokenData fetchedData = blockchainPtr->fetchTokenMetadata(metaKey);
+            ExtendedTokenData fetchedData = blockchainPtr->fetchTokenMetadata(
+                metaKey, tokenData.tokenID, tokenData.type, metaHash);
             tokenData.meta = fetchedData.meta;
 
             // Validate tokenID and type consistency

@@ -1,0 +1,28 @@
+{
+  "name": "tru-hosted-swap",
+  "version": "0.1.0-rc.1",
+  "description": "Hosted TRU/BSV and TRU/BSTY swaps with browser signing",
+  "scripts": {
+    "build": "esbuild src/browser.js --bundle --minify --platform=browser --inject:src/browser-shim.js --outfile=public/app.js",
+    "test": "node --test test/*.test.js",
+    "start": "node src/server.js config.json",
+    "doctor": "node tools/doctor.js config.json"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@scrypt-inc/bsv": "1.0.5",
+    "buffer": "6.0.3"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12",
+    "jsdom": "26.1.0",
+    "scryptlib": "2.2.6"
+  },
+  "private": true,
+  "engines": {
+    "node": ">=24.0.0 <25"
+  }
+}
