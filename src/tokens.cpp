@@ -147,10 +147,10 @@ bool getUTXOsForAddress(LevelDBStorage* storage, const std::string& address, std
     try {
         storage->iteratePrefix(prefix, [&](const std::string& key, const std::string&) {
             std::string utxoId = key; // Fix: Use key directly as it is already <txid>:<vout>
-            Logger::log("[getUTXOsForAddress] Processing UTXO index key: " + prefix + key + ", utxoId: " + utxoId);
+            TRU_LOG_DEBUG_LAZY("[getUTXOsForAddress] Processing UTXO index key: " + prefix + key + ", utxoId: " + utxoId);
             std::string raw;
             std::string fullKey = "utxo:" + utxoId;
-            Logger::log("[getUTXOsForAddress] Attempting to retrieve UTXO key: " + fullKey);
+            TRU_LOG_DEBUG_LAZY("[getUTXOsForAddress] Attempting to retrieve UTXO key: " + fullKey);
             if (!storage->getWithDataChecksum(fullKey, raw)) {
                 Logger::log("[getUTXOsForAddress] WARNING: missing UTXO data for " + fullKey);
                 return;

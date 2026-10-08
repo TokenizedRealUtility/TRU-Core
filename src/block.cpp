@@ -443,7 +443,7 @@ Block Block::deserialize(const std::string& data) {
         }
     }
     
-    Logger::log("[deserialize] Block has " + std::to_string(txCount) + " transactions");
+    TRU_LOG_DEBUG_LAZY("[deserialize] Block has " + std::to_string(txCount) + " transactions");
     
     // Initialize currentPos for transaction parsing
     size_t currentPos = 0;
@@ -474,7 +474,7 @@ Block Block::deserialize(const std::string& data) {
             try {
                 Transaction tx = Transaction::deserialize(txData);
                 block.transactions.push_back(tx);
-                Logger::log("[deserialize] Added transaction: " + tx.txid);
+                TRU_LOG_DEBUG_LAZY("[deserialize] Added transaction: " + tx.txid);
             } catch (const std::exception& e) {
                 Logger::log("[deserialize] Error deserializing transaction: " + std::string(e.what()));
                 Logger::log("[deserialize] Transaction data: " + txData);
@@ -502,12 +502,12 @@ Block Block::deserialize(const std::string& data) {
             if (colonPos + 1 + metadataLength <= data.length()) {
                 std::string metadataStr = data.substr(colonPos + 1, metadataLength);
                 block.deserializeMetadata(metadataStr);
-                Logger::log("[deserialize] Loaded block metadata");
+                TRU_LOG_DEBUG_LAZY("[deserialize] Loaded block metadata");
             }
         }
     }
 
-    Logger::log("[deserialize] Successfully deserialized block at height " + std::to_string(block.height) + 
+    TRU_LOG_DEBUG_LAZY("[deserialize] Successfully deserialized block at height " + std::to_string(block.height) + 
                 " with " + std::to_string(block.transactions.size()) + " transactions");
     
     return block;

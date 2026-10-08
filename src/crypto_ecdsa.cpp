@@ -1,3 +1,4 @@
+#include "tru_perf06_cache.h"
 #include "crypto_ecdsa.h"
 #include <stdexcept>
 #include <openssl/ec.h>
@@ -588,7 +589,7 @@ bool ECDSAKey::verify(const std::vector<unsigned char> &pubkey,
     }
 
     EC_KEY_free(ec_key);
-    Logger::log("[ECDSAKey::verify] Signature verified successfully");
+    TRU_LOG_DEBUG_LAZY("[ECDSAKey::verify] Signature verified successfully");
     return true;
 }
 
@@ -603,13 +604,28 @@ bool ECDSAKey::verifyCanonicalTransactionSignature(
     const std::string& message,
     const std::vector<unsigned char>& signature)
 {
+    // PERF-06 caches only this pure canonical secp256k1 predicate. No VM,
+    // UTXO, gas, block-time, height, or contract-state decision is cached.
+    // Exact length-delimited bytes include the signature, not just the txid.
+    const bool cacheable = message.size() == 32 && pubKey.size() <= 65 && signature.size() <= 72;
+    std::string key;
+    static TruCachePerf06 cache;
+    if (cacheable) {
+        key.push_back(static_cast<char>(pubKey.size()));
+        key.append(pubKey.begin(), pubKey.end());
+        key.append(message);
+        key.push_back(static_cast<char>(signature.size()));
+        key.append(signature.begin(), signature.end());
+        std::string ignored;
+        if (cache.get(key, ignored)) return true;
+    }
     if (!isStrictDERLowS(signature)) {
-        Logger::log(
-            "[ECDSAKey::verifyCanonicalTransactionSignature] "
-            "Rejected non-strict-DER or high-S signature");
+        Logger::log("[ECDSAKey::verifyCanonicalTransactionSignature] Rejected non-strict-DER or high-S signature");
         return false;
     }
-    return verify(pubKey, message, signature);
+    if (!verify(pubKey, message, signature)) return false;
+    if (cacheable) cache.put(key, "");
+    return true;
 }
 
 std::vector<unsigned char> ECDSAKey::signWithK(const std::string& message, 

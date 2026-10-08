@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <chrono>
 #include <functional>
 #include <mutex>
 #include <set>
@@ -92,6 +93,13 @@ public:
    uint64_t calculateBalanceFromUTXOs(const std::string& address, const LevelDBStorage* storage) const;
    std::vector<UTXO> getUTXOsForAddress(const std::string& address) const;
 private:
+    // TRU-PERF-03: only verification stamps are cached, never balances/UTXO values.
+    struct AddressIndexStampPerf03 {
+        uint64_t generation;
+        std::chrono::steady_clock::time_point verifiedAt;
+    };
+    mutable std::mutex addressIndexStampMutexPerf03_;
+    mutable std::unordered_map<std::string, AddressIndexStampPerf03> addressIndexStampsPerf03_;
     LevelDBStorage dbStorage;    // LevelDB wrapper instance
     mutable std::shared_mutex mtx; // Shared mutex for thread safety
     std::unordered_set<std::string> seenTokens; // track existing tokenIDs

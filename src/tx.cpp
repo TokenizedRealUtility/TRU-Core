@@ -1,3 +1,4 @@
+#include "tru_perf06_cache.h"
 
 #include "tx.h"
 #include "tru_limits.h"  // shared MAX_MONEY
@@ -205,7 +206,7 @@ TxIn TxIn::deserialize(const std::string &data) {
         }
     }
 
-    Logger::log("[TxIn::deserialize] Successfully deserialized TxIn: txid=" + txidStr + 
+    TRU_LOG_DEBUG_LAZY("[TxIn::deserialize] Successfully deserialized TxIn: txid=" + txidStr + 
                 ", vout=" + std::to_string(voutVal) + ", sequence=" + std::to_string(seqVal));
     return result;
 }
@@ -365,7 +366,7 @@ void Transaction::computeTxId() {
 
     std::string binaryStr(binary.begin(), binary.end());
     this->txid = doubleSha256(binaryStr); // Double SHA-256 hash
-    Logger::log("[computeTxId] Computed txid: " + this->txid + ", length: " + std::to_string(this->txid.length()));
+    TRU_LOG_DEBUG_LAZY("[computeTxId] Computed txid: " + this->txid + ", length: " + std::to_string(this->txid.length()));
 }
 
 // -----------------------------------------------------------------------------
@@ -607,7 +608,7 @@ Transaction Transaction::deserialize(const std::string& data) {
 
                 tx.version = static_cast<int32_t>(parsedVersion);
                 tx.lockTime = static_cast<uint32_t>(parsedLockTime);
-                Logger::log("[Transaction::deserialize] Restored TXCORE version=" +
+                TRU_LOG_DEBUG_LAZY("[Transaction::deserialize] Restored TXCORE version=" +
                             std::to_string(tx.version) + ", lockTime=" +
                             std::to_string(tx.lockTime));
             } catch (const std::exception& e) {
@@ -635,7 +636,7 @@ Transaction Transaction::deserialize(const std::string& data) {
                     try {
                         nlohmann::json metaJson = nlohmann::json::parse(metadataStr);
                         tx.tokenMetadata = metaJson.get<std::unordered_map<std::string, nlohmann::json>>();
-                        Logger::log("[Transaction::deserialize] Successfully parsed metadata for " +
+                        TRU_LOG_DEBUG_LAZY("[Transaction::deserialize] Successfully parsed metadata for " +
                                     std::to_string(tx.tokenMetadata.size()) + " entries");
                     } catch (const std::exception& e) {
                         Logger::log("[Transaction::deserialize] Failed to parse token metadata: " +
@@ -657,7 +658,7 @@ Transaction Transaction::deserialize(const std::string& data) {
         }
     }
     
-    Logger::log("[Transaction::deserialize] Successfully deserialized transaction: " + tx.txid + 
+    TRU_LOG_DEBUG_LAZY("[Transaction::deserialize] Successfully deserialized transaction: " + tx.txid + 
                 " with " + std::to_string(tx.vin.size()) + " inputs and " + 
                 std::to_string(tx.vout.size()) + " outputs" +
                 (tx.tokenMetadata.empty() ? "" : " and metadata"));
@@ -945,42 +946,96 @@ static uint64_t readVarInt(const std::vector<unsigned char> &raw, size_t &pos) {
 //________________________________________________________________
 //
 //________________________________________________________________
-std::vector<unsigned char> Transaction::getSigHash(size_t inputIndex, const std::vector<unsigned char>& scriptPubKey) const {
-    if (inputIndex >= vin.size()) {
-        Logger::log("[Transaction::getSigHash] ERROR: Index out of range: " + std::to_string(inputIndex));
-        throw std::runtime_error("[Transaction::getSigHash] Index out of range: " + std::to_string(inputIndex));
+// PERF-06: byte-identical SIGHASH_ALL, without copying a Transaction.
+namespace {
+thread_local const TruSigHashScopePerf06* activeSigHashPerf06 = nullptr;
+TruCachePerf06& sighashCachePerf06() {
+    static TruCachePerf06 cache;
+    return cache;
+}
+}
+
+TruSigHashScopePerf06::TruSigHashScopePerf06(const Transaction& tx)
+    : tx_(&tx), previous_(activeSigHashPerf06) {
+    // This is serializeBinary() with every scriptSig empty. pubKey is not
+    // serialized. Preserve output, metadata JSON, byte order, and coinbase rules.
+    write32LE(base_, tx.version);
+    writeVarInt(base_, tx.vin.size());
+    offsets_.reserve(tx.vin.size());
+    for (const auto& in : tx.vin) {
+        if (tx.isCoinbase) {
+            base_.insert(base_.end(), 32, 0);
+        } else {
+            const auto bytes = hexDecode(in.txid);
+            if (bytes.size() != 32) throw std::runtime_error("Invalid txid length");
+            base_.insert(base_.end(), bytes.begin(), bytes.end());
+        }
+        write32LE(base_, in.vout);
+        offsets_.push_back(base_.size());
+        base_.push_back(0); // empty script's canonical CompactSize
+        write32LE(base_, in.sequence);
     }
-
-    // TRU_CORE_GBT_LARGE_TX_01: getSigHash() is executed once per verified
-    // input. Do not log the temporary transaction, every cleared input, the
-    // serialized preimage, or the resulting digest from this hot path.
-    // The sighash construction itself is intentionally unchanged.
-    Transaction tempTx = *this;
-
-    // Clear all scriptSig fields and pubKey fields in inputs
-    for (size_t i = 0; i < tempTx.vin.size(); ++i) {
-        tempTx.vin[i].scriptSig.clear();
-        tempTx.vin[i].pubKey.clear(); // Ensure pubKey doesn’t affect serialization
+    writeVarInt(base_, tx.vout.size());
+    for (const auto& out : tx.vout) {
+        write64LE(base_, out.amount);
+        const auto bytes = hexDecode(out.scriptPubKey);
+        writeVarInt(base_, bytes.size());
+        base_.insert(base_.end(), bytes.begin(), bytes.end());
     }
+    write32LE(base_, tx.lockTime);
+    if (!tx.tokenMetadata.empty()) {
+        base_.push_back(1);
+        const std::string metadata = nlohmann::json(tx.tokenMetadata).dump();
+        writeVarInt(base_, metadata.size());
+        base_.insert(base_.end(), metadata.begin(), metadata.end());
+    } else {
+        base_.push_back(0);
+    }
+    unsigned char identity[SHA256_DIGEST_LENGTH];
+    SHA256(base_.data(), base_.size(), identity);
+    identity_.assign(reinterpret_cast<const char*>(identity), sizeof(identity));
+    // Publish only after all potentially throwing preparation succeeds.
+    activeSigHashPerf06 = this;
+}
+TruSigHashScopePerf06::~TruSigHashScopePerf06() {
+    activeSigHashPerf06 = previous_;
+}
 
-    // Set the scriptSig of the input being signed to the scriptPubKey
-    tempTx.vin[inputIndex].scriptSig = scriptPubKey;
+std::vector<unsigned char> Transaction::getSigHash(
+    size_t inputIndex, const std::vector<unsigned char>& scriptPubKey) const {
+    if (inputIndex >= vin.size()) throw std::runtime_error("[Transaction::getSigHash] Index out of range");
+    if (!activeSigHashPerf06 || activeSigHashPerf06->tx_ != this) {
+        // Unscoped callers, including signing, always observe current fields.
+        const TruSigHashScopePerf06 scope(*this);
+        return getSigHash(inputIndex, scriptPubKey);
+    }
+    const auto& prepared = *activeSigHashPerf06;
+    // Never key by TRU txid: unlocking signatures may be excluded from txid.
+    // The base commitment covers EVERY field in the legacy signing preimage.
+    std::string key = prepared.identity_;
+    for (unsigned i = 0; i < 8; ++i)
+        key.push_back(static_cast<char>((static_cast<uint64_t>(inputIndex) >> (8*i)) & 255));
+    unsigned char scriptHash[SHA256_DIGEST_LENGTH];
+    SHA256(scriptPubKey.data(), scriptPubKey.size(), scriptHash);
+    key.append(reinterpret_cast<const char*>(scriptHash), sizeof(scriptHash));
+    std::string cached;
+    if (sighashCachePerf06().get(key, cached))
+        return std::vector<unsigned char>(cached.begin(), cached.end());
 
-    // Serialize the modified transaction
-    std::vector<unsigned char> serialized = tempTx.serializeBinary();
-
-    // Append SIGHASH_ALL (0x01) as 4 bytes little-endian (0x01000000)
-    serialized.push_back(0x01);
-    serialized.push_back(0x00);
-    serialized.push_back(0x00);
-    serialized.push_back(0x00);
-
-    // Compute double SHA256
-    unsigned char hash1[SHA256_DIGEST_LENGTH];
-    unsigned char hash2[SHA256_DIGEST_LENGTH];
-    SHA256(serialized.data(), serialized.size(), hash1);
-    SHA256(hash1, SHA256_DIGEST_LENGTH, hash2);
-    std::vector<unsigned char> sighash(hash2, hash2 + SHA256_DIGEST_LENGTH);
-
-    return sighash;
+    const size_t offset = prepared.offsets_[inputIndex];
+    std::vector<unsigned char> length;
+    writeVarInt(length, scriptPubKey.size());
+    const unsigned char hashType[4] = {1, 0, 0, 0};
+    unsigned char first[SHA256_DIGEST_LENGTH], result[SHA256_DIGEST_LENGTH];
+    SHA256_CTX sha;
+    SHA256_Init(&sha);
+    SHA256_Update(&sha, prepared.base_.data(), offset);
+    SHA256_Update(&sha, length.data(), length.size());
+    if (!scriptPubKey.empty()) SHA256_Update(&sha, scriptPubKey.data(), scriptPubKey.size());
+    SHA256_Update(&sha, prepared.base_.data() + offset + 1, prepared.base_.size() - offset - 1);
+    SHA256_Update(&sha, hashType, sizeof(hashType));
+    SHA256_Final(first, &sha);
+    SHA256(first, sizeof(first), result);
+    sighashCachePerf06().put(key, std::string(reinterpret_cast<const char*>(result), sizeof(result)));
+    return std::vector<unsigned char>(result, result + sizeof(result));
 }

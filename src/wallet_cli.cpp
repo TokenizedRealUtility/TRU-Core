@@ -769,7 +769,7 @@ void printChainInfoRPC(const std::string& nodeIP, int nodePort, std::mutex& cout
         fmt::print("  {} {}\n", colorText("Best tip height:", 94), info["bestHeight"].get<int>());
         fmt::print("  {} {}\n", colorText("Best tip hash:  ", 94), info["bestHash"].get<std::string>());
         fmt::print("  {} 0x{:x}\n", colorText("Difficulty:     ", 94), info["difficulty"].get<uint32_t>());
-        fmt::print("  {} {}\n", colorText("Chain valid:    ", 94), info["chainValid"].get<bool>() ? colorText("yes", 32) : colorText("no", 31));
+        fmt::print("  {} {}\n", colorText("Last audit:     ", 94), (info.contains("chainValid") && info["chainValid"].is_boolean() ? (info["chainValid"].get<bool>() ? colorText("audit passed", 32) : colorText("audit failed", 31)) : colorText("not audited at this tip", 33)));
         fmt::print("\033[u");
     } catch (const std::exception& e) {
         log("Error fetching chain info: " + std::string(e.what()));

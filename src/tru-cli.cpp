@@ -270,7 +270,7 @@ int main(int argc, char** argv) {
                   << "bestblockhash " << r.value("bestblockhash","")   << "\n"
                   << "difficulty    " << r.value("difficultyhex","")   << " (" << r.value("difficulty",0) << ")\n"
                   << "connections   " << r.value("connections", 0)     << "\n"
-                  << "chainvalid    " << (r.value("chainvalid", false) ? "yes" : "no") << "\n"
+                  << "chainvalid    " << (r.contains("chainvalid") && r["chainvalid"].is_boolean() ? (r["chainvalid"].get<bool>() ? "audit passed" : "audit failed") : "not audited at this tip") << "\n"
                   << "chainsize     " << r.value("chainsize", 0)       << "\n"
                   << "address       " << r.value("address","")         << "\n"
                   << "balance       " << r.value("balance","0.00000000") << " TRU\n";
@@ -322,7 +322,7 @@ int main(int argc, char** argv) {
                   << "bestHash   " << r.value("bestHash","")    << "\n"
                   << "difficulty 0x" << std::hex << r.value("difficulty", 0u) << std::dec << "\n"
                   << "chainSize  " << r.value("chainSize", 0)   << "\n"
-                  << "chainValid " << (r.value("chainValid", false) ? "yes" : "no") << "\n";
+                  << "chainValid " << (r.contains("chainValid") && r["chainValid"].is_boolean() ? (r["chainValid"].get<bool>() ? "audit passed" : "audit failed") : "not audited at this tip") << "\n";
             };
         }
         else if (cmd == "getbestblockhash") {

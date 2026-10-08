@@ -282,6 +282,7 @@ bool Blockchain::checkMiningTemplate(const Block& block) {
             return false;
         }
 
+        const TruSigHashScopePerf06 sighashScope(tx);
         uint64_t inSum = 0, outSum = 0;
         uint64_t txScriptOps = 0;
         uint64_t txSigOps = 0;
