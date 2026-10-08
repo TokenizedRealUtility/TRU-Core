@@ -2,15 +2,19 @@
 // tests verify parity; update this local assembly mirror when consensus validation changes.
 bool Blockchain::checkMiningTemplate(const Block& block) {
     // CORE-MINER-HARDEN-01: local assembly only, never an acceptance API.
-    // Hold the existing submission-order lock so UTXOs/state stay on this tip.
-    std::unique_lock<std::mutex> submissionLock(miningSubmitMutex, std::try_to_lock);
-    if (!submissionLock.owns_lock()) throw std::runtime_error("template preflight busy; retry");
+    // TRU_CORE_GBT_LARGE_TX_01: serialize preflight with authoritative block
+    // submission instead of spuriously failing concurrent getblocktemplate RPCs.
+    // checkMiningTemplate() is called without miningSubmitMutex held; wait for the
+    // current submit/preflight owner, then re-check the tip below.
+    const auto preflightLockWaitStarted = std::chrono::steady_clock::now();
+    std::unique_lock<std::mutex> submissionLock(miningSubmitMutex);
+    const auto preflightLockAcquired = std::chrono::steady_clock::now();
+    const auto preflightLockWaitMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        preflightLockAcquired - preflightLockWaitStarted).count();
     std::string tip; int tipHeight = 0;
     getBestTipSnapshot(tip, tipHeight);
     if (block.header.prevHash != tip || block.height != static_cast<uint64_t>(tipHeight) + 1)
         throw std::runtime_error("template parent changed; retry");
-
-    Logger::log("[checkMiningTemplate] Starting validation for block: " + block.blockHash + ", height: " + std::to_string(block.height));
 
     // Step 1: Validate block structure
     if (block.transactions.empty()) {
@@ -278,6 +282,7 @@ bool Blockchain::checkMiningTemplate(const Block& block) {
             return false;
         }
 
+        const TruSigHashScopePerf06 sighashScope(tx);
         uint64_t inSum = 0, outSum = 0;
         uint64_t txScriptOps = 0;
         uint64_t txSigOps = 0;
@@ -745,7 +750,16 @@ bool Blockchain::checkMiningTemplate(const Block& block) {
         }
     }
 
-    Logger::log("[checkMiningTemplate] Block validated successfully: " + block.blockHash);
+    const auto preflightFinished = std::chrono::steady_clock::now();
+    const auto preflightValidateMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        preflightFinished - preflightLockAcquired).count();
+    Logger::log("[checkMiningTemplate] PASS block=" + block.blockHash +
+                " height=" + std::to_string(block.height) +
+                " txs=" + std::to_string(block.transactions.size()) +
+                " inputs=" + std::to_string(blockInputCount) +
+                " bytes=" + std::to_string(serializedBlockSize) +
+                " lockWaitMs=" + std::to_string(preflightLockWaitMs) +
+                " validateMs=" + std::to_string(preflightValidateMs));
     return true;
 }
 

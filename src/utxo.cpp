@@ -1,3 +1,4 @@
+#include <stdexcept>
 #include "utxo.h"
 #include "tx.h"
 #include "tokens.h"
@@ -17,66 +18,119 @@
 #include "wallet.h"
 #include <vector>
 #include "tru_network_params.h"
+#include <chrono>
+#include <cstdlib>
+#include <limits>
 
 static std::string extractAddressFromScriptTail(const std::string& scriptHex);
 static bool looksLikeMagicLockScript(const std::string& scriptHex);
 
-// Collect UTXOs owned by an address.
+// TRU-PERF-03: automatically verified address-index lookup.
+// Verification is valid only for the observed DB mutation generation, and expires.
 std::vector<UTXO> UTXOSet::getUTXOsForAddress(const std::string& address) const {
-    std::vector<UTXO> result;
-
-    // Iterate over all UTXO keys
-    dbStorage.iteratePrefix("utxo:", [&](const std::string& keySansPrefix, const std::string& /*value*/) {
-        // keySansPrefix should be "<txid>:<vout>"
-        std::string key = keySansPrefix;
-
-        // Defensive: if for any reason the prefix is still present, strip it
-        if (key.rfind("utxo:", 0) == 0) {
-            key = key.substr(5);
+    const auto began = std::chrono::steady_clock::now();
+    const char* setting = std::getenv("TRU_ADDRESS_UTXO_MODE");
+    const std::string mode = setting ? setting : "verified";
+    const bool compare = mode == "compare";
+    const bool verified = mode == "verified" || mode == "indexed";
+    const auto scan = [&](bool indexed, bool& complete) {
+        std::vector<UTXO> found;
+        complete = true;
+        const std::string prefix = indexed ? "address:" + address + ":utxo:" : "utxo:";
+        const bool iterated = dbStorage.iteratePrefixPerf03(prefix,
+            [&](const std::string& suffix, const std::string&) {
+                std::string key = suffix;
+                if (!indexed && key.rfind("utxo:", 0) == 0) key.erase(0, 5);
+                const auto colon = key.rfind(':');
+                if (colon == std::string::npos) { complete = false; return; }
+                const std::string txid = key.substr(0, colon);
+                const std::string num = key.substr(colon + 1);
+                if (num.empty() || num.find_first_not_of("0123456789") != std::string::npos) {
+                    complete = false; return;
+                }
+                uint32_t vout;
+                try {
+                    const auto parsed = std::stoul(num);
+                    if (parsed > std::numeric_limits<uint32_t>::max()) { complete = false; return; }
+                    vout = static_cast<uint32_t>(parsed);
+                } catch (const std::exception&) { complete = false; return; }
+                UTXO u;
+                if (!getUTXO(txid, vout, u)) { complete = false; return; }
+                const auto actual = blockchainPtr ? getAddressFromUTXO(txid, vout, blockchainPtr) : "";
+                if (actual != address) {
+                    if (indexed) complete = false;
+                    return;
+                }
+                u.txid = txid; u.vout = vout;
+                found.push_back(std::move(u));
+            });
+        if (!iterated) throw std::runtime_error("TRU-PERF-03 address scan failed; refusing partial results");
+        return found;
+    };
+    const auto finish = [&](std::vector<UTXO> result, const char* path) {
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - began).count();
+        if (ms >= 50) Logger::log(std::string("[TRU-PERF-03] address_lookup path=") + path +
+            " ms=" + std::to_string(ms) + " outputs=" + std::to_string(result.size()));
+        return result;
+    };
+    bool fullComplete = false;
+    // Cross-database token metadata contexts cannot share this verification stamp.
+    const bool sameStorage = blockchainPtr && blockchainPtr->getStorage() &&
+        blockchainPtr->getStorage()->path() == dbStorage.path();
+    uint64_t generation = 0;
+    if ((!verified && !compare) || !sameStorage || !dbStorage.getMutationGeneration(generation)) {
+        return finish(scan(false, fullComplete), "legacy");
+    }
+    bool certified = false;
+    {
+        std::lock_guard<std::mutex> lock(addressIndexStampMutexPerf03_);
+        const auto it = addressIndexStampsPerf03_.find(address);
+        certified = it != addressIndexStampsPerf03_.end() &&
+            it->second.generation == generation &&
+            std::chrono::steady_clock::now() - it->second.verifiedAt < std::chrono::seconds(30);
+    }
+    bool indexComplete = false;
+    std::vector<UTXO> indexed;
+    try { indexed = scan(true, indexComplete); }
+    catch (const std::exception&) { indexComplete = false; }
+    uint64_t afterIndex = 0;
+    if (!compare && certified && indexComplete &&
+        dbStorage.getMutationGeneration(afterIndex) && afterIndex == generation) {
+        return finish(std::move(indexed), "verified-index");
+    }
+    // Missing/stale indexes and concurrent writes always fall back to canonical scanning.
+    {
+        std::lock_guard<std::mutex> lock(addressIndexStampMutexPerf03_);
+        addressIndexStampsPerf03_.erase(address);
+    }
+    auto full = scan(false, fullComplete);
+    uint64_t afterFull = 0;
+    const bool stable = dbStorage.getMutationGeneration(afterFull) && afterFull == generation;
+    const auto equal = [](const std::vector<UTXO>& a, const std::vector<UTXO>& b) {
+        if (a.size() != b.size()) return false;
+        // Both scans use LevelDB's lexical order of the same txid:vout suffixes.
+        for (std::size_t i = 0; i < a.size(); ++i) {
+            if (a[i].txid != b[i].txid || a[i].vout != b[i].vout ||
+                a[i].amount != b[i].amount || a[i].scriptPubKey != b[i].scriptPubKey ||
+                a[i].createdAtHeight != b[i].createdAtHeight || a[i].isCoinbase != b[i].isCoinbase)
+                return false;
         }
-
-        const size_t colonPos = key.find(':');
-        if (colonPos == std::string::npos) {
-            return; // malformed key
-        }
-
-        const std::string txid = key.substr(0, colonPos);
-        uint32_t vout = 0;
-        try {
-            vout = static_cast<uint32_t>(std::stoul(key.substr(colonPos + 1)));
-        } catch (...) {
-            return; // bad vout
-        }
-
-        UTXO utxo;
-        if (!getUTXO(txid, vout, utxo)) {
-            return; // couldn't load UTXO entry
-        }
-
-        // Prefer canonical address derivation (uses chain context)
-        std::string utxoAddress;
-        if (blockchainPtr) {
-            utxoAddress = getAddressFromUTXO(txid, vout, blockchainPtr);
-        }
-
-        // Fallbacks if needed
-        if (utxoAddress.empty()) {
-            // Reserved fallback: direct script address decoding (not implemented here).
-            // utxoAddress = extractAddressFromScriptPubKey(utxo.scriptPubKey, txid, vout, blockchainPtr);
-            // Reserved fallback: script-tail address decoding (not implemented here).
-            // utxoAddress = extractAddressFromScriptTail(utxo.scriptPubKey);
-        }
-
-        if (utxoAddress == address) {
-            // We already know txid/vout; ensure they’re set on the object
-            utxo.txid = txid;
-            utxo.vout = vout;
-            result.push_back(std::move(utxo));
-        }
-    });
-
-    return result;
+        return true;
+    };
+    const bool match = stable && fullComplete && indexComplete && equal(full, indexed);
+    if (match) {
+        std::lock_guard<std::mutex> lock(addressIndexStampMutexPerf03_);
+        if (addressIndexStampsPerf03_.size() >= 128) addressIndexStampsPerf03_.clear();
+        addressIndexStampsPerf03_[address] = {generation, std::chrono::steady_clock::now()};
+    }
+    Logger::log(std::string("[TRU-PERF-03] address_index_verify status=") +
+        (!stable ? "RETRY" : match ? "MATCH" : "FALLBACK") +
+        " generation=" + std::to_string(generation) +
+        " legacy=" + std::to_string(full.size()) + " indexed=" + std::to_string(indexed.size()));
+    return finish(std::move(full), "legacy-verified");
 }
+
 
 //===================================================================
 //			MagicLock Checker
@@ -896,7 +950,7 @@ bool UTXOSet::getUTXO(const std::string &txid,
                       uint32_t vout,
                       UTXO &utxo) const
 {
-    Logger::log("[getUTXO] Retrieving UTXO for txid: " + txid +
+    TRU_LOG_DEBUG_LAZY("[getUTXO] Retrieving UTXO for txid: " + txid +
                 ", vout: " + std::to_string(vout));
 
     const std::string bareKey = makeUTXOKey(txid, vout);
@@ -973,7 +1027,7 @@ bool UTXOSet::getUTXO(const std::string &txid,
     utxo.createdAtHeight = createdAtHeight;              // NEW
     utxo.isCoinbase      = isCoinbase;                   // NEW
 
-    Logger::log("[getUTXO] OK – amount=" + std::to_string(atoms) +
+    TRU_LOG_DEBUG_LAZY("[getUTXO] OK – amount=" + std::to_string(atoms) +
                 ", height=" + std::to_string(createdAtHeight) +
                 (isCoinbase ? ", cb=1" : "") +
                 ", scriptPubKey=" + partScriptHex);
@@ -990,7 +1044,7 @@ std::string UTXOSet::getAddressFromUTXO(const std::string& txid, uint32_t vout, 
     if (address.empty()) {
         Logger::log("[getAddressFromUTXO] Failed to extract address for txid: " + txid + ", vout: " + std::to_string(vout));
     } else {
-        Logger::log("[getAddressFromUTXO] Extracted address: " + address + " for txid: " + txid + ", vout: " + std::to_string(vout));
+        TRU_LOG_DEBUG_LAZY("[getAddressFromUTXO] Extracted address: " + address + " for txid: " + txid + ", vout: " + std::to_string(vout));
     }
     return address;
 }

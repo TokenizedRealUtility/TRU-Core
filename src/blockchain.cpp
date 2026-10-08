@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include "token_continuation_metadata_v1.h"
 #include "blockchain.h"
 #include "tru_data_provider_v1.h"
@@ -3151,12 +3152,12 @@ bool Blockchain::isValidAddress(const std::string& addr) const {
 //			Compute SigHash
 //================================================================================
 std::vector<unsigned char> Blockchain::computeSighash(const Transaction& tx, size_t inputIndex, const std::vector<unsigned char>& scriptPubKey) const {
-    Logger::log("[computeSighash] Computing sighash for tx: " + tx.txid + ", input: " + std::to_string(inputIndex));
+    TRU_LOG_DEBUG_LAZY("[computeSighash] Computing sighash for tx: " + tx.txid + ", input: " + std::to_string(inputIndex));
     
     // Use the same method as Transaction::getSigHash to ensure consistency
     try {
         std::vector<unsigned char> sighash = tx.getSigHash(inputIndex, scriptPubKey);
-        Logger::log("[computeSighash] Computed sighash: " + hexEncode(sighash));
+        TRU_LOG_DEBUG_LAZY("[computeSighash] Computed sighash: " + hexEncode(sighash));
         return sighash;
     } catch (const std::exception& e) {
         Logger::log("[computeSighash] ERROR: Failed to compute sighash: " + std::string(e.what()));
@@ -4242,7 +4243,7 @@ double Blockchain::getNetworkHashrate(int numBlocks) const {
         std::shared_lock<std::shared_mutex> chainRead(mtx);
         currentHeight = bestTipHeight.load();
 
-        Logger::log(
+        TRU_LOG_DEBUG_LAZY(
             "[getNetworkHashrate] Checking " +
             std::to_string(minerHashRates.size()) +
             " registered miners");
@@ -4256,11 +4257,11 @@ double Blockchain::getNetworkHashrate(int numBlocks) const {
                 if (std::isfinite(rate) && rate > 0.0) {
                     reportedHashrate += rate;
                 }
-                Logger::log(
+                TRU_LOG_DEBUG_LAZY(
                     "[getNetworkHashrate] Active miner " + address +
                     ": " + std::to_string(rate) + " H/s");
             } else {
-                Logger::log(
+                TRU_LOG_DEBUG_LAZY(
                     "[getNetworkHashrate] Inactive miner " + address +
                     " (last activity: " +
                     std::to_string(
@@ -4272,7 +4273,7 @@ double Blockchain::getNetworkHashrate(int numBlocks) const {
     }
 
     if (currentHeight < 2) {
-        Logger::log(
+        TRU_LOG_DEBUG_LAZY(
             "[getNetworkHashrate] Insufficient blocks (height=" +
             std::to_string(currentHeight) + ")");
         return reportedHashrate;
@@ -4301,13 +4302,13 @@ double Blockchain::getNetworkHashrate(int numBlocks) const {
 
     if (blockchainHashrate > 0.0 && reportedHashrate > 0.0) {
         const double ratio = reportedHashrate / blockchainHashrate;
-        Logger::log(
+        TRU_LOG_DEBUG_LAZY(
             "[getNetworkHashrate] Diagnostic reported/chain ratio=" +
             std::to_string(ratio) +
             " (reported telemetry is not blended into network estimate)");
     }
 
-    Logger::log(
+    TRU_LOG_DEBUG_LAZY(
         "[getNetworkHashrate] FINAL RESULT - Total: " +
         std::to_string(finalHashrate) +
         " H/s, Reported: " + std::to_string(reportedHashrate) +
@@ -5736,11 +5737,70 @@ std::vector<unsigned char> Blockchain::getState(const std::string& address, cons
 //================================================================================
 //
 //================================================================================
+// TRU-PERF-05: explicit historical audit only. Status never calls this method.
 bool Blockchain::isChainValid() const {
-    std::shared_lock<std::shared_mutex> lock(mtx);
+    return runChainAuditPerf05().auditState == "passed";
+}
+
+Blockchain::ChainStatusPerf05 Blockchain::runChainAuditPerf05() const {
+    std::unique_lock<std::mutex> run(auditRunMutexPerf05_, std::try_to_lock);
+    if (!run.owns_lock()) throw std::runtime_error("chain audit already running");
+    std::shared_lock<std::shared_mutex> chainLock(mtx);
+    const auto began = std::chrono::steady_clock::now();
+    ChainStatusPerf05 record;
+    record.auditHeight = bestTipHeight.load();
+    record.auditTip = bestTipHash;
+    record.height = record.auditHeight;
+    record.tip = record.auditTip;
+    record.bits = difficulty;
+    record.tipAvailable = !record.tip.empty() && blockIndex.find(record.tip) != blockIndex.end();
+    record.auditSameTip = record.tipAvailable;
+    const auto publish = [&](const char* state) {
+        record.auditState = state;
+        record.auditTime = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        record.auditDurationMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - began).count();
+        std::lock_guard<std::mutex> lock(statusAuditMutex_);
+        lastAuditPerf05_ = record;
+    };
+    try {
+        const bool valid = isChainValidLockedPerf02();
+        publish(valid ? "passed" : "failed");
+        Logger::log("[TRU-PERF-05] explicit_audit state=" + record.auditState +
+            " height=" + std::to_string(record.auditHeight) +
+            " ms=" + std::to_string(record.auditDurationMs));
+        return record;
+    } catch (...) { publish("error"); throw; }
+}
+
+Blockchain::ChainStatusPerf05 Blockchain::getChainStatusPerf05() const {
+    std::shared_lock<std::shared_mutex> chainLock(mtx);
+    std::lock_guard<std::mutex> auditLock(statusAuditMutex_);
+    ChainStatusPerf05 s = lastAuditPerf05_;
+    s.height = bestTipHeight.load();
+    s.tip = bestTipHash;
+    s.bits = difficulty;
+    s.tipAvailable = !s.tip.empty() && blockIndex.find(s.tip) != blockIndex.end();
+    s.auditSameTip = s.tipAvailable && s.auditState != "not_run" && s.auditTip == s.tip &&
+        s.auditHeight == s.height;
+    return s;
+}
+
+// Compatibility helper only: no implicit audit, timeout, or traversal.
+bool Blockchain::isChainValidForStatus() const {
+    const auto s = getChainStatusPerf05();
+    return s.auditSameTip && s.auditState == "passed";
+}
+
+// Caller holds mtx for the complete audit. Original audit body is preserved.
+bool Blockchain::isChainValidLockedPerf02() const {
+    const auto perfStarted = std::chrono::steady_clock::now();
+    std::size_t perfVisited = 0;
     Logger::log("[isChainValid] Starting chain validation");
     std::string cur = bestTipHash;
     while (!cur.empty()) {
+        ++perfVisited;
         auto it = blockIndex.find(cur);
         if (it == blockIndex.end()) {
             Logger::log("[isChainValid] ERROR: Missing block: " + cur);
@@ -5772,6 +5832,10 @@ bool Blockchain::isChainValid() const {
 
         cur = bk.header.prevHash;
     }
+    const auto perfMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - perfStarted).count();
+    if (perfMs >= 50) Logger::log("[TRU-PERF-01] full_chain_audit ms=" +
+        std::to_string(perfMs) + " blocks=" + std::to_string(perfVisited));
     Logger::log("[isChainValid] Chain is valid");
     return true;
 }
@@ -6536,13 +6600,25 @@ Blockchain::Blockchain(const std::string &utxoDB, const std::string &genesisAddr
         std::cout << "[Blockchain Constructor] Best tip height is 0, initializing Genesis Block...\n";
         initGenesisBlock(genesisAddr);
     } else {
+        // TRU-PERF-04: preserve the existing missing-entry fill policy, using
+        // one current estimate rather than recomputing it for every old height.
+        // These filled entries are NOT reconstructed historical measurements.
+        bool startupHashrateComputed = false;
+        double startupHashrate = 0.0;
+        std::size_t startupHashrateFilled = 0;
         for (int height = 1; height <= bestTipHeight; ++height) {
             if (!hashrateHistory.count(height)) {
-                double hashrate = getNetworkHashrate(10);
-                hashrateHistory[height] = hashrate;
-                Logger::log("[Blockchain Constructor] Populated hashrate for height " + std::to_string(height) + ": " + std::to_string(hashrate));
+                if (!startupHashrateComputed) {
+                    startupHashrate = getNetworkHashrate(10);
+                    startupHashrateComputed = true;
+                }
+                hashrateHistory[height] = startupHashrate;
+                ++startupHashrateFilled;
             }
         }
+        Logger::log("[TRU-PERF-04] startup_hashrate_fill entries=" +
+            std::to_string(startupHashrateFilled) + " calculations=" +
+            std::to_string(startupHashrateComputed ? 1 : 0));
         std::cout << "[Blockchain Constructor] Loaded existing blockchain with best tip hash: " << bestTipHash
                   << " at height: " << bestTipHeight << "\n";
     }
@@ -22635,7 +22711,7 @@ bool Blockchain::isSmartContractScript(const std::string& scriptHex) const {
 // Calculate Balance for Address
 //==============================================================================
 uint64_t Blockchain::calculate_balance(const std::string& address) const {
-    Logger::log("[calculate_balance] Calculating balance for address=" + address);
+    TRU_LOG_DEBUG_LAZY("[calculate_balance] Calculating balance for address=" + address);
     if (address.empty() || !this->isValidAddress(address)) {
         Logger::log("[calculate_balance] ERROR: Invalid TRU mainnet address: " + address);
         throw std::invalid_argument("Invalid TRU mainnet address");
@@ -22673,7 +22749,7 @@ uint64_t Blockchain::calculate_balance(const std::string& address) const {
             }
             
             totalSatoshis += satoshis;
-            Logger::log("[calculate_balance] Added UTXO " + txid + ":" + voutStr + ": " + 
+            TRU_LOG_DEBUG_LAZY("[calculate_balance] Added UTXO " + txid + ":" + voutStr + ": " + 
                        std::to_string(satoshis) + " TRU atoms");
         } catch (const std::exception& e) {
             Logger::log("[calculate_balance] WARNING: Failed to parse UTXO " + utxo + ": " + e.what());
@@ -22682,7 +22758,7 @@ uint64_t Blockchain::calculate_balance(const std::string& address) const {
     
     // NEW: Add unconfirmed outputs from mempool
     if (mempool) {
-        Logger::log("[calculate_balance] Checking mempool for unconfirmed outputs to " + address);
+        TRU_LOG_DEBUG_LAZY("[calculate_balance] Checking mempool for unconfirmed outputs to " + address);
         auto mempoolTxs = mempool->getAllTransactions();
         
         for (const auto& tx : mempoolTxs) {
@@ -22701,7 +22777,7 @@ uint64_t Blockchain::calculate_balance(const std::string& address) const {
                     
                     if (outputAddr == address) {
                         totalSatoshis += output.amount;
-                        Logger::log("[calculate_balance] Added unconfirmed mempool output " + 
+                        TRU_LOG_DEBUG_LAZY("[calculate_balance] Added unconfirmed mempool output " + 
                                    tx.txid + ":" + std::to_string(i) + ": " + 
                                    std::to_string(output.amount) + " TRU atoms");
                     }
@@ -22713,14 +22789,14 @@ uint64_t Blockchain::calculate_balance(const std::string& address) const {
         }
     }
 
-    Logger::log("[calculate_balance] Final balance for address=" + address + ": " + 
+    TRU_LOG_DEBUG_LAZY("[calculate_balance] Final balance for address=" + address + ": " + 
                std::to_string(totalSatoshis) + " TRU atoms");
     return totalSatoshis;
 }
 
 /*
 uint64_t Blockchain::calculate_balance(const std::string& address) const {
-    Logger::log("[calculate_balance] Calculating balance for address=" + address);
+    TRU_LOG_DEBUG_LAZY("[calculate_balance] Calculating balance for address=" + address);
     if (address.empty() || !std::regex_match(address, std::regex("T[1-9A-HJ-NP-Za-km-z]{33}"))) {
         Logger::log("[calculate_balance] ERROR: Invalid address format: " + address);
         throw std::invalid_argument("Invalid address format");
@@ -22746,13 +22822,13 @@ uint64_t Blockchain::calculate_balance(const std::string& address) const {
         try {
             satoshis = std::stoull(amountStr);
             totalSatoshis += satoshis;
-            Logger::log("[calculate_balance] Added UTXO " + txid + ":" + voutStr + ": " + std::to_string(satoshis) + " TRU atoms");
+            TRU_LOG_DEBUG_LAZY("[calculate_balance] Added UTXO " + txid + ":" + voutStr + ": " + std::to_string(satoshis) + " TRU atoms");
         } catch (const std::exception& e) {
             Logger::log("[calculate_balance] WARNING: Failed to parse amount for UTXO " + utxo + ": " + e.what());
         }
     }
 
-    Logger::log("[calculate_balance] Final balance for address=" + address + ": " + std::to_string(totalSatoshis) + " TRU atoms");
+    TRU_LOG_DEBUG_LAZY("[calculate_balance] Final balance for address=" + address + ": " + std::to_string(totalSatoshis) + " TRU atoms");
     return totalSatoshis;
 }
 */

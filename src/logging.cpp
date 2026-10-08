@@ -12,6 +12,7 @@ std::mutex Logger::logMutex;
 bool Logger::initialized = false;
 std::string Logger::logPath;
 Logger::Level Logger::minimumLevel = Logger::Level::Info;
+std::atomic<Logger::Level> Logger::fastMinimumLevel{Logger::Level::Info};
 std::uint64_t Logger::maxBytes = 32ULL * 1024ULL * 1024ULL;
 std::uint64_t Logger::currentBytes = 0;
 std::size_t Logger::retainedFiles = 4;
@@ -220,6 +221,7 @@ void Logger::init(
         rotateLocked();
     }
 
+    fastMinimumLevel.store(minimumLevel, std::memory_order_relaxed);
     initialized = true;
     const std::string startLine =
         formatLineLocked(

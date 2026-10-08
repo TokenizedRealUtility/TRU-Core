@@ -2,6 +2,7 @@
 #define LOGGING_H
 
 #include <chrono>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
@@ -38,6 +39,12 @@ public:
     static void debug(const std::string& message);
     static void trace(const std::string& message);
 
+    // TRU-PERF-04: check before constructing hot-path debug strings or locking.
+    static bool isEnabled(Level level) noexcept {
+        return static_cast<unsigned>(level) <=
+            static_cast<unsigned>(fastMinimumLevel.load(std::memory_order_relaxed));
+    }
+
     static Level parseLevel(const std::string& value);
     static const char* levelName(Level level);
 
@@ -54,10 +61,18 @@ private:
     static bool initialized;
     static std::string logPath;
     static Level minimumLevel;
+    static std::atomic<Level> fastMinimumLevel;
     static std::uint64_t maxBytes;
     static std::uint64_t currentBytes;
     static std::size_t retainedFiles;
     static std::chrono::steady_clock::time_point lastFlush;
 };
+
+// Arguments are evaluated only when DEBUG (or TRACE) is configured.
+#define TRU_LOG_DEBUG_LAZY(...) do { \
+    if (Logger::isEnabled(Logger::Level::Debug)) { \
+        Logger::debug(__VA_ARGS__); \
+    } \
+} while (false)
 
 #endif // LOGGING_H

@@ -7,6 +7,7 @@
 #include <chrono>
 #include <unordered_map>
 #include <unordered_set>  // queued-tx deduplication
+#include <mutex>
 #include <shared_mutex>  
 #include <vector>
 #include <cstdint>
@@ -117,7 +118,23 @@ public:
     std::vector<Transaction> getMempoolTransactions() const;
     //double calculate_balance(const std::string& address) const;
     uint64_t calculate_balance(const std::string& address) const;
+    // PERF-05: a bounded status read; an audit result is not block acceptance.
+    struct ChainStatusPerf05 {
+        int height = 0;
+        std::string tip;
+        uint32_t bits = 0;
+        bool tipAvailable = false;
+        std::string auditState = "not_run";
+        bool auditSameTip = false;
+        int auditHeight = -1;
+        std::string auditTip;
+        int64_t auditTime = 0;
+        int64_t auditDurationMs = 0;
+    };
+    ChainStatusPerf05 getChainStatusPerf05() const;
+    ChainStatusPerf05 runChainAuditPerf05() const;
     bool isChainValid() const;
+    bool isChainValidForStatus() const;
     int getChainSize() const;
     Block getBlock(const std::string& blockHash) const;
     std::string getBlockHashByHeight(int height) const;
@@ -348,6 +365,10 @@ public:
     //static bool looksLikeTokenIssuerScript(const std::string& scriptHex);
     uint32_t getMedianTimePast(const std::string& parentHash, int candidateHeight) const;
 private:
+    bool isChainValidLockedPerf02() const;
+    mutable std::mutex statusAuditMutex_;
+    mutable std::mutex auditRunMutexPerf05_;
+    mutable ChainStatusPerf05 lastAuditPerf05_;
     // Patch 08B.3 internal constructor for an isolated validation sandbox.
     // It opens the supplied copied state database but does not load/init a
     // chain, start worker threads, contact peers, or persist on destruction.

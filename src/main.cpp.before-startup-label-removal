@@ -11818,7 +11818,7 @@ int main(int argc, char *argv[]) {
         }
 
         std::cout << "TRU Core build " << tru_version::compiledCoreVersion()
-                  << std::endl;
+                  << " [AI-MEDIA-01 R2 draft]" << std::endl;
         // GUI-DESKTOP-01: initialize Qt only for GUI launches. CLI/headless
         // execution never attempts to connect to a display server.
 #ifdef BUILD_WITH_QT

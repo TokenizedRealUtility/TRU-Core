@@ -4642,6 +4642,7 @@ static json handleGetNewAddress(Wallet& wallet, const json &/*params*/, int id) 
 // Get block template
 //========================
 static json handleGetBlockTemplate(Blockchain &chain, const json &params = json::object()) {
+    const auto perfStarted = std::chrono::steady_clock::now();
     //
     // Hash + height must come from one chain snapshot so the template cannot
     // mix an old parent hash with a new height (or vice versa).
@@ -4976,6 +4977,13 @@ static json handleGetBlockTemplate(Blockchain &chain, const json &params = json:
         };
     }
 
+    const auto perfMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - perfStarted).count();
+    if (perfMs >= 50) Logger::log("[TRU-PERF-01] getblocktemplate ms=" +
+        std::to_string(perfMs) + " mempool=" + std::to_string(mempoolTxs.size()) +
+        " selected=" + std::to_string(gbt["transactions"].size()) +
+        " skipped_invalid=" + std::to_string(skippedInvalid) +
+        " skipped_size=" + std::to_string(skippedForSize));
     return gbt;
 }
 //========================
@@ -5168,16 +5176,37 @@ static json handleGetBlock(Blockchain &chain, const json &p, int id) {
 //========================
 // Get chain info
 //========================
-static json handleGetChainInfo(Blockchain &chain,int id) {
-    json info = {
-        {"bestHeight",chain.getBestTipHeight()},
-        {"bestHash",chain.getBestTipHash()},
-        {"chainSize",chain.getChainSize()},
-        {"difficulty",chain.getDifficulty()},
-        {"chainValid",chain.isChainValid()}
-    };
-    return makeResult(id,info);
+// TRU-PERF-05: null means no completed audit matching this tip, not invalid.
+static json perf05AuditBoolean(const Blockchain::ChainStatusPerf05& s) {
+    if (!s.auditSameTip || (s.auditState != "passed" && s.auditState != "failed"))
+        return nullptr;
+    return s.auditState == "passed";
 }
+static json perf05AuditInfo(const Blockchain::ChainStatusPerf05& s) {
+    return {{"state", s.auditState}, {"same_tip", s.auditSameTip},
+        {"height", s.auditHeight}, {"tip", s.auditTip},
+        {"completed_at_unix", s.auditTime}, {"duration_ms", s.auditDurationMs},
+        {"scope", "in_memory_block_hash_and_pow_walk"},
+        {"transaction_replay", false}};
+}
+static json handleGetChainInfo(Blockchain &chain,int id) {
+    const auto s = chain.getChainStatusPerf05();
+    return makeResult(id, {{"bestHeight", s.height}, {"bestHash", s.tip},
+        {"chainSize", static_cast<int64_t>(s.height) + 1}, {"difficulty", s.bits},
+        {"tip_available", s.tipAvailable}, {"chainValid", perf05AuditBoolean(s)},
+        {"chainvalid_scope", "last_explicit_audit_at_same_tip"},
+        {"chain_audit", perf05AuditInfo(s)}});
+}
+static json handleAuditChainPerf05(Blockchain& chain, int id) {
+    try {
+        const auto s = chain.runChainAuditPerf05();
+        const bool passed = s.auditState == "passed";
+        return makeResult(id, {{"passed", passed}, {"chain_audit", perf05AuditInfo(s)}});
+    } catch (const std::exception& e) {
+        return makeError(-32000, std::string("auditchain: ") + e.what());
+    }
+}
+
 /*
 //========================
 // 	Send raw tx Web
@@ -9174,11 +9203,12 @@ static json handleGetBalance(Blockchain &chain, Wallet &wallet, const json &p, i
 //========================
 static json handleGetInfo(Blockchain &chain, Wallet &wallet, P2PNode &node, int id) {
     try {
-        int    height   = chain.getBestTipHeight();
-        std::string tip = chain.getBestTipHash();
-        uint32_t diff   = chain.getDifficulty();
-        bool   valid    = chain.isChainValid();
-        int    csize    = chain.getChainSize();
+        const auto status = chain.getChainStatusPerf05();
+        const int height = status.height;
+        const std::string tip = status.tip;
+        uint32_t diff = status.bits;
+        const json valid = perf05AuditBoolean(status);
+        const int64_t csize = static_cast<int64_t>(height) + 1;
 
         // Connection count from the live peer list.
         size_t conns = 0;
@@ -9194,7 +9224,7 @@ static json handleGetInfo(Blockchain &chain, Wallet &wallet, P2PNode &node, int 
         static const char* HEXD = "0123456789abcdef";
         std::string diffhex(8, '0');
         for (int i = 7; i >= 0; --i) { diffhex[i] = HEXD[diff & 0xF]; diff >>= 4; }
-        uint32_t diffForOut = chain.getDifficulty();
+        uint32_t diffForOut = status.bits;
 
         json out = {
             {"version",       tru_version::coreReleaseVersion()},
@@ -9205,6 +9235,9 @@ static json handleGetInfo(Blockchain &chain, Wallet &wallet, P2PNode &node, int 
             {"difficultyhex", std::string("0x") + diffhex},
             {"connections",   (uint64_t)conns},
             {"chainvalid",    valid},
+            {"tip_available", status.tipAvailable},
+            {"chainvalid_scope", "last_explicit_audit_at_same_tip"},
+            {"chain_audit", perf05AuditInfo(status)},
             {"address",       addr},
             {"balance",       truFromAtoms(sats)},
             {"balance_atoms", sats},
@@ -9221,11 +9254,12 @@ static json handleGetInfo(Blockchain &chain, Wallet &wallet, P2PNode &node, int 
 //========================
 static json handleGetDesktopInfo(Blockchain &chain, P2PNode &node, int id) {
     try {
-        const int height = chain.getBestTipHeight();
-        const std::string tip = chain.getBestTipHash();
-        const uint32_t diff = chain.getDifficulty();
-        const bool valid = chain.isChainValid();
-        const int csize = chain.getChainSize();
+        const auto status = chain.getChainStatusPerf05();
+        const int height = status.height;
+        const std::string tip = status.tip;
+        uint32_t diff = status.bits;
+        const json valid = perf05AuditBoolean(status);
+        const int64_t csize = static_cast<int64_t>(height) + 1;
 
         size_t conns = 0;
         try { conns = node.getPeersList().size(); }
@@ -9247,7 +9281,10 @@ static json handleGetDesktopInfo(Blockchain &chain, P2PNode &node, int id) {
             {"difficulty",    diff},
             {"difficultyhex", std::string("0x") + diffhex},
             {"connections",   static_cast<uint64_t>(conns)},
-            {"chainvalid",    valid}
+            {"chainvalid",    valid},
+            {"tip_available", status.tipAvailable},
+            {"chainvalid_scope", "last_explicit_audit_at_same_tip"},
+            {"chain_audit", perf05AuditInfo(status)}
         });
     } catch (const std::exception& e) {
         return makeError(
@@ -10171,6 +10208,7 @@ void startRPCServer(Blockchain &chain, Wallet &wallet, P2PNode &node, int port,
         else if (m=="getblockbyheight")    response=handleGetBlockByHeight(chain,params,id);
         else if (m=="getblock")            response=handleGetBlock(chain,params,id);
         else if (m=="getchaininfo")        response=handleGetChainInfo(chain,id);
+        else if (m=="auditchain")          response=handleAuditChainPerf05(chain,id);
         else if (m=="sendrawtransactionWeb")  response=handleSendTransactionWeb(chain,params,id);
         else if (m=="sendrawtransaction")  response=handleSendTransaction(chain,params,id);
         else if (m=="sendtoaddress") response=handleSendToAddressLocal(chain,wallet,params,id,req.remote_addr,port);

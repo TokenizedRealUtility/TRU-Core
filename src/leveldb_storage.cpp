@@ -656,6 +656,42 @@ void LevelDBStorage::iteratePrefix(const std::string &prefix, std::function<void
     }
 }
 
+// TRU-PERF-03: explicit completion status; no partial index certification.
+bool LevelDBStorage::iteratePrefixPerf03(const std::string &prefix, std::function<void(const std::string &, const std::string &)> callback) const {
+    // Patch 08B.3a: snapshot matching entries while holding the lifetime-safe
+    // per-DB mutex, then release it before invoking callbacks. This prevents
+    // registry erase/rehash races without deadlocking callbacks that read DB state.
+    std::vector<std::pair<std::string, std::string>> entries;
+    {
+        auto dbMutex = getDbMutexHandle();
+        if (!dbMutex) return false;
+        std::lock_guard<std::mutex> lock(*dbMutex);
+
+        leveldb::ReadOptions opts;
+        opts.fill_cache = false;
+        std::unique_ptr<leveldb::Iterator> it(db->NewIterator(opts));
+        for (it->Seek(prefix); it->Valid() && it->key().starts_with(prefix); it->Next()) {
+            auto slice = it->key();
+            std::string fullKey(slice.data(), slice.size());
+            std::string keySansPrefix = fullKey.substr(prefix.size());
+            std::string raw = it->value().ToString();
+            auto delim = raw.find('|');
+            std::string actualValue = (delim == std::string::npos ? raw : raw.substr(delim + 1));
+            entries.emplace_back(std::move(keySansPrefix), std::move(actualValue));
+        }
+        if (!it->status().ok()) {
+            Logger::log("[LevelDBStorage] iteratePrefix error: " + it->status().ToString());
+            return false;
+        }
+    }
+
+    // Unlike the compatibility iterator, failures must not certify an index.
+    // Callbacks run after releasing the DB mutex, so nested reads remain safe.
+    for (const auto& entry : entries) callback(entry.first, entry.second);
+    return true;
+}
+
+
 bool LevelDBStorage::getMutationGeneration(
     uint64_t& generationOut) const {
 

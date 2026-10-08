@@ -120,4 +120,23 @@ public:
 // Compute a simple Merkle root from a vector of transactions
 std::string computeMerkleRoot(const std::vector<Transaction>& txs);
 
+
+// The referenced transaction MUST remain immutable for this scope's lifetime.
+// Used only within synchronous const validation; never attach this to a wallet's
+// mutable transaction or use its address as a persistent cache identity.
+class TruSigHashScopePerf06 {
+public:
+    explicit TruSigHashScopePerf06(const Transaction& tx);
+    ~TruSigHashScopePerf06();
+    TruSigHashScopePerf06(const TruSigHashScopePerf06&) = delete;
+    TruSigHashScopePerf06& operator=(const TruSigHashScopePerf06&) = delete;
+private:
+    friend class Transaction;
+    const Transaction* tx_;
+    const TruSigHashScopePerf06* previous_;
+    std::vector<unsigned char> base_;
+    std::vector<size_t> offsets_;
+    std::string identity_;
+};
+
 #endif // TX_H

@@ -939,6 +939,8 @@ bool Mempool::isTransactionValidUnchecked(
         return false;
     }
 
+    const TruSigHashScopePerf06 sighashScope(tx);
+
     // Metadata is carried by this transaction only. Arbitrary alternate keys
     // would make an unconfirmed transaction claim metadata for another txid.
     for (const auto& kv : tx.tokenMetadata) {
