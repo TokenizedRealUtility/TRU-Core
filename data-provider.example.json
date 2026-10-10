@@ -2,7 +2,7 @@
   "website": "https://tokenizedrealutility.com",
   "source": "https://github.com/TokenizedRealUtility/TRU-Core",
   "wallet_downloads": "https://github.com/TokenizedRealUtility/TRU-Core/releases",
-  "logo_png": "https://tokenizedrealutility.com/images/tru_logo.png",
+  "logo_png": "https://tokenizedrealutility.com/site_images/tru_logo.png",
   "mainnet_launch_date": null,
   "circulating_policy_reviewed": false,
   "reserve_scripts": []
