@@ -1,3 +1,7 @@
+#include "tru_agent_auto_policy.h"
+#include "tru_agent_checkpoint_v5.h"
+#include "token_editor_authority.h"
+#include <set>
 // ai_oracle_service.cpp
 #include "ai_oracle_service.h"
 #include "ai_provider_interface.h"
@@ -2851,10 +2855,77 @@ void ConfigurableAIOracle::processTokenEvolutionAnchorQueue()
 //=================================================
 //		MONITOR
 //=================================================
+// TRU-AGENT-03: private authenticated local inbox. No new wallet RPC surface.
+static void processAgentCheckpoints(Blockchain& chain,ContractStorage* storage,Wallet* wallet){
+ using namespace tru_agent_auto;
+ if(policyFile.empty()||!storage||!wallet)return;
+ // Bound polling and error logging, independently of ordinary queue work.
+ static std::chrono::steady_clock::time_point next;
+ auto tick=std::chrono::steady_clock::now();if(tick<next)return;next=tick+std::chrono::seconds(30);
+ try{
+  auto genesisBlock=chain.getBlockByHeight(1);require(genesisBlock&&genesisBlock->blockHash==genesis,"Wrong or unavailable mainnet genesis");
+  auto root=json::parse(readPrivate(policyFile,65536));
+  require(root.is_object()&&root.size()==3&&root.at("schema")=="TRU_AGENT_AUTO_POLICY_V1"&&root.at("enabled").is_boolean(),"Invalid policy document");
+  if(root.at("enabled")!=true)return;
+  auto agents=root.at("agents");require(agents.is_array()&&agents.size()<=32,"At most 32 agent policies");
+  std::set<std::string> ids;
+  for(const auto&p:agents){validate(p);require(ids.insert(p.at("token_id").get<std::string>()).second,"Duplicate token policy");}
+  for(const auto&p:agents){
+   if(p.at("enabled")!=true)continue;
+   const auto token=p.at("token_id").get<std::string>();
+   try{
+    privatePath(p.at("inbox").get<std::string>(),true);
+    auto requestPath=std::filesystem::path(p.at("inbox").get<std::string>())/"request.json";
+    if(!std::filesystem::exists(requestPath))continue;
+    auto envelope=json::parse(readPrivate(requestPath,8192));
+    require(envelope.is_object()&&envelope.size()==2,"Invalid request envelope");
+    auto d=envelope.at("checkpoint");tru_checkpoint_v5::descriptor(d);
+    require(d.at("token_id")==token&&d.at("manifest_sha256")==p.at("manifest_sha256"),"Request identity not authorized");
+    auto key=readPrivate(p.at("credential_file").get<std::string>(),64);
+    const bool auth=authenticated(key,d,envelope.at("hmac_sha256").get<std::string>());std::fill(key.begin(),key.end(),'\0');require(auth,"Request credential invalid");
+    TokenEvolutionEngine engine(storage);auto context=engine.issuerContext(token);
+    require(context.at("owner")==p.at("issuer")&&context.at("issuance_txid")==p.at("issuance_txid")&&context.at("type")=="NCFT","Issuer/issuance policy mismatch");
+    // Confirm issuance and every prior anchor using the same canonical observation path as Core.
+    Transaction observed;require(observeEvolutionAnchorTransaction(chain,context.at("issuance_txid").get<std::string>(),observed)==EvolutionAnchorObservation::Confirmed,"Issuance unavailable/unconfirmed");
+    std::string raw;require(storage->readConfirmedAuthorityValue("tokenMetadata:"+context.at("issuance_txid").get<std::string>(),raw),"Issuance metadata missing");
+    auto stored=json::parse(raw);json issuance=stored.value("meta",json::object());
+    for(const char*k:{"name","symbol","description","image","imageUrl"})if(stored.contains(k)&&!issuance.contains(k))issuance[k]=stored[k];
+    if(!p.at("did").get<std::string>().empty()) require(issuance.value("meta_id","")==p.at("did"),"DID label does not match issuance metadata");
+    auto latest=engine.loadLatest(token);require(!latest.empty(),"Prior evolution required");
+    // A replay after a successful or ambiguous persistence result never spends again.
+    if(latest.contains("checkpoint")&&latest.at("checkpoint")==d)continue;
+    auto history=engine.verifyHistory(token,issuance);
+    require(history.value("ok",false)&&history.value("root_verified",false)&&history.value("fully_anchored",false),"History is not fully anchored/valid");
+    for(const auto&e:history.at("epochs")){
+     auto epoch=e.at("epoch").get<uint64_t>();std::string recordRaw,txid;
+     require(storage->getContractData("TOKEN_EVOLUTION","epoch:"+token+":"+std::to_string(epoch),recordRaw)&&storage->getContractData("TOKEN_EVOLUTION","anchor_tx:"+token+":"+std::to_string(epoch),txid),"Anchor record missing");
+     require(observeEvolutionAnchorTransaction(chain,txid,observed)==EvolutionAnchorObservation::Confirmed,"Prior anchor pending/missing");
+     std::string reason;require(verifyTokenEvolutionAnchorTransaction(observed,json::parse(recordRaw),txid,reason),"Prior anchor payload invalid");
+    }
+    const auto ledgerKey="auto_usage:"+token;
+    std::string usage;bool exists=storage->getContractData("TOKEN_EVOLUTION",ledgerKey,usage);
+    if(!exists){require(!storage->contractDataExists("TOKEN_EVOLUTION",ledgerKey),"Unreadable usage ledger");require(latest.at("epoch_after")==p.at("baseline_epoch"),"Missing usage ledger or stale baseline; inspect before enabling");}
+    auto nextUsage=reserve(p,exists?json::parse(usage):json(),uint64_t(std::time(nullptr)));
+    require(wallet->getWalletSecurityMode()==WalletSecurityModeV1::ENCRYPTED_UNLOCKED,"Encrypted issuer wallet must already be unlocked");
+    auto preview=engine.checkpointPreview(token,issuance,d);require(preview.ok,"Checkpoint preview refused");auto record=preview.record;
+    std::string material=wallet->getPrivateKeyForAddress(context.at("owner").get<std::string>());
+    ECDSAKey signingKey=material.find("-----BEGIN")!=std::string::npos?ECDSAKey::fromPrivateKey(material):ECDSAKey::fromRawBytes(tru_editor::unhex(material));std::fill(material.begin(),material.end(),'\0');
+    record["editor_proof"]=tru_editor::proof(signingKey.getCompressedSec1(),signingKey.sign(tru_editor::hashBytes(tru_editor::message(record))));
+    require(engine.verifyEditorProof(record),"Issuer signature failed");
+    require(json::parse(readPrivate(policyFile,65536))==root,"Policy changed during approval; retry under current policy");
+    require(uint64_t(std::time(nullptr))<number(p,"expires_at_unix"),"Policy expired during validation");
+    require(engine.persistPreview(record,ledgerKey,usage,nextUsage.dump()),"Atomic checkpoint/allowance persistence unacknowledged; inspect/retry same request");
+    Logger::log("[TRU-AGENT-03] approved token="+token+" checkpoint="+d.at("checkpoint_sha256").get<std::string>()+" reserved_atoms=1000");
+   }catch(const std::exception&e){Logger::log("[TRU-AGENT-03] deferred token="+token+" reason="+e.what());}
+  }
+ }catch(const std::exception&e){Logger::log(std::string("[TRU-AGENT-03] automation paused: ")+e.what());}
+}
+
 void ConfigurableAIOracle::startMonitoring() {
     running.store(true);
     Logger::log("[AIOracle] Starting AI Oracle monitoring service");
     while (running.load()) {
+        if(blockchain) processAgentCheckpoints(*blockchain,storage,authenticatedSigningWallet);
         processTokenEvolutionAnchorQueue();
         if (!running.load()) break;
         auto pendingRequests=scanForRequests();

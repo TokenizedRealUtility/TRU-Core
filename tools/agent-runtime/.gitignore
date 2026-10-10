@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+*.sqlite3*
+.env
+.env.*
+config.json
+identity-manifest.json
+runtime.lock
+checkpoints/
+anchor-requests/
+anchor-receipts/
+
+# Runtime-private automation state (data belongs outside this source tree)
+auto-config.json
+auto-state.json
+auto-pending-request.json
+submission.key
+policy.json

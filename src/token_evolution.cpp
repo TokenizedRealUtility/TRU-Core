@@ -1,3 +1,4 @@
+#include "tru_agent_checkpoint_v5.h"
 #include "token_evolution.h"
 
 #include "ai_provider_interface.h"
@@ -879,6 +880,128 @@ TokenEvolutionResult TokenEvolutionEngine::evolveExternalPreview(
     return result;
 }
 
+TokenEvolutionResult TokenEvolutionEngine::agentDeclarationPreview(
+    const std::string& tokenID,
+    const json& currentMetadata
+) {
+    TokenEvolutionResult result;
+    const std::string tokenType = "NCFT";
+    if (tokenID.empty()) { result.error = "tokenID is required"; return result; }
+    json editorContext;
+    try {
+        editorContext = issuerContext(tokenID);
+        if (editorContext.value("type", "") != "NCFT")
+            throw std::runtime_error("Agent declaration requires a confirmed NCFT issuance");
+    }
+    catch (const std::exception& e) { result.error = e.what(); return result; }
+
+    json baseMetadata = currentMetadata;
+    json latest = loadLatest(tokenID);
+    if (!latest.empty()) {
+        if (!latest.contains("metadata") || !latest["metadata"].is_object()) {
+            result.error = "Latest evolution record is missing metadata"; return result;
+        }
+        const json& latestMetadata = latest["metadata"];
+        const std::string actualLatestHash = sha256Hex(latestMetadata.dump());
+        const std::string recordedLatestHash = latest.value("new_metadata_hash", "");
+        if (recordedLatestHash.empty() || actualLatestHash != recordedLatestHash) {
+            result.error = "Latest evolution metadata hash mismatch; refusing declaration preview";
+            return result;
+        }
+        uint64_t persistedEpoch = 0;
+        try { persistedEpoch = latest.at("epoch_after").get<uint64_t>(); }
+        catch (...) { result.error = "Latest evolution record has invalid epoch_after"; return result; }
+        if (parseEpoch(latestMetadata) != persistedEpoch) {
+            result.error = "Latest evolution epoch mismatch between record and metadata"; return result;
+        }
+        baseMetadata = latestMetadata;
+    } else {
+        baseMetadata["evolution_epoch"] = "0";
+    }
+
+    const std::string providerName = "issuer_declaration";
+    const std::string providerVersion = "tru-agent-declaration-v1";
+    const std::string modelID; // Local deterministic declaration; no inference model.
+    const std::string effectiveTrigger = "issuer_declares_ai_assistant";
+    json normalized = normalizeMetadata(tokenType, baseMetadata, providerName);
+    const uint64_t oldEpoch = parseEpoch(normalized);
+    if (oldEpoch == std::numeric_limits<uint64_t>::max()) {
+        result.error = "Epoch counter exhausted"; return result;
+    }
+    const uint64_t newEpoch = oldEpoch + 1U;
+
+    // Preserve existing prose. Refuse duplicate declarations without consuming an epoch.
+    const std::string marker = "TRU_AGENT_DECLARATION_V1:ai_assistant";
+    if (baseMetadata.value("agent_kind", "") == "ai_assistant") {
+        result.error = "Already declared as an AI assistant; no new epoch needed"; return result;
+    }
+    std::string description;
+    try { description = normalized.at("description_ai").get<std::string>(); }
+    catch (...) { result.error = "description_ai must be a string"; return result; }
+    std::istringstream lines(description);
+    for (std::string line; std::getline(lines, line);) {
+        const auto first = line.find_first_not_of(" \t\r");
+        if (first != std::string::npos &&
+            line.substr(first, line.find_last_not_of(" \t\r") - first + 1) == marker) {
+            result.error = "Already declared as an AI assistant; no new epoch needed"; return result;
+        }
+    }
+    if (!description.empty() && description.back() != '\n') description += '\n';
+    description += marker;
+    if (description.size() > 2048U) {
+        result.error = "Declaration would exceed 2048 bytes; shorten description_ai in a reviewed evolution first";
+        return result;
+    }
+    json updates = {{"description_ai", description}};
+    json evolved = normalized;
+    for (auto it = updates.begin(); it != updates.end(); ++it) evolved[it.key()] = it.value();
+    if (sha256Hex(evolved.dump()) == sha256Hex(normalized.dump())) {
+        result.error = "Declaration makes no permitted metadata changes";
+        return result;
+    }
+
+    evolved["ai_engine"] = providerName;
+    evolved["evolution_epoch"] = std::to_string(newEpoch);
+    const uint64_t evolutionTimestamp = static_cast<uint64_t>(std::time(nullptr));
+    evolved["last_evolution"] = "unix:" + std::to_string(evolutionTimestamp) +
+                               ";epoch:" + std::to_string(newEpoch);
+
+    const std::string previousHash = sha256Hex(normalized.dump());
+    const std::string newHash = sha256Hex(evolved.dump());
+    const std::string systemPrompt = evolutionSystemPrompt();
+    const std::string userPrompt = buildPrompt(tokenID, tokenType, normalized, effectiveTrigger);
+    const std::string requestHash = canonicalRequestHashV1(
+        tokenID, tokenType, oldEpoch, providerName, providerVersion, modelID,
+        effectiveTrigger, previousHash, systemPrompt, userPrompt, 500U, 400U);
+
+    json record = {
+        {"format", "TRU_TOKEN_EVOLVE_V1"},
+        {"record_format_version", 2U},
+        {"status", "preview"},
+        {"tokenID", tokenID},
+        {"type", tokenType},
+        {"writer_type", "ai"},
+        {"provider", providerName},
+        {"provider_version", providerVersion},
+        {"model_id", modelID},
+        {"request_hash", requestHash},
+        {"input_metadata_hash", previousHash},
+        {"trigger", effectiveTrigger},
+        {"epoch_before", oldEpoch},
+        {"epoch_after", newEpoch},
+        {"previous_metadata_hash", previousHash},
+        {"new_metadata_hash", newHash},
+        {"timestamp", evolutionTimestamp},
+        {"updated_fields", updates},
+        {"metadata", evolved},
+                {"issuer_context", editorContext}
+    };
+    result.ok = true;
+    result.metadata = evolved;
+    result.record = record;
+    return result;
+}
+
 std::string TokenEvolutionEngine::buildMediaPrompt(
     const std::string& tokenID, const std::string& tokenType, const json& parent,
     const std::string& trigger, const json& inputs) const {
@@ -952,7 +1075,54 @@ bool TokenEvolutionEngine::verifyEditorProof(const json& record) const {
     catch (...) { return false; }
 }
 
-bool TokenEvolutionEngine::persistPreview(const json& record) {
+TokenEvolutionResult TokenEvolutionEngine::checkpointPreview(const std::string& tokenID,
+    const nlohmann::json& issuance, const nlohmann::json& descriptor) {
+    TokenEvolutionResult result;
+    try {
+        tru_checkpoint_v5::descriptor(descriptor);
+        if (descriptor.at("token_id") != tokenID) throw std::runtime_error("Checkpoint/token mismatch");
+        auto trusted=issuerContext(tokenID);
+        auto latest=loadLatest(tokenID);
+        if(latest.empty()) throw std::runtime_error("Complete and confirm a first normal evolution before checkpoint anchoring");
+        json parent=issuance;
+        if(latest.empty()) parent["evolution_epoch"]="0";
+        else {
+            parent=latest.at("metadata");
+            if(sha256Hex(parent.dump())!=latest.at("new_metadata_hash") ||
+               parseEpoch(parent)!=latest.at("epoch_after").get<uint64_t>())
+                throw std::runtime_error("Corrupt latest evolution record");
+        }
+        parent=normalizeMetadata("NCFT",parent,"checkpoint");
+        const auto before=parseEpoch(parent);
+        if(before==std::numeric_limits<uint64_t>::max()) throw std::runtime_error("Epoch exhausted");
+        const uint64_t epoch=before+1,ts=static_cast<uint64_t>(std::time(nullptr));
+        auto meta=tru_checkpoint_v5::assemble(parent,descriptor,epoch,ts);
+        const auto previous=sha256Hex(parent.dump());
+        result.record=json{{"format","TRU_TOKEN_EVOLVE_V1"},{"record_format_version",5U},
+          {"status","preview"},{"tokenID",tokenID},{"type","NCFT"},{"writer_type","agent_checkpoint"},
+          {"provider","checkpoint"},{"provider_version","tru-agent-checkpoint-v1"},{"model_id",""},
+          {"trigger","agent_memory_checkpoint"},{"checkpoint",descriptor},{"input_metadata",parent},
+          {"input_metadata_hash",previous},{"previous_metadata_hash",previous},
+          {"new_metadata_hash",sha256Hex(meta.dump())},{"epoch_before",before},{"epoch_after",epoch},
+          {"timestamp",ts},{"metadata",meta},{"updated_fields",json{{"agent_checkpoint",descriptor.dump()}}},
+          {"request_hash",tru_checkpoint_v5::requestHash(tokenID,previous,descriptor)},{"issuer_context",trusted}};
+        if(!validateCheckpointPreview(result.record,issuance)) throw std::runtime_error("Checkpoint reconstruction failed");
+        result.metadata=meta;result.ok=true;
+    }catch(const std::exception&e){result.error=e.what();}
+    return result;
+}
+
+bool TokenEvolutionEngine::validateCheckpointPreview(const json&r,const json& issuance) const {
+    try {
+        json parent=issuance;auto latest=loadLatest(r.at("tokenID").get<std::string>());
+        if(latest.empty())parent["evolution_epoch"]="0";else parent=latest.at("metadata");
+        parent=normalizeMetadata("NCFT",parent,"checkpoint");
+        return tru_checkpoint_v5::valid(r,parent);
+    }catch(...){return false;}
+}
+
+bool TokenEvolutionEngine::persistPreview(const json& record,
+    const std::string& usageKey, const std::string& expectedUsage, const std::string& nextUsage) {
     // Track 11: serialize the queue read/compact/write transaction.
     // storeContractDataBatch is atomic, but without this guard two concurrent
     // persistPreview calls can both derive from the same pre-write queue image.
@@ -996,7 +1166,7 @@ bool TokenEvolutionEngine::persistPreview(const json& record) {
 
     // TOKEN-AI-03A2: legacy records without record_format_version remain V1.
     // New previews are V2 and must carry complete logical-request provenance.
-    if (recordFormatVersion != 1U && recordFormatVersion != 2U && recordFormatVersion != 4U) {
+    if (recordFormatVersion != 1U && recordFormatVersion != 2U && recordFormatVersion != 4U && recordFormatVersion != 5U) {
         Logger::log("[TokenEvolution] Refusing unknown evolution record format version");
         return false;
     }
@@ -1066,6 +1236,10 @@ bool TokenEvolutionEngine::persistPreview(const json& record) {
     if (recordFormatVersion == 4U &&
         (!record.contains("input_metadata") || !validateMediaRecord(record, record["input_metadata"])))
         return false;
+    if (recordFormatVersion == 5U) {
+        const auto parent=loadLatest(tokenID);
+        if(parent.empty() || !tru_checkpoint_v5::valid(record,parent.at("metadata"))) return false;
+    }
     const std::string serialized = record.dump();
     const std::string epochKey =
         "epoch:" + tokenID + ":" + std::to_string(epoch);
@@ -1237,12 +1411,20 @@ bool TokenEvolutionEngine::persistPreview(const json& record) {
     // TOKEN-AI-02A: epoch, latest pointer and anchor queue are one synced,
     // checksummed LevelDB WriteBatch. No latest->missing-epoch window and no
     // persisted epoch can be acknowledged without also being queued.
-    const std::vector<ContractStorage::BatchWrite> writes = {
+    std::vector<ContractStorage::BatchWrite> writes = {
         {"TOKEN_EVOLUTION", epochKey, serialized},
         {"TOKEN_EVOLUTION", latestKey, serialized},
         {"TOKEN_EVOLUTION", "anchor_queue", queueSerialized}
     };
 
+    if (!usageKey.empty()) {
+        if(recordFormatVersion != 5U || usageKey != "auto_usage:"+tokenID || nextUsage.empty()) return false;
+        std::string actual;
+        bool found=storage_->getContractData("TOKEN_EVOLUTION",usageKey,actual);
+        if ((!found && storage_->contractDataExists("TOKEN_EVOLUTION",usageKey)) ||
+            (found ? actual != expectedUsage : !expectedUsage.empty())) return false;
+        writes.emplace_back("TOKEN_EVOLUTION",usageKey,nextUsage);
+    }
     if (!storage_->storeContractDataBatch(writes)) {
         Logger::log(
             "[TokenEvolution] Atomic persistence batch failed token=" +
@@ -1270,6 +1452,10 @@ bool TokenEvolutionEngine::persistPreview(const json& record) {
         return false;
     }
 
+    if(!usageKey.empty()) {
+        std::string verifiedUsage;
+        if(!storage_->getContractData("TOKEN_EVOLUTION",usageKey,verifiedUsage) || verifiedUsage!=nextUsage) return false;
+    }
     Logger::log(
         "[TokenEvolution] Atomically persisted+queued token=" + tokenID +
         " epoch=" + std::to_string(epoch) +
@@ -1482,7 +1668,7 @@ json TokenEvolutionEngine::verifyHistory(
 
         if (recordFormatVersion != 1U &&
             recordFormatVersion != 2U &&
-            recordFormatVersion != 3U && recordFormatVersion != 4U) {
+            recordFormatVersion != 3U && recordFormatVersion != 4U && recordFormatVersion != 5U) {
             addError("unsupported record_format_version at " + epochKey);
             report["epochs"].push_back(epochReport);
             break;
@@ -1490,6 +1676,11 @@ json TokenEvolutionEngine::verifyHistory(
 
         const bool externalV3 = recordFormatVersion == 3U;
         const bool mediaV4 = recordFormatVersion == 4U;
+        const bool checkpointV5 = recordFormatVersion == 5U;
+        if(checkpointV5 && (!editorVerified || epoch == 1U)) {
+            addError("checkpoint requires issuer proof and prior evolution");
+            report["epochs"].push_back(epochReport);break;
+        }
         if ((!externalV3 && status != "preview") ||
             (externalV3 && status != "materialized"))
         {
@@ -1573,7 +1764,7 @@ json TokenEvolutionEngine::verifyHistory(
             externalV3 ? record.value("writer_type", "") : "ai";
         bool updatesValid = true;
         for (auto it = updates.begin(); it != updates.end(); ++it) {
-            const bool fieldAllowed = mediaV4 ?
+            const bool fieldAllowed = checkpointV5 ? it.key()=="agent_checkpoint" : mediaV4 ?
                 (tru_media_v4::aiField(tokenType, it.key()) || tru_media_v4::inputField(it.key()) ||
                  it.key() == "artwork_version" || it.key() == "previous_artwork_sha256") : externalV3
                 ? VAHCapabilities::writerClassMayHoldFieldCapability(
@@ -1597,7 +1788,7 @@ json TokenEvolutionEngine::verifyHistory(
         }
 
         if (parseEpoch(metadata) != epoch ||
-            (!externalV3 &&
+            (!externalV3 && !checkpointV5 &&
              (metadata.value("ai_engine", "") != provider ||
               metadata.value("last_evolution", "") !=
                   "unix:" + std::to_string(timestamp) +
@@ -1661,6 +1852,9 @@ json TokenEvolutionEngine::verifyHistory(
             }
         }
 
+        if(checkpointV5 && !tru_checkpoint_v5::valid(record,requestInputMetadata)) {
+            addError("invalid exact checkpoint record");report["epochs"].push_back(epochReport);break;
+        }
         if (mediaV4 && !validateMediaRecord(record, requestInputMetadata)) {
             addError("invalid V4 media record at " + epochKey);
             report["epochs"].push_back(epochReport);
@@ -2008,6 +2202,7 @@ json TokenEvolutionEngine::verifyHistory(
         epochReport["image"] = metadata.value("image", "");
         epochReport["artwork_sha256"] = metadata.value("artwork_sha256", "");
         epochReport["media_bytes_verified"] = false;
+        if(checkpointV5) epochReport["checkpoint"]=record.at("checkpoint");
         epochReport["provider"] = provider;
         epochReport["trigger"] = trigger;
         epochReport["timestamp"] = timestamp;

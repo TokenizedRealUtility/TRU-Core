@@ -45,11 +45,19 @@ public:
         const nlohmann::json& externalProvenance
     );
 
+    // Deterministic local preview only; caller uses existing issuer-approved commit.
+    TokenEvolutionResult agentDeclarationPreview(
+        const std::string& tokenID, const nlohmann::json& currentMetadata);
+
     // Reconstruct against a trusted issuance root/current parent before commit.
     bool validateMediaPreview(const nlohmann::json& record,
                               const nlohmann::json& issuanceMetadata) const;
 
-    bool persistPreview(const nlohmann::json& record);
+    TokenEvolutionResult checkpointPreview(const std::string& tokenID, const nlohmann::json& issuance, const nlohmann::json& descriptor);
+    bool validateCheckpointPreview(const nlohmann::json& record, const nlohmann::json& issuance) const;
+    bool persistPreview(const nlohmann::json& record,
+        const std::string& usageKey = "", const std::string& expectedUsage = "",
+        const std::string& nextUsage = "");
     nlohmann::json issuerContext(const std::string& tokenID) const;
     bool verifyEditorProof(const nlohmann::json& record) const;
 
