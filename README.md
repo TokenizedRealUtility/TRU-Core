@@ -780,163 +780,53 @@ Secrets belong in environment variables or protected local configuration and sho
 
 # Living Token Evolution
 
-TRU's **Living Token Evolution** system allows supported tokens to evolve AI-assisted metadata while preserving a cryptographically linked history.
+TRU's SFT and NCFT token evolution preserves a locally persisted sequence of epochs and uses signed, hash-linked records plus on-chain anchor transactions. **AI inference is off-chain; validators do not run the AI model.** The latest code contains separate flows for provider-generated evolution, media updates, AI-assistant declarations, and explicit agent-memory checkpoint commitments.
 
-```text
-Existing token state
-       |
-       v
-Load latest epoch
-       |
-       v
-AI provider
-       |
-       v
-Generate next metadata state
-       |
-       v
-Epoch N -> Epoch N+1
-       |
-       v
-Hash previous + new metadata
-       |
-       v
-Persist evolution record
-       |
-       v
-Queue signed TRU anchor
-       |
-       v
-Mempool
-       |
-       v
-Mined block
-       |
-       v
-On-chain evolution commitment
-```
+## Evolution and provenance
 
-The entire generated document does not need to be placed in every block. A compact commitment can contain fields such as:
+- Epoch numbering is derived from **persisted evolution records**, not a token issuer's arbitrary `evolution_epoch` metadata input. The issuance root is epoch 0.
+- Each proposed change is previewed and checked before signing/persistence. No-op metadata proposals should not consume an epoch.
+- Evolution records include previous/new metadata hashes and issuer/editor authorization proof. The normal evolution path is tied to the **original issuance owner's** verified signature by `token_editor_authority.h` (`TRU_ORIGINAL_ISSUANCE_OWNER_V1`).
+- A locally prepared evolution record, submitted anchor, and confirmed on-chain anchor are **different states**. Verify receipt/history and block confirmation before describing an epoch as confirmed.
+- The independent `token_evolution_cli` supports `--verify-history`; consult its current `--help` and the agent guide for the exact workflow. The published README should not promise automatic epoch creation merely because a model or token exists.
 
-```text
-TRU_EVOLVE_V1
-tokenID
-tokenType
-epoch
-provider
-trigger
-previous_metadata_hash
-new_metadata_hash
-```
+## NCFT agent memory checkpointing
 
-This allows an evolving digital asset to retain a verifiable timeline while AI providers, models, or off-chain storage systems change over time.
+Core contains `tru_agent_checkpoint_v5.h`: a distinct **issuer-approved checkpoint** writer for NCFTs, not a general on-chain memory store or consensus-rule change. It validates an explicit public checkpoint request containing token ID, checkpoint/manifest SHA-256 commitments, bounded byte size, and `explicit_memories_only` scope. The private memory itself remains off-chain. A duplicate checkpoint hash is rejected.
 
-Potential applications include:
+Enable checkpoint processing through the separately protected `[agent_checkpoint]` policy setting documented in [Configuration](#configuration). A supervised watcher may export **public requests** for a human to review. Core requires the supported policy and exact approval; it does not grant a model access to private wallet keys, automatically unlock an encrypted wallet, or sign arbitrary requests. `NCFT-Ai-Agents-main/SERVICE.md` documents an optional Linux user service **for the watcher only**, not a Core or model service. Run its supervised trial before enabling automation.
 
-- AI-assisted digital identities,
-- evolving game assets,
-- digital twins,
-- tokenized equipment or property records,
-- autonomous-agent identity/state,
-- dynamic media,
-- supply-chain state,
-- auditable AI-generated asset histories.
+## NCFT transfer and agent handover: current boundary
+
+**Do not advertise an NCFT transfer as a complete AI-agent handover.** The current reviewed `token_editor_authority.h` still binds evolution/editor proof to the confirmed **original issuance owner**, not automatically to the recipient of the latest token transfer. Transfer changes token ownership; it does not by itself transfer this signer authority. Nor does an on-chain transfer migrate private memories, running processes, API credentials, or service ownership. A secure authenticated export/import and replacement-authority design would need separate implementation and verification before claiming this is seamless.
+
+`tru://axon/fund/...` wallet handoff in Core is a **NEROMESH funding-intent workflow**, not NCFT agent/editor handover; keep the two terms distinct. The supplied source should not be described as a completed automatic transfer-of-agent-authority patch.
+
+**Security scope:** evolution proofs, hash commitments, and confirmed anchors demonstrate provenance of submitted records. They do not prove the accuracy of AI-generated content, custody of off-chain data, or a quantum-resistant signature scheme.
 
 ---
+
 
 # Interactive Node CLI
 
-Run the node with:
+Start the operator CLI with `./tru_advanced --cli` from the active build directory. The current `main.cpp` includes **TRU CLI UX PATCH 30A5**: the **visible menu uses sequential choices 1–36**, mapped internally to older handler codes. The old 4a/12a/13a aliases remain accepted but are **not** the public menu numbering. Press `M` / `m` to toggle full/compact views.
 
-```bash
-./tru_advanced --cli
-```
-
-The node includes a responsive terminal interface rather than requiring raw RPC calls for everyday operation.
-
-## Full and compact menus
-
-The interface automatically chooses a layout that fits the terminal. Press:
-
-```text
-M
-```
-
-or:
-
-```text
-m
-```
-
-to toggle between **FULL** and **COMPACT** menu modes.
-
-The menu uses absolute terminal positioning so it does not continually scroll or stack duplicate copies. Chain information, the TRU banner, command output, and mining dashboard occupy separate screen areas.
-
-### Full menu
-
-![TRU Core full menu](docs/img/tru-cli-menu-full.png)
-
-### Compact menu
-
-![TRU Core compact menu](docs/img/tru-cli-menu-compact.png)
-
-### Interactive operations
-
-The current menu exposes:
-
-| Option | Function |
+| Public choice | Operation (mapped legacy handler) |
 |---|---|
-| 1 | Create new wallet |
-| 2 | Load wallet |
-| 3 | Save wallet |
-| 4 / 4a | Generate address / view private keys |
-| 5 | Send TRU |
-| 6 | Check balance |
-| 7 / 7a | CPU mine / GPU mine |
-| 8 | View chain information |
-| 9 | List peers |
-| 10 | Lookup block by hash |
-| 11 | Exit |
-| 12 / 12a / 12b | Token and smart-contract token views |
-| 13 | Issue FT/NFT/SFT/NCFT |
-| 13a | Create TRUSCRIPT |
-| 13b | List wallet TRUSCRIPT |
-| 13c | Send TRUSCRIPT |
-| 13d | Create AI tokens |
-| 14 | Show wallet addresses |
-| 15 | Send tokens |
-| 16 | Connect to peer |
-| 17 | Send peer message |
-| 18 | Create smart contract |
-| 18a | Get current pubkey hash |
-| 18b | Bridge contract options |
-| 19 | List mempool transactions |
-| 20 / 20a | Query/list contract state |
-| 21 | Vote on contract |
-| 22 | View voting results |
-| 23 | Mint contract tokens |
-| 24 | Contract-token supply |
-| `sync` | Check blockchain synchronization |
-| `C` | Clear output |
-| `M` | Toggle full/compact menu |
+| 1–3 | Create address/wallet, load wallet, save wallet (`1`, `2`, `3`) |
+| 4–9 | Generate address, private key view, send TRU, check balance, list addresses, show pubkey hash (`4`, `4a`, `5`, `6`, `14`, `18a`) |
+| **10** | **Token List** (`12`) |
+| 11–12 | Token contract views (`12a`, `12b`) |
+| 13–17 | Issue FT/NFT/SFT/NCFT, create/list/send TRUSCRIPT, token AI tools (`13`, `13a`, `13b`, `13c`, `13f`) |
+| 18–20 | Send token, create smart contract, bridge options (`15`, `18`, `18b`) |
+| 21–27 | Query/list/update contracts, voting, voting results, mint, token supply (`20`, `20a`, `20u`, `21`, `22`, `23`, `24`) |
+| 28–33 | Chain information, peers, block lookup, mempool, connect peer, peer message (`8`, `9`, `10`, `19`, `16`, `17`) |
+| 34–36 | CPU mine, GPU mine, exit (`7`, `7a`, `11`) |
 
-## Live mining dashboard
-
-While mining is active, the terminal can display node-reported miner information including:
-
-- mining state,
-- current hashrate,
-- blocks found,
-- block reward,
-- chain height,
-- current difficulty,
-- last miner report age,
-- algorithm,
-- animated activity indicator.
-
-The CPU miner dashboard uses the actual difficulty bits from its current candidate instead of a hard-coded display value.
+These are **source-code mappings**, not a guarantee that each feature is available or enabled in every build/runtime. The legacy `13d` AI-token creation and `13e` AI communication handlers also exist in source but are not listed in this 36-choice public mapping; use the advertised Token AI tools entry and check the exact live menu. Do not publish the old menu table as though it matches v0.07.7/v0.07.8.
 
 ---
+
 
 # `tru-cli`
 
@@ -1157,10 +1047,18 @@ http://127.0.0.1:21832/rpc
 Example:
 
 ```bash
-curl -sS \
+# Prefer authenticated tru-cli for ordinary use:
+./build-native/bin/tru-cli raw getchaininfo '[]'
+
+# For direct curl, use a protected token source; never paste the token publicly.
+# The default cookie path for port 21832 is usually ~/.tru/rpc-cookie-21832.
+RPC_COOKIE="${TRU_RPC_COOKIE_FILE:-$HOME/.tru/rpc-cookie-21832}"
+TOKEN="$(cat "$RPC_COOKIE")"
+curl -sS -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   --data '{"jsonrpc":"2.0","id":1,"method":"getchaininfo","params":{}}' \
   http://127.0.0.1:21832/rpc
+unset TOKEN
 ```
 
 TRU exposes a broad RPC surface. Representative groups include:
@@ -1219,8 +1117,7 @@ getTRUScriptDetails
 ## Contracts
 
 ```text
-createsmartcontract
-createcontracttransaction
+createcontracttransaction  # canonical contract creation; legacy createsmartcontract removed
 getcontracts
 createmagiclock
 unlockmagiclock
@@ -1267,7 +1164,7 @@ getpeerinfo
 
 `tru-cli raw` can access methods that do not yet have a friendly CLI wrapper.
 
-> **Security:** RPC currently has no built-in HTTP authentication. Keep port `21832` on loopback or behind a properly authenticated reverse proxy/firewall.
+> **Security (reviewed source):** Privileged `/rpc` requires a locally generated **Bearer token**. Core creates/loads its per-port token using `tru_rpc::loadOrCreateServerToken()`, records the private cookie path in startup logs, and rejects missing or incorrect `Authorization: Bearer …` headers (401, with rate-limited failures). Browser-Origin/Fetch-Site requests to privileged RPC are rejected (403), and `GET /rpc` is disabled (405). Default `rpcbind` is loopback. Non-loopback binding requires explicit `[network] rpcAllowRemote=1`; RPC spending must not be exposed on a non-loopback bind. Authentication does **not** replace firewall isolation. Do not embed token/cookie contents in websites, logs, screenshots, or public configs.
 
 ---
 
@@ -1430,6 +1327,7 @@ Docker Compose profiles can run:
 See `README_DOCKER.md` for the full deployment and persistence guide.
 
 ---
+
 # Configuration
 
 TRU reads INI-style settings from `tru.conf`. Sections and key spelling matter. This reference was checked against the supplied `NEW_TRU` and `TRU-Core` source snapshots and the NCFT agent configuration package (October 2026). **Merge changes into your existing working `tru.conf`; never replace a live node's wallet, peer, or oracle settings wholesale.**
