@@ -10540,3 +10540,37 @@ std::string Wallet::createSmartContract(const std::string& type, const std::stri
         throw std::runtime_error(std::string("Failed to create contract: ") + e.what());
     }
 }
+
+#include "tru_datafeed_v4.h"
+// Explicit, fee-bounded data publication through existing transaction rules.
+std::string Wallet::publishDataFeedV1(const std::string& data,
+    const std::string& owner, uint64_t maxFeeAtoms) {
+    if(!isLocalChain || !blockchainPtr || !blockchainPtr->mempool)
+        throw std::runtime_error("Local chain and mempool required");
+    if(!isValidAddress(owner) || !ownsAddress(owner))
+        throw std::runtime_error("Owner address must belong to the loaded wallet");
+    const auto script=tru_datafeed_v4::script(data);
+    auto funding=findOneSpendableUtxo(owner,blockchainPtr->mempool.get());
+    UTXO coin;
+    if(funding.first.empty() || !blockchainPtr->utxoSet.getUTXO(funding.first,funding.second,coin))
+        throw std::runtime_error("No spendable fee UTXO at owner address");
+    uint64_t fee=WALLET_MIN_BASE_FEE;
+    if(maxFeeAtoms<fee || coin.amount<fee)
+        throw std::runtime_error("Fee cap or funding is below the base fee");
+    Transaction tx(false);tx.vin.emplace_back(funding.first,funding.second);
+    tx.vout.emplace_back(0,script);
+    std::size_t changeIndex=WALLET_NO_FEE_BEARING_VOUT;
+    if(coin.amount>fee){tx.vout.emplace_back(coin.amount-fee,createP2PKHScriptHexFromAddress(owner));changeIndex=1;}
+    fee=applyWalletPolicyFee(tx,fee,changeIndex,"publishDataFeedV1");
+    uint64_t outputs=0;
+    for(const auto& out:tx.vout){if(out.amount>coin.amount-outputs)throw std::runtime_error("Invalid publication outputs");outputs+=out.amount;}
+    const uint64_t actualFee=coin.amount-outputs;
+    if(actualFee>maxFeeAtoms)throw std::runtime_error("Publication exceeds max_fee_atoms; not signed or broadcast");
+    tx.computeTxId();
+    if(!signTransaction(tx))throw std::runtime_error("DataFeed signing failed");
+    if(blockchainPtr->mempool->addTransaction(tx)!=MempoolAddStatus::SUCCESS)
+        throw std::runtime_error("DataFeed mempool rejection; inspect Core log; do not blindly retry");
+    if(!blockchainPtr->broadcastTransaction(tx))
+        Logger::log("[TRU-DATAFEED-05] Locally accepted; peer relay failed txid="+tx.txid);
+    return tx.txid;
+}

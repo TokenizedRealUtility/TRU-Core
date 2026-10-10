@@ -1096,215 +1096,18 @@ static bool processTokenTransferIndexing(Blockchain &chain, const Transaction &t
 //==============================================
 
 static json handleGetAddressTransactions(Blockchain &chain, const json &params, int id) {
-    // WEB_WALLET_PATCH_2: enriched TRU/TRUScript address history.
-    if (!params.contains("address") || !params["address"].is_string())
-        return makeError(-32602, "Missing address parameter");
-
-    const std::string address = params["address"].get<std::string>();
-    int count = params.value("count", 100);
-    if (count <= 0) count = 100;
-    if (count > 500) count = 500;
-
-    json rows = json::array();
-    const int tip = chain.getBestTipHeight();
-
-    for (int height = tip;
-         height >= 0 && static_cast<int>(rows.size()) < count;
-         --height) {
-
-        auto blockOpt = chain.getBlockByHeight(height);
-        if (!blockOpt.has_value()) continue;
-        const Block& block = blockOpt.value();
-
-        for (auto txIt = block.transactions.rbegin();
-             txIt != block.transactions.rend() &&
-             static_cast<int>(rows.size()) < count;
-             ++txIt) {
-
-            const Transaction& tx = *txIt;
-
-            uint64_t totalInputs = 0;
-            uint64_t myInputs = 0;
-            uint64_t totalOutputs = 0;
-            uint64_t myOutputs = 0;
-            uint64_t sentToOthers = 0;
-
-            std::string firstInputAddress;
-            std::string firstOtherOutputAddress;
-
-            for (const auto& vin : tx.vin) {
-                if (vin.isCoinbase()) continue;
-
-                Transaction prev;
-                if (!chain.findTransaction(vin.txid, prev) ||
-                    vin.vout >= prev.vout.size())
-                    continue;
-
-                const TxOut& prevOut = prev.vout[vin.vout];
-                totalInputs += prevOut.amount;
-
-                std::string inAddr;
-                try {
-                    inAddr = extractP2PKHAddressCorrect(prevOut.scriptPubKey);
-                } catch (...) {
-                    inAddr.clear();
-                }
-
-                if (firstInputAddress.empty() && !inAddr.empty())
-                    firstInputAddress = inAddr;
-                if (inAddr == address)
-                    myInputs += prevOut.amount;
-            }
-
-            bool hasMyOutput = false;
-            bool isScriptTransfer = false;
-            std::string scriptFrom;
-            std::string scriptTo;
-
-            for (const auto& out : tx.vout) {
-                totalOutputs += out.amount;
-
-                std::string outAddr;
-                try {
-                    outAddr = extractP2PKHAddressCorrect(out.scriptPubKey);
-                } catch (...) {
-                    outAddr.clear();
-                }
-
-                if (outAddr == address) {
-                    myOutputs += out.amount;
-                    hasMyOutput = true;
-                } else if (!outAddr.empty()) {
-                    if (myInputs > 0)
-                        sentToOthers += out.amount;
-                    if (firstOtherOutputAddress.empty())
-                        firstOtherOutputAddress = outAddr;
-                }
-
-                if (out.amount == 0 &&
-                    out.scriptPubKey.rfind("6a", 0) == 0) {
-                    try {
-                        // WEB_WALLET_PATCH_2A:
-                        // decodeOpReturn() is not visible in rpc_server.cpp.
-                        // Decode standard OP_RETURN push data locally.
-                        const std::string& scriptHex = out.scriptPubKey;
-                        size_t pos = 2; // skip OP_RETURN (6a)
-                        if (pos + 2 > scriptHex.size())
-                            throw std::runtime_error("Malformed OP_RETURN");
-
-                        const unsigned int pushOp =
-                            static_cast<unsigned int>(
-                                std::stoul(scriptHex.substr(pos, 2), nullptr, 16));
-                        pos += 2;
-
-                        size_t dataLen = 0;
-                        if (pushOp <= 75) {
-                            dataLen = pushOp;
-                        } else if (pushOp == 0x4c) {
-                            if (pos + 2 > scriptHex.size())
-                                throw std::runtime_error("Malformed OP_PUSHDATA1");
-                            dataLen = std::stoul(
-                                scriptHex.substr(pos, 2), nullptr, 16);
-                            pos += 2;
-                        } else if (pushOp == 0x4d) {
-                            if (pos + 4 > scriptHex.size())
-                                throw std::runtime_error("Malformed OP_PUSHDATA2");
-                            const size_t lo = std::stoul(
-                                scriptHex.substr(pos, 2), nullptr, 16);
-                            const size_t hi = std::stoul(
-                                scriptHex.substr(pos + 2, 2), nullptr, 16);
-                            dataLen = lo | (hi << 8);
-                            pos += 4;
-                        } else {
-                            throw std::runtime_error(
-                                "Unsupported OP_RETURN push opcode");
-                        }
-
-                        if (dataLen == 0 ||
-                            pos + dataLen * 2 > scriptHex.size())
-                            throw std::runtime_error(
-                                "Malformed OP_RETURN payload");
-
-                        const std::string dataHex =
-                            scriptHex.substr(pos, dataLen * 2);
-                        const std::vector<uint8_t> dataBytes =
-                            hexDecode(dataHex);
-                        const std::string decoded(
-                            dataBytes.begin(), dataBytes.end());
-
-                        const json marker = json::parse(decoded);
-                        if (marker.value("type", "") ==
-                            "TRUSCRIPT_TRANSFER") {
-                            isScriptTransfer = true;
-                            scriptFrom = marker.value("from", "");
-                            scriptTo = marker.value("to", "");
-                        }
-                    } catch (...) {
-                    }
-                }
-            }
-
-            const bool involves =
-                myInputs > 0 || hasMyOutput ||
-                (isScriptTransfer &&
-                 (scriptFrom == address || scriptTo == address));
-
-            if (!involves)
-                continue;
-
-            std::string type;
-            std::string counterparty;
-            std::string asset = "TRU";
-            double amount = 0.0;
-
-            if (isScriptTransfer &&
-                (scriptFrom == address || scriptTo == address)) {
-                type = scriptFrom == address ? "Sent" : "Received";
-                counterparty =
-                    scriptFrom == address ? scriptTo : scriptFrom;
-                asset = "TRUScript";
-            } else if (tx.isCoinbase && hasMyOutput) {
-                type = "Received";
-                counterparty = "Mining Reward";
-                amount = static_cast<double>(myOutputs) / 100000000.0;
-            } else if (myInputs > 0) {
-                type = "Sent";
-                counterparty =
-                    firstOtherOutputAddress.empty()
-                        ? "Unknown"
-                        : firstOtherOutputAddress;
-                amount =
-                    static_cast<double>(sentToOthers) / 100000000.0;
-            } else {
-                type = "Received";
-                counterparty =
-                    firstInputAddress.empty()
-                        ? "Unknown"
-                        : firstInputAddress;
-                amount =
-                    static_cast<double>(myOutputs) / 100000000.0;
-            }
-
-            uint64_t feeSat = 0;
-            if (!tx.isCoinbase && totalInputs >= totalOutputs)
-                feeSat = totalInputs - totalOutputs;
-
-            rows.push_back({
-                {"txid", tx.txid},
-                {"type", type},
-                {"address", counterparty},
-                {"amount", amount},
-                {"asset", asset},
-                {"isTRUScript", asset == "TRUScript"},
-                {"fee", static_cast<double>(feeSat) / 100000000.0},
-                {"timestamp", block.header.timestamp},
-                {"blockHeight", height},
-                {"confirmations", tip >= height ? tip - height + 1 : 0}
-            });
-        }
-    }
-
-    return makeResult(id, rows);
+    try {
+        if (!params.contains("address") || !params["address"].is_string() ||
+            !isValidAddress(params["address"].get<std::string>()))
+            return makeError(-32602, "Missing or invalid address");
+        int count = params.value("count", 100);
+        if (count <= 0) count = 100;
+        if (count > 500) count = 500;
+        const int maxBlocks = params.value("maxBlocks", 0);
+        if (maxBlocks < 0 || maxBlocks > 5000)
+            return makeError(-32602, "maxBlocks must be 0 (full history) or 1..5000");
+        return makeResult(id, chain.getAddressHistoryV1(params["address"], count, maxBlocks));
+    } catch (const std::exception& e) { return makeError(-32000, e.what()); }
 }
 
 //==============================================
@@ -4292,6 +4095,57 @@ static json handleGetContracts(Blockchain &chain, const json &params, int id) {
 //=======================================================================
 //         TRUScripts - short for TRU blockchain inscriptions
 //=======================================================================
+#include "tru_datafeed_v4.h"
+// TRU-DATAFEED-05: snapshot-backed reads; no local metadata-cache trust.
+static json handleDataFeedInfo(int id, bool publishEnabled) {
+    return makeResult(id,json{{"format","TRU_DATAFEED_RPC_V1"},{"max_payload_bytes",254},
+        {"fee_cap_enforced",true},{"automatic_broadcast",false},{"wallet_publish_enabled",publishEnabled}});
+}
+static json handlePublishDataFeed(Blockchain& chain, Wallet& wallet, const json& p, int id) {
+    try {
+        if(!p.contains("data") || !p["data"].is_string() ||
+           !p.contains("owner") || !p["owner"].is_string() ||
+           !p.contains("max_fee_atoms") || !p["max_fee_atoms"].is_number_unsigned() ||
+           p["max_fee_atoms"].get<uint64_t>()==0)
+            return makeError(-32602,"data, owner and a positive integer max_fee_atoms are required");
+        const auto txid=wallet.publishDataFeedV1(p["data"],p["owner"],p["max_fee_atoms"]);
+        return makeResult(id,json{{"txid",txid},{"confirmed",false}});
+    }catch(const std::exception& e){return makeError(-32000,e.what());}
+}
+static json handleGetDataFeedRecord(Blockchain& chain, const json& p, int id) {
+    try {
+        if(!p.contains("txid") || !p["txid"].is_string() || !tru_datafeed_v4::hex64(p["txid"]))
+            return makeError(-32602,"Invalid txid");
+        KnownTransactionStatus s;
+        if(!chain.getKnownTransactionStatus(p["txid"],s)) return makeError(-32004,"Transaction not found");
+        const auto records=tru_datafeed_v4::records(s.transaction);
+        if(records.size()!=1) return makeError(-32004,"No unique DataFeed payload in transaction");
+        const bool confirmed=s.location=="ACTIVE" && s.blockHeight>=1 && s.tipHeight>=s.blockHeight;
+        auto r=records[0];
+        r["txid"]=s.transaction.txid;r["chain_confirmed"]=confirmed;
+        r["confirmations"]=confirmed?s.tipHeight-s.blockHeight+1:0;
+        r["blockheight"]=s.blockHeight;r["blockhash"]=s.blockHash;r["tx_state"]=s.location;
+        r["source"]="transaction_output_bytes";
+        return makeResult(id,r);
+    }catch(const std::exception& e){return makeError(-32000,e.what());}
+}
+static json handleGetDataFeedBlock(Blockchain& chain, const json& p, int id) {
+    try {
+        if(!p.contains("height") || !p["height"].is_number_integer() || p["height"].get<int64_t>()<1)
+            return makeError(-32602,"height must be a positive integer");
+        auto b=chain.getBlockByHeight(p["height"].get<uint64_t>());
+        if(!b) return makeError(-32004,"Block not found");
+        json records=json::array();
+        for(const auto& tx:b->transactions) {
+            auto entries=tru_datafeed_v4::records(tx);
+            if(entries.size()!=1)continue;
+            auto row=entries[0];row["txid"]=tx.txid;records.push_back(row);
+        }
+        return makeResult(id,json{{"height",b->height},{"hash",b->blockHash},
+            {"prevhash",b->header.prevHash},{"records",records}});
+    }catch(const std::exception& e){return makeError(-32000,e.what());}
+}
+
 static json handleInscribeTRUScript(Blockchain &chain,
                                    Wallet &wallet,
                                    const json &params,
@@ -9887,7 +9741,7 @@ static double rpcMethodCost(const std::string& method) {
         "signrawtransactionwithkey", "signrawtransactionwithkeyWeb",
         "issuetoken", "issuetokensigned", "createcontracttransaction",
         "preparevotingv1create07b", "preparevotingv1ballot07b",
-        "inscribeTRUScript", "inscribeTRUScriptSigned", "createsocialpost",
+        "publishdatafeed", "inscribeTRUScript", "inscribeTRUScriptSigned", "createsocialpost",
         "createAIToken", "interactWithAIToken", "trainAIToken",
         "axonwalletfund"
     };
@@ -10245,6 +10099,14 @@ void startRPCServer(Blockchain &chain, Wallet &wallet, P2PNode &node, int port,
         else if (m=="verifytokenevolution") response=handleVerifyTokenEvolution(chain, params, id);
         else if (m=="previewtokenevolution") response=handlePreviewTokenEvolution(chain, params, id);
         else if (m=="committokenevolutionsigned") response=handleCommitTokenEvolutionSigned(chain, params, id);
+        else if (m == "getdatafeedinfo") response=handleDataFeedInfo(id,rpcLocalPeer(req.remote_addr) && rpcEnvEnabled("TRU_RPC_WALLET_SEND_ENABLE"));
+        else if (m == "publishdatafeed") {
+            if (!rpcLocalPeer(req.remote_addr) || !rpcEnvEnabled("TRU_RPC_WALLET_SEND_ENABLE"))
+                response=makeError(-32070,"publishdatafeed requires loopback RPC and TRU_RPC_WALLET_SEND_ENABLE=1");
+            else response=handlePublishDataFeed(chain,wallet,params,id);
+        }
+        else if (m == "getdatafeedrecord") response=handleGetDataFeedRecord(chain,params,id);
+        else if (m == "getdatafeedblock") response=handleGetDataFeedBlock(chain,params,id);
         else if (m == "inscribeTRUScript") response = handleInscribeTRUScript(chain, wallet, params, id);
         else if (m=="inscribeTRUScriptSigned") response=handleInscribeTRUScriptSigned(chain,params,id);
         else if (m == "createsocialpost")  response = handleCreateSocialPost(chain, wallet, params, id);

@@ -25998,3 +25998,50 @@ g_explorerServer.Get("/api/submitblock", [&](const httplib::Request&, httplib::R
 
 // TRU-DATA-PROVIDER-01
 #include "tru_data_provider_v1_impl.inc"
+
+#include "tru_address_history_v1.h"
+static std::string truHistoryAddressOf(const std::string &scriptHex) {
+    // Decode the hex into raw bytes
+    std::vector<uint8_t> script = hexDecode(scriptHex);
+    if (script.size() != 25 ||
+        script[0]  != 0x76 ||  // OP_DUP
+        script[1]  != 0xa9 ||  // OP_HASH160
+        script[2]  != 0x14 ||  // push 20 bytes
+        script[23] != 0x88 ||  // OP_EQUALVERIFY
+        script[24] != 0xac)    // OP_CHECKSIG
+    {
+        throw std::runtime_error("Not a P2PKH scriptPubKey");
+    }
+
+    // Extract the 20-byte pubkey hash
+    std::vector<uint8_t> pubKeyHash(script.begin() + 3, script.begin() + 23);
+
+    // Build version + payload (1 byte version + 20 byte hash)
+    std::vector<uint8_t> payload;
+    payload.reserve(25);
+    payload.push_back(tru_network::MAINNET_P2PKH_VERSION);  // TRU mainnet P2PKH
+    payload.insert(payload.end(), pubKeyHash.begin(), pubKeyHash.end());
+
+    // Compute checksum = first 4 bytes of double-SHA256
+    unsigned char hash1[SHA256_DIGEST_LENGTH];
+    unsigned char hash2[SHA256_DIGEST_LENGTH];
+    
+    // First SHA256
+    SHA256(payload.data(), payload.size(), hash1);
+    // Second SHA256  
+    SHA256(hash1, SHA256_DIGEST_LENGTH, hash2);
+
+    // Append first 4 bytes of final hash as checksum
+    payload.insert(payload.end(), hash2, hash2 + 4);
+
+    // Base58 encode the full 25-byte result
+    return base58Encode(payload);
+}
+
+nlohmann::json Blockchain::getAddressHistoryV1(const std::string& address, int count, int maxBlocks) const {
+    if (count < 1 || count > 500 || maxBlocks < 0 || maxBlocks > 5000)
+        throw std::runtime_error("Invalid history bounds");
+    std::shared_lock<std::shared_mutex> lock(mtx);
+    return tru_address_history_v1::collect(chain, address, count, maxBlocks,
+        truHistoryAddressOf, [](const std::string& s) { return hexDecode(s); });
+}

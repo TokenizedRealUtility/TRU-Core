@@ -389,6 +389,7 @@ public:
                                   const std::string &imageOrMediaUrl,
                                   const std::unordered_map<std::string, std::string> &additionalMeta = {});
 
+    std::string publishDataFeedV1(const std::string& data, const std::string& owner, uint64_t maxFeeAtoms);
     std::string inscribeTRUScript(const std::string& humanData,
                                   const std::string& ownerAddress);
 

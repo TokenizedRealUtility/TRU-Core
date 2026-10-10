@@ -185,6 +185,8 @@ public:
     size_t getIssuedTokens() const;
     bool findTransaction(const std::string& txid, Transaction& tx) const;
     // TRU REORG-TX-01: current chain-location snapshot; no mutation.
+    // Read-only, one active-chain snapshot; default preserves full history.
+    nlohmann::json getAddressHistoryV1(const std::string& address, int count, int maxBlocks = 0) const;
     bool getKnownTransactionStatus(
         const std::string& txid,
         KnownTransactionStatus& status) const;
