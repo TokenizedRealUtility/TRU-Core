@@ -1,3 +1,5 @@
+#include "tru_agent_auto_policy.h"
+#include "tru_agent_checkpoint_v5.h"
 #include "magic_secret_cli_v2.h"
 #ifdef BUILD_WITH_QT
 #include <QtWidgets/QApplication>
@@ -3530,13 +3532,15 @@ static void menuTokenEvolution(Wallet& wallet, int rows, std::mutex& coutMutex) 
              << "4. Preview Extended AI / Artwork (SFT or NCFT)\n"
              << "5. Explore Evolution Use Cases (manual templates)\n"
              << "6. NEROMESH / AXON Proposal Inbox\n"
+             << "7. Preview Exact Agent Checkpoint (no AI call)\n"
+             << "8. Declare as AI assistant (local preview)\n"
              << "0. Back\n\n"
-             << "Preview makes an AI call but writes no TOKEN_EVOLUTION state.\n"
+             << "AI previews call the provider; options 7 and 8 are local previews.\nNo preview writes TOKEN_EVOLUTION state.\n"
              << "Commit persists the exact preview; it never makes a second AI call.\n"
              << "History is token-centric and does not require current wallet ownership.";
 
         displayResult(menu.str(), rows, coutMutex, 96);
-        const std::string action = readLineTrimmed("Select [0/1/2/3/4/5/6]:", rows, coutMutex);
+        const std::string action = readLineTrimmed("Select [0/1/2/3/4/5/6/7/8]:", rows, coutMutex);
 
         if (action == "0" || action == "back" || action == "q") return;
 
@@ -3563,6 +3567,78 @@ static void menuTokenEvolution(Wallet& wallet, int rows, std::mutex& coutMutex) 
             }
             (void)readLineTrimmed("Press Enter to continue:", rows, coutMutex);
             continue;
+        }
+
+        if (action == "8") {
+            preview.valid = false;
+            try {
+                auto tokens = truEvolutionUiOwnedTokens(wallet);
+                tokens.erase(std::remove_if(tokens.begin(), tokens.end(),
+                    [](const auto& t) { return t.tokenType != "NCFT"; }), tokens.end());
+                if (tokens.empty()) throw std::runtime_error("No confirmed issuer-controlled NCFT is available");
+                std::ostringstream list;
+                list << "=== DECLARE AS AI ASSISTANT ===\n";
+                for (size_t i = 0; i < tokens.size(); ++i)
+                    list << i + 1 << ". " << truEvolutionUiSafeLabel(tokens[i].name)
+                         << " [" << tokens[i].tokenID << "]\n";
+                list << "0. Cancel\nThis declares purpose only. It does not install a runtime or grant payment authority.";
+                displayResult(list.str(), rows, coutMutex, 96);
+                const auto selection = readLineTrimmed("Select NCFT number:", rows, coutMutex);
+                if (selection.empty() || selection == "0") continue;
+                size_t used = 0;
+                const auto index = std::stoul(selection, &used);
+                if (used != selection.size() || index == 0 || index > tokens.size())
+                    throw std::runtime_error("Invalid token selection");
+                const auto selected = tokens[index - 1];
+                Blockchain& chain = const_cast<Blockchain&>(wallet.getBlockchain());
+                if (!chain.getStorage()) throw std::runtime_error("Storage unavailable");
+                ContractStorage store(chain.getStorage());
+                TokenEvolutionEngine engine(&store);
+                auto generated = engine.agentDeclarationPreview(selected.tokenID, selected.issuanceMetadata);
+                if (!generated.ok) throw std::runtime_error(generated.error);
+                preview.token = selected; preview.result = std::move(generated);
+                preview.provider = "issuer_declaration";
+                preview.trigger = "issuer_declares_ai_assistant"; preview.valid = true;
+                truEvolutionUiShowPreviewPaged(preview.result.record, preview.token,
+                    preview.provider, preview.trigger, rows, coutMutex);
+                displayResult("Declaration preview ready. No AI call or write was made.\n"
+                    "Existing description is preserved with the declaration marker appended.\n"
+                    "The evolution writer/ai_engine is recorded as issuer_declaration; your runtime provider is unchanged.\n"
+                    "This does not prove online status, capabilities, memory truth or payment authority.\n"
+                    "Use option 2 to review and COMMIT. An anchor transaction fee applies.\n"
+                    "The website badge appears only after full provenance confirmation and verification.",
+                    rows, coutMutex, 93);
+            } catch (const std::exception& e) {
+                preview.valid = false;
+                displayResult(std::string("Declaration refused: ") + e.what(), rows, coutMutex, 91);
+            }
+            (void)readLineTrimmed("Press Enter:", rows, coutMutex);
+            continue;
+        }
+
+        if (action == "7") {
+            preview.valid=false;
+            try {
+                const auto path=readLineTrimmed("Public checkpoint REQUEST file (not private checkpoint JSON):",rows,coutMutex);
+                if(!std::filesystem::is_regular_file(path) || std::filesystem::file_size(path)>4096U)
+                    throw std::runtime_error("Request must be a regular file at most 4096 bytes");
+                std::ifstream in(path); const auto request=nlohmann::json::parse(in);
+                tru_checkpoint_v5::descriptor(request);
+                const auto id=request.at("token_id").get<std::string>();
+                auto tokens=truEvolutionUiOwnedTokens(wallet);
+                const auto it=std::find_if(tokens.begin(),tokens.end(),[&](const auto&t){return t.tokenID==id && t.tokenType=="NCFT";});
+                if(it==tokens.end())throw std::runtime_error("Confirmed NCFT issuer authority is unavailable");
+                Blockchain& chain=const_cast<Blockchain&>(wallet.getBlockchain());
+                if(!chain.getStorage())throw std::runtime_error("Storage unavailable");
+                ContractStorage store(chain.getStorage());TokenEvolutionEngine engine(&store);
+                auto result=engine.checkpointPreview(id,it->issuanceMetadata,request);
+                if(!result.ok)throw std::runtime_error(result.error);
+                preview.token=*it;preview.result=std::move(result);preview.provider="checkpoint";
+                preview.trigger="agent_memory_checkpoint";preview.valid=true;
+                displayResult("=== EXACT MEMORY CHECKPOINT PREVIEW ===\n"+request.dump(2)+
+                    "\nNo AI call. Private memory bytes were not read.\nThis commits a digest claim, not proof of memory truth.\nReview with the runtime's request file; use option 2 to approve.\nAnchor fee: 1000 atoms through the existing oracle funding wallet.",rows,coutMutex,96);
+            }catch(const std::exception&e){displayResult(std::string("Checkpoint refused: ")+e.what(),rows,coutMutex,91);}
+            (void)readLineTrimmed("Press Enter:",rows,coutMutex);continue;
         }
 
         if (action == "5") {
@@ -3890,6 +3966,13 @@ static void menuTokenEvolution(Wallet& wallet, int rows, std::mutex& coutMutex) 
             }
 
             const auto& record = preview.result.record;
+            if(record.value("record_format_version",1U)==5U) {
+                displayResult("Review exact public checkpoint commitment:\n"+record.at("checkpoint").dump(2)+
+                    "\nFee: 1000 atoms via the existing oracle funding wallet. No private memory published.",rows,coutMutex,93);
+                if(readLineTrimmed("Type the full checkpoint SHA-256 to approve:",rows,coutMutex)!=record.at("checkpoint").at("checkpoint_sha256").get<std::string>()) {
+                    displayResult("Digest confirmation mismatch; no commit.",rows,coutMutex,91);continue;
+                }
+            }
             std::ostringstream commitReport;
             commitReport
                 << "=== COMMIT EXACT AI EVOLUTION PREVIEW ===\n"
@@ -3996,6 +4079,10 @@ static void menuTokenEvolution(Wallet& wallet, int rows, std::mutex& coutMutex) 
                 displayResult("V4 preview/root validation failed; nothing persisted.", rows, coutMutex, 91);
                 (void)readLineTrimmed("Press Enter:", rows, coutMutex);
                 continue;
+            }
+            if(exactPreview.value("record_format_version",1U)==5U &&
+               !engine.validateCheckpointPreview(exactPreview,preview.token.issuanceMetadata)) {
+                preview.valid=false;displayResult("Exact checkpoint validation failed",rows,coutMutex,91);continue;
             }
             try {
                 const auto trusted = engine.issuerContext(preview.token.tokenID);
@@ -5344,6 +5431,20 @@ static void paintHeader(std::mutex& coutMutex) {
 // -------------------------------------------------------------------
 //         Print chain info at row=12
 // -------------------------------------------------------------------
+// TRU-AUDIT-UI-01: formatting only; never starts an audit.
+static std::string chainAuditDisplay(const Blockchain::ChainStatusPerf05& s) {
+    if (s.auditState == "not_run") return "NOT RUN (type auditchain)";
+    const std::string at = " at height " + std::to_string(s.auditHeight);
+    if (s.auditState == "error") return "ERROR" + at + " (retry auditchain)";
+    if (s.auditState == "passed") {
+        if (s.auditSameTip) return colorText("YES", 32, true);
+        return "STALE (last PASS" + at + "; type auditchain)";
+    }
+    if (s.auditState == "failed")
+        return "FAILED" + at + (s.auditSameTip ? " (current tip)" : " (older tip)");
+    return "UNKNOWN (type auditchain)";
+}
+
 void printChainInfo(const Blockchain &chain) {
     try {
         // build ALL lines as one atomic string and clear each
@@ -5351,8 +5452,7 @@ void printChainInfo(const Blockchain &chain) {
         // on a normal terminal). Previously this drew at row 12 -- the same row
         // the menu starts at -- so a menu repaint truncated the lower lines.
         const auto status = chain.getChainStatusPerf05();
-        std::string valid = status.auditState;
-        if (status.auditState != "not_run" && !status.auditSameTip) valid += " (older tip)";
+        const std::string valid = chainAuditDisplay(status);
         std::ostringstream ci;
         ci << "\033[s";
         ci << "\033[9;1H"  << "\033[K" << colorText("[Chain Info]", 95, true) << "\n";
@@ -5363,7 +5463,7 @@ void printChainInfo(const Blockchain &chain) {
             std::ostringstream dhex; dhex << std::hex << status.bits;
             ci << "\033[13;1H" << "\033[K" << "  " << colorText("Difficulty:     ", 94) << " 0x" << dhex.str() << "\n";
         }
-        ci << "\033[14;1H" << "\033[K" << "  " << colorText("Last audit:     ", 94) << " " << valid << "\n";
+        ci << "\033[14;1H" << "\033[K" << "  " << colorText("Valid chain:    ", 94) << " " << valid << "\n";
         ci << "\033[u";
         fmt::print("{}", ci.str());
     } catch (const std::exception &e) {
@@ -5616,7 +5716,7 @@ static bool truDeckHighlightToken(const std::string& token)
 {
     if (token.empty()) return false;
     if (token[0] >= '0' && token[0] <= '9') return true;
-    return token == "C" || token == "M" || token == "sync" ||
+    return token == "C" || token == "M" || token == "sync" || token == "auditchain" ||
            token == "hashredeem" || token == "timeredeem" || token == "magic";
 }
 
@@ -5813,6 +5913,7 @@ void displayMenu(int rows, std::mutex &coutMutex)
         "╠═════════════════════════ NETWORK // CHAIN & PEERS ═════════════════════════╣",
         "║                                                                            ║",
         "║  28 Chain Info    29 Peers     30 Lookup Block      31 Mempool             ║",
+        "║  auditchain Run explicit hash / proof-of-work audit                      ║",
         "║  32 Connect Peer      33 Message Peer      sync Check Sync                 ║",
         "╠════════════════════════════════════════════════════════════════════════════╣",
         "╠════════════════════════════ COMPUTE // MINING ═════════════════════════════╣",
@@ -6732,9 +6833,27 @@ void startCLI(Blockchain &chain, P2PNode &node, Wallet &wallet,
             }
             // sub == "4" or anything else: back to menu.
         }
-        else if (choice == "8") {
-            // Print chain info
+        else if (choice == "auditchain") {
             try {
+                // Explicit operator action only. The existing walk holds the
+                // chain read lock; block acceptance may wait until it finishes.
+                const auto audit = chain.runChainAuditPerf05();
+                std::ostringstream report;
+                report << "[CHAIN AUDIT] " << chainAuditDisplay(audit)
+                       << "\nAudited tip: " << audit.auditTip
+                       << "\nDuration: " << audit.auditDurationMs << " ms"
+                       << "\nScope: in-memory block hash / proof-of-work walk."
+                       << "\nNo transaction replay or UTXO database audit."
+                       << "\nResult is session-local; a new tip makes it stale.";
+                displayOutput(report.str(), rows, coutMutex);
+            } catch (const std::exception& e) {
+                displayOutput("[CHAIN AUDIT] Error: " + std::string(e.what()), rows, coutMutex);
+            }
+        }
+        else if (choice == "8") {
+            // Public menu 28: explicitly audit, then display current status.
+            try {
+                chain.runChainAuditPerf05();
                 printChainInfo(chain);
             } catch (const std::exception& e) {
                 displayOutput("[CLI] Failed to print chain info: " + std::string(e.what()), rows, coutMutex);
@@ -11990,6 +12109,7 @@ int main(int argc, char *argv[]) {
 
         Logger::log("[main] Loading config file: " + cfgFile);
         auto cfg = readConfigFile(cfgFile);
+        tru_agent_auto::configure(cfg);
         Logger::log("[main] Config file loaded successfully");
 
         const auto &networkCfg = cfg["network"];

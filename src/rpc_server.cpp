@@ -7906,6 +7906,7 @@ static json handleVerifyTokenEvolution(
             runtimeEpoch["external_provenance"] = epochSummary["external_provenance"];
         }
 
+        if(epochSummary.contains("checkpoint")) runtimeEpoch["checkpoint"]=epochSummary["checkpoint"];
         const std::string localStatus =
             epochSummary.value("anchor_status", "UNKNOWN");
 
@@ -8573,6 +8574,12 @@ static json handleCommitTokenEvolutionSigned(
         if (!loadTokenEvolutionIssuanceMetadata(*db, tokenID, issuance, issuanceTx, issuanceType, reason) ||
             issuanceType != tokenType || !engine.validateMediaPreview(record, issuance))
             return makeError(-32048, "V4 root, request, or exact metadata transition invalid");
+    }
+    if(record.value("record_format_version",1U)==5U) {
+        json issuance;std::string issuanceTx,issuanceType,reason;
+        if(!loadTokenEvolutionIssuanceMetadata(*db,tokenID,issuance,issuanceTx,issuanceType,reason) ||
+           issuanceType!="NCFT" || !engine.validateCheckpointPreview(record,issuance))
+            return makeError(-32048,"Exact checkpoint validation failed");
     }
     record["editor_proof"] = tru_editor::proof(publicKey, signature);
     if (!engine.verifyEditorProof(record))

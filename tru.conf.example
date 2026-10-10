@@ -31,6 +31,12 @@ addnode=137.184.68.43:21833
 automaticReorg=1
 
 # ------------------------------------------------------------
+# Enable Sending TRU from CLI 
+# ------------------------------------------------------------
+#TRU_RPC_WALLET_SEND_ENABLE=1
+#TRU_RPC_WALLET_SEND_MAX_ATOMS=unlimited
+
+# ------------------------------------------------------------
 # EXTERNAL IP
 # ------------------------------------------------------------
 #externalip=192.168.1.209
@@ -47,6 +53,13 @@ node.port=21832
 
 #oracle.address=YOUR_ORACLE_ADDRESS
 #oracle.wallet=tru.dat
+
+# ------------------------------------------------------------
+# AI Agent Settings  
+# ------------------------------------------------------------
+[agent_checkpoint]
+#enabled=1
+#policy_file=/path/to/tru-agent-policies/axona/policy.json
 
 # ===========================================================================
 [chain]

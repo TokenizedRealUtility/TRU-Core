@@ -1430,33 +1430,120 @@ Docker Compose profiles can run:
 See `README_DOCKER.md` for the full deployment and persistence guide.
 
 ---
-
 # Configuration
 
-TRU reads network and node configuration from `tru.conf`.
+TRU reads INI-style settings from `tru.conf`. Sections and key spelling matter. This reference was checked against the supplied `NEW_TRU` and `TRU-Core` source snapshots and the NCFT agent configuration package (October 2026). **Merge changes into your existing working `tru.conf`; never replace a live node's wallet, peer, or oracle settings wholesale.**
 
-Example:
+## Annotated `tru.conf` example
 
 ```ini
+# TRU MAINNET EXAMPLE — review values for your own machine
 [network]
-rpcbind=127.0.0.1
 rpcport=21832
 p2pPort=21833
 listen=1
+rpcbind=127.0.0.1
+rpcAllowRemote=0
 rpcMaxConnections=32
-externalip=<PUBLIC_OR_LAN_IP>
-addnode=<SEED_IP>:21833
+
+# Bootstrap peers. Comma-separated IP:port pairs; no spaces after commas.
+addnode=137.184.68.43:21833
+#seeds=137.184.68.43:21833
+#externalip=YOUR_PUBLIC_IP
+
+# Multinode cumulative-work reorganization opt-in; review operational risks.
+automaticReorg=1
+
+# Optional privileged RPC wallet-send feature, DISABLED by default.
+# Keys may be set here in [network] or [default], but not twice.
+#rpcWalletSend=0
+#rpcWalletSendMaxAtoms=1000000
+# Alternative equivalent names recognized by this build:
+#TRU_RPC_WALLET_SEND_ENABLE=0
+#TRU_RPC_WALLET_SEND_MAX_ATOMS=1000000
+
+[default]
+node.ip=127.0.0.1
+node.port=21832
+#peers=137.184.68.43:21833
+
+# AI oracle funding / wallet options (only configure when needed).
+#oracle.address=YOUR_TRU_ORACLE_ADDRESS
+#oracle.wallet=tru.dat
+#oracle.wif=YOUR_PRIVATE_WIF_DO_NOT_COMMIT
+
+[agent_checkpoint]
+# Enable only after installing and reviewing the private policy file.
+enabled=0
+#policy_file=/home/YOUR_USER/tru-agent-policies/axona/policy.json
+
+[chain]
+# Documentary example: see notes below about which fields are consumed.
+chainName=TRUMain
+networkType=mainnet
 ```
 
-Important parser behavior:
+## Verified settings and usage
 
-- avoid spaces after commas in peer lists,
-- put comments on their own lines,
-- current peer configuration expects IP addresses rather than hostnames.
+| Section | Key | Purpose / validated behavior |
+|---|---|---|
+| `[network]` | `rpcport` | Privileged Core JSON-RPC port (default 21832). |
+| `[network]` | `p2pPort` | P2P listening port (default 21833). |
+| `[network]` | `listen` | Enable/disable inbound peer listening (`0` or `1`). |
+| `[network]` | `rpcbind` | Bind address. Keep `127.0.0.1` for ordinary deployments. |
+| `[network]` | `rpcAllowRemote` | Explicit approval required before privileged RPC can bind to a non-loopback address. Do not expose RPC publicly. |
+| `[network]` | `rpcMaxConnections` | Positive value up to 256; default 32. |
+| `[network]` | `addnode` | Comma-separated bootstrap `IP:port` peers. |
+| `[network]` | `seeds` | Alternative/additional bootstrap peer list parsed by P2P initialization. |
+| `[network]` | `externalip` | Advertised external IP where supported by the node startup logic. |
+| `[network]` | `automaticReorg` | Explicitly enables/disables the current multi-node automatic cumulative-work reorganization path. An operationally significant choice, not an agent setting. |
+| `[network]` or `[default]` | `rpcWalletSend` / `TRU_RPC_WALLET_SEND_ENABLE` | Optional local RPC wallet sending (strict `0`/`1`). Default disabled. Use only one spelling/section. |
+| `[network]` or `[default]` | `rpcWalletSendMaxAtoms` / `TRU_RPC_WALLET_SEND_MAX_ATOMS` | Spending cap as a positive number of atoms, or explicitly `unlimited`; do not duplicate. |
+| `[default]` | `node.ip` | RPC host used by the legacy AI oracle service. |
+| `[default]` | `node.port` | RPC port used by the legacy AI oracle service. Set explicitly; a code path otherwise defaults to 8001, which may not be the RPC port. |
+| `[default]` | `peers` | Additional explicit peer argument read by Core startup. |
+| `[default]` | `oracle.address` | Funding identity used by AI-oracle anchoring flows. |
+| `[default]` | `oracle.wallet` | Oracle wallet file/path selector, used by a wallet-backed oracle flow. |
+| `[default]` | `oracle.wif` | Private-key oracle path used by a separate oracle flow. Sensitive; do not publish this in a shared config. |
+| `[agent_checkpoint]` | `enabled` | `0` or `1`; approval policy is disabled by default. |
+| `[agent_checkpoint]` | `policy_file` | Absolute private path to checkpoint authorization/budget policy JSON; required when enabled. |
 
-AI-provider API keys should remain in environment variables rather than blockchain state or committed configuration files.
+**`[chain]` caveat:** The supplied source snapshot defines `chainName` and `networkType` on its blockchain object, but the inspected node-startup configuration path did not establish that changing `[chain] chainName` or `networkType` switches the active consensus network. These are retained as existing example entries, **not** as a verified way to switch safely between mainnet, testnet, and regtest.
 
-Oracle WIF/private-key material must be protected as wallet credentials.
+## AI agents, NCFT transfer, and automatic checkpoints
+
+An NCFT can identify an AI agent, but its runtime is separate from its on-chain identity. The new editor/holder handover capabilities are enforced through token authority, RPC workflows, local manifests, and agent runtime controls: **there is no standalone `tru.conf` switch named `agentTransfer`, `handover`, or `autoEpoch` in the supplied Core source**.
+
+The only verified `[agent_checkpoint]` entries are `enabled` and `policy_file`. The code rejects other keys in that section. Automatic checkpoint timing, per-day usage limits, and total fee budget are enforced by the external **policy JSON** (`min_interval_seconds`, `max_per_day`, `total_budget_atoms`, etc.), not directly by `tru.conf`.
+
+Set up each agent's private identity, memory, token authority, and automatic watcher according to the separate `NCFT-Ai-Agents-main/README.md` and `SERVICE.md`. The optional `tru-agent-auto@.service` starts a watcher, **not** TRU Core or an AI inference model. Enabling checkpoint approval by itself does not run a watcher or cause an epoch automatically. Transfer of an NCFT is not equivalent to automatically moving off-chain private memories, service credentials, or running infrastructure. The receiving owner must receive those separately under an authenticated handover process.
+
+The checkpoint implementation also supports environment fallbacks when the INI entries are absent:
+
+```bash
+TRU_AGENT_CHECKPOINT_ENABLE=0
+TRU_AGENT_CHECKPOINT_POLICY_FILE=/absolute/private/path/policy.json
+```
+
+The runtime and model provider environment is separate from `tru.conf`. Recognized Core provider credential names include `OPENAI_API_KEY`, `XAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `NEMOTRON_API_KEY`, `NEMOTRON_ENDPOINT`, `OOBABOOGA_API_KEY`, and `CUSTOM_AI_API_KEY`. Loading provider credentials does **not** confer token ownership or issuer/editor authorization. Never place API keys, wallet passwords, or private memory files in a GitHub README or public agent image directory.
+
+## Configuration, environment, and CLI are different
+
+- `TRU_RPC_WALLET_SEND_ENABLE` and `TRU_RPC_WALLET_SEND_MAX_ATOMS` are **both** actual environment variable names **and** explicitly supported `tru.conf` aliases in this build. Normal operators should prefer `rpcWalletSend` and `rpcWalletSendMaxAtoms` in the INI file, with spending disabled unless needed.
+- `TRU_RPC_TOKEN`, `TRU_RPC_COOKIE_FILE`, and relevant RPC credential settings are RPC authentication/runtime mechanisms, not interchangeable with the `rpcbind` line. Privileged RPC uses authenticated transport in the supplied source; keep its port on loopback and protect cookie/token files.
+- `--conf`, `--rpcport`, `--rpcbind`, `--enable-explorer`, and `--explorer-port` are node launch options; do not assume writing those option names in an INI section enables identical behavior.
+- Agent worker inputs such as `TRU_AGENT_CODE`, `TRU_AGENT_HOME`, and `TRU_CORE_CLI` belong in the separately protected watcher service environment file, **not** in `[agent_checkpoint]`.
+- Environment-only testing/recovery switches discovered in the Core should not be published as ordinary user configuration without separate review.
+
+## Operational notes
+
+1. Keep comments on separate lines and avoid spaces inside comma-separated peer entries.
+2. Some peer configuration paths expect literal IP addresses instead of DNS hostnames.
+3. `automaticReorg=1` affects how a node responds to competing cumulative-work branches; do not change it casually on production nodes.
+4. Keep privileged RPC bound to `127.0.0.1`. Even with authentication, avoid remote direct exposure; in particular the Core refuses remote binding when RPC wallet spending is enabled.
+5. Keep `tru.conf` and private policy files readable only by the relevant operating-system account. An actual WIF and API secrets should live in tightly protected private credential storage rather than any distributed example file.
+6. Source-level feature support does not guarantee the running executable was rebuilt from that exact source revision. Restart with the intended build and validate the effective configuration before running a funded agent automation.
+
 
 ---
 
