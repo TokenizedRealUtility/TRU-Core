@@ -23403,6 +23403,28 @@ g_explorerServer.Get("/api/stats", [&](const httplib::Request&, httplib::Respons
     };
     static ExplorerStatsCache cache;
 
+    // HASHRATE-TELEMETRY-01: match the independent /api/miner-reports
+    // projection. Never feed reported rates into consensus or difficulty.
+    const auto addP2PHashrate = [&](nlohmann::json& target) {
+        const auto reports = node.minerReports();
+        std::map<std::string, unsigned> counts;
+        for (const auto& report : reports) ++counts[report.address];
+        std::uint64_t total = 0;
+        unsigned unique = 0, ambiguous = 0, reporting = 0;
+        for (const auto& report : reports) {
+            if (counts[report.address] > 1) { ++ambiguous; continue; }
+            total += report.rate;
+            ++unique;
+            if (report.rate > 0) ++reporting;
+        }
+        target["p2pReportedHashrate"] = total;
+        target["p2pUnambiguousReports"] = unique;
+        target["p2pAmbiguousReports"] = ambiguous;
+        target["p2pPositiveRateReports"] = reporting;
+        target["p2pHashrateAuthority"] = "OBSERVED_UPGRADED_P2P_COMPONENT";
+        target["p2pHashWorkVerified"] = false;
+    };
+
     const auto requestNow = std::chrono::steady_clock::now();
     const int currentTip = getBestTipHeight();
     std::lock_guard<std::mutex> cacheGuard(cache.mutex);
@@ -23415,6 +23437,7 @@ g_explorerServer.Get("/api/stats", [&](const httplib::Request&, httplib::Respons
         payload["connectedPeerCount"] = node.getActivePeerCount();
         payload["peerCount"] = node.getKnownPeers().size(); // legacy: known endpoints
         payload["knownPeerCount"] = payload["peerCount"];
+        addP2PHashrate(payload); // Refresh telemetry on stats cache hits too.
         res.set_content(payload.dump(), "application/json");
         return;
     }
@@ -23627,6 +23650,7 @@ g_explorerServer.Get("/api/stats", [&](const httplib::Request&, httplib::Respons
     cache.tipHeight = j.value("height", currentTip);
     cache.builtAt = std::chrono::steady_clock::now();
     res.set_header("X-TRU-Explorer-Cache", "MISS");
+    addP2PHashrate(j);
     res.set_content(j.dump(), "application/json");
 });
 // -----------------------------------------------------------------------------------------------------------
