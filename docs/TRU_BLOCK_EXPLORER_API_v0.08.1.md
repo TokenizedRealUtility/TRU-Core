@@ -138,11 +138,3 @@ The wallet and mining gateways are **two restricted forwarding paths**: method n
 - `GET /api/submitblock` is an explanatory message; actual mining submission is **POST** with a JSON `blockHex` (or `hex`) string, validation, rate limiting and payload limits. The other route `/api/mining/rpc` allows `submitblock` as JSON-RPC.
 - CORS is not universal. Some GET handlers add `Access-Control-Allow-Origin: *`; others do not. Do not promise that every route works in cross-origin browser JavaScript without reverse-proxy configuration.
 
-## Source coverage and audit methodology
-
-- Counted each `g_explorerServer.Get(...)` / `.Post(...)` route in `Blockchain::startExplorerServer`, including `R"(...)"` regex routes split over multiple lines.
-- Included four GET registrations from `tru_data_provider_v1_routes.inc` because the C++ file literally includes that route fragment at startup.
-- Excluded duplicate historical routes in `blockexplorer.cpp`: the requested running explorer registration is inside `blockchain.cpp`, and registering a route in another file does not mean it is active in the same server.
-- Excluded static web assets and NEROMESH or Telegram bot APIs: these live outside this explorer source tree and are not Explorer server HTTP registrations.
-- Compared the active `NEW_TRU` and cleaned `TRI-Core` source routes. This is static code review; deployed proxies may add or restrict routes and must be separately tested.
-

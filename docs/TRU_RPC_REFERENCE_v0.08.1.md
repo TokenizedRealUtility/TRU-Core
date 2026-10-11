@@ -199,11 +199,3 @@ The equivalent JSON-RPC request body is:
 - **Signing caution:** RPC methods accepting `privKeys`, `privateKey`, `api_key` or similar fields should never be sent through a proxy you do not operate, copied to support chats, or placed in GitHub issues.
 - **No native ZK privacy:** `verifyZeroKnowledgeProof` in `block.cpp` currently returns `true` (including with `HAS_ZKPROOF`), so this code does **not** provide verified zero-knowledge transactions or shielded transfers.
 
-## Source and coverage checks
-
-- Core dispatch: `NEW_TRU/src/rpc_server.cpp`, `startRPCServer()`. Clean public equivalent: `TRI-Core/rpc_server.cpp`.
-- Web allowlists: `NEW_TRU/src/blockchain.cpp`, `startExplorerServer()` (`walletGatewayMethods`, `miningGatewayMethods`).
-- Specialized builders: `NEW_TRU/src/tru_contract_rpc_07b.h`, `magic_secret_service_v2.h`, `tru_datafeed_v4.h`.
-- JSON `params` keys in the table are **primary entry points**, not guarantees that every field is optional/required or that nested structures are fully described. Read handler validation for production SDKs.
-- This inventory has been cross-checked against every literal `m == "..."` branch in the v0.08.1 dispatcher. No RPC method was inferred merely from a feature name.
-
