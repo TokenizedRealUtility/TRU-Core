@@ -481,7 +481,7 @@ ApplyTransactionResult UTXOSet::applyTransaction(
                     // Verify controlling output exists and matches owner
                     if (controllingVout < tx.vout.size()) {
                         std::string controllingAddr = extractAddressFromScriptPubKey(
-                            tx.vout[controllingVout].scriptPubKey, tx.txid, controllingVout, blockchainPtr);
+                            tx.vout[controllingVout].scriptPubKey, tx.txid, controllingVout, blockchainPtr, static_cast<uint32_t>(blockHeight));
                         
                         if (controllingAddr == ownerAddress) {
                             // Create tokenUTXO entry
@@ -536,7 +536,7 @@ ApplyTransactionResult UTXOSet::applyTransaction(
             }
 
             // Process regular UTXO
-            std::string addr = extractAddressFromScriptPubKey(out.scriptPubKey, tx.txid, static_cast<uint32_t>(idx), blockchainPtr);
+            std::string addr = extractAddressFromScriptPubKey(out.scriptPubKey, tx.txid, static_cast<uint32_t>(idx), blockchainPtr, static_cast<uint32_t>(blockHeight));
             //if (addr.empty() || out.amount == 0) {
             //    Logger::log("[applyTransaction] Skipping dust/non-P2PKH output");
             //    continue;
@@ -680,7 +680,10 @@ uint64_t UTXOSet::calculateBalanceFromUTXOs(const std::string& address, const Le
             std::string txid = key.substr(0, colonPos);
             // Extract vout after the colon
             uint32_t vout = std::stoi(key.substr(colonPos + 1));
-            std::string addr = extractAddressFromScriptPubKey(scriptPubKey, txid, vout, blockchainPtr);
+            uint32_t outputHeight09 = 0;
+            const auto heightText09 = utxoVal.substr(0, firstDelim);
+            if (heightText09.rfind("height=", 0) == 0) outputHeight09 = static_cast<uint32_t>(std::stoul(heightText09.substr(7)));
+            std::string addr = extractAddressFromScriptPubKey(scriptPubKey, txid, vout, blockchainPtr, outputHeight09);
 
             if (addr.empty()) {
                 addr = extractAddressFromScriptTail(scriptPubKey);
@@ -1040,7 +1043,7 @@ std::string UTXOSet::getAddressFromUTXO(const std::string& txid, uint32_t vout, 
         Logger::log("[getAddressFromUTXO] UTXO not found for txid: " + txid + ", vout: " + std::to_string(vout));
         return "";
     }
-    std::string address = extractAddressFromScriptPubKey(utxo.scriptPubKey, txid, vout, blockchainPtr);
+    std::string address = extractAddressFromScriptPubKey(utxo.scriptPubKey, txid, vout, blockchainPtr, utxo.createdAtHeight);
     if (address.empty()) {
         Logger::log("[getAddressFromUTXO] Failed to extract address for txid: " + txid + ", vout: " + std::to_string(vout));
     } else {

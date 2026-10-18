@@ -1,3 +1,4 @@
+#include "consensus09_commitment.h"
 #ifndef CL_TARGET_OPENCL_VERSION
 #define CL_TARGET_OPENCL_VERSION 200
 #endif
@@ -1328,6 +1329,7 @@ static Block buildCandidateBlockFromTemplate(const nlohmann::json& tpl, const st
     Transaction coinbaseTx = buildCoinbaseTx(minerAddr, rewardSat, height, extraNonce);
     candidate.transactions.push_back(coinbaseTx);
     addTemplateTransactions(candidate, tpl);
+    tru_commit09::prepare(candidate);
     candidate.header.merkleRoot = computeMerkleRoot(candidate.transactions);
     
     Logger::log(formatLogMessage("INFO", "TEMPLATE", 

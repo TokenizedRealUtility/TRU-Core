@@ -89,7 +89,7 @@ std::string buildExtendedTokenScript(const ExtendedTokenData &data);
 std::string buildTRUScript_OPRETURN(const std::string& text,const std::string& owner,uint64_t inscriptionIndex,uint64_t satNumber,uint64_t timestamp);
 
 bool parseExtendedTokenScript(const std::string& scriptPubKeyHex, const std::string& txid, ExtendedTokenData& td, std::string& ownerAddress, const Blockchain* blockchainPtr);
-std::string extractAddressFromScriptPubKey(const std::string& scriptPubKeyHex, const std::string& txid, uint32_t vout, const Blockchain* blockchainPtr);
+std::string extractAddressFromScriptPubKey(const std::string& scriptPubKeyHex, const std::string& txid, uint32_t vout, const Blockchain* blockchainPtr, uint32_t outputHeight = 0);
 std::string extractTokenOwner(const std::string &script);
 bool startsWithOpReturnHex(const std::string &scriptPubKeyHex);
 std::string createExtendedTokenScriptPubKeyHex(const ExtendedTokenData &data, const std::string &ownerAddress);

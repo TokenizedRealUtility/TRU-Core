@@ -28,6 +28,7 @@ struct ScriptExecutionContextSpec {
     std::vector<unsigned char> sighash;
     const void* chainCtx{nullptr};
     uint32_t execHeight{0};
+    bool marketValidated09{false};
     std::string sender;
     std::unordered_map<std::string, std::vector<unsigned char>>* state{nullptr};
     std::string contractAddress;
@@ -49,6 +50,7 @@ inline ScriptExecutionContext BuildScriptExecutionContext(
     ctx.state = spec.state;
     ctx.chainCtx = spec.chainCtx;
     ctx.execHeight = spec.execHeight;
+    ctx.marketValidated09 = spec.marketValidated09;
     ctx.contractAddress = spec.contractAddress;
     ctx.gasUsed = 0;
 

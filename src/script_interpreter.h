@@ -27,6 +27,7 @@ struct ScriptExecutionContext {
     // Height at which this script executes (the block being validated), so
     // state reads are deterministic relative to THIS block, not the live tip.
     uint32_t execHeight = 0;
+    bool marketValidated09 = false; // set only by full transaction validator
     uint64_t gasLimit;                              // Maximum gas allowed for execution
     uint64_t gasUsed;                               // Gas consumed during execution
     std::string contractAddress;                    // Address of the contract being executed
@@ -69,7 +70,7 @@ struct ScriptResourceMetrics {
 // at the worst-case 20 signature checks so resource accounting cannot depend on
 // attacker-controlled stack contents.
 bool AnalyzeScriptResources(const std::vector<unsigned char>& script,
-                            ScriptResourceMetrics& metrics);
+                            ScriptResourceMetrics& metrics, uint32_t execHeight = 0);
 
 // Function declarations
 bool EvaluateScript(const std::vector<unsigned char>& script,

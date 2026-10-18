@@ -1,3 +1,4 @@
+#include "consensus09_activation.h"
 #include "message_handler.h"
 #include "miner_telemetry_v1.h"
 #include "tru_network_params.h"
@@ -784,7 +785,10 @@ void MessageHandler::handleMessage(const blockchain::BaseMessage& msg, Blockchai
 
                     try
                     {
-                        Transaction tx = Transaction::deserialize(txProto.raw());
+                        const int tip09 = chain->getBestTipHeight();
+                        Transaction tx = Transaction::deserialize(txProto.raw(),
+                            tru09::active(tip09 < 0 ? 0 : static_cast<uint32_t>(tip09) + 1,
+                                          tru09::COMMITMENT_HEIGHT));
 
                         // FIX(security): never trust the peer-supplied txid. Recompute
                         // it from the deserialized transaction bytes; the hash of the

@@ -1,3 +1,4 @@
+#include "quantum_chain_v1.h"
 #include "token_continuation_metadata_v1.h"
 #include "wallet.h"
 #include <cstring>
@@ -10574,3 +10575,5 @@ std::string Wallet::publishDataFeedV1(const std::string& data,
         Logger::log("[TRU-DATAFEED-05] Locally accepted; peer relay failed txid="+tx.txid);
     return tx.txid;
 }
+
+#include "quantum_core_wallet_v1.inc"

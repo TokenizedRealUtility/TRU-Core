@@ -184,6 +184,9 @@ public:
     std::unordered_set<std::string> getActiveAddresses() const;
     size_t getIssuedTokens() const;
     bool findTransaction(const std::string& txid, Transaction& tx) const;
+    bool validateConsensus09Transaction(const Transaction& tx, uint32_t height) const;
+    bool validateConsensus09TransactionUnlocked(const Transaction& tx, uint32_t height,
+        const std::unordered_set<std::string>& seenIds = {}) const;
     // TRU REORG-TX-01: current chain-location snapshot; no mutation.
     // Read-only, one active-chain snapshot; default preserves full history.
     nlohmann::json getAddressHistoryV1(const std::string& address, int count, int maxBlocks = 0) const;

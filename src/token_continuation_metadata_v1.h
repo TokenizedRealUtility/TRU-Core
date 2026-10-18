@@ -1,3 +1,4 @@
+#include "market_lock09.h"
 #pragma once
 // TRU-TOKEN-CONTINUATION-01: derived metadata indexing and wallet recovery only.
 // These helpers do not validate blocks, alter UTXOs, or grant issuer authority.
@@ -38,7 +39,12 @@ template<class Tx> bool branch(const Tx& tx, uint32_t control, Branch& out) {
     b.tokenID = s.substr(4, idLen);
     b.amount = std::stoull(s.substr(4 + idLen, 16), nullptr, 16);
     const size_t ownerPos = 4 + idLen + 16;
-    if (pay.scriptPubKey != "76a914" + s.substr(ownerPos, 40) + "88ac") return false;
+    if (pay.scriptPubKey != "76a914" + s.substr(ownerPos, 40) + "88ac") {
+        tru_market09::Terms market;
+        tru_market09::Token tok;
+        if (!tru_market09::parseLock(pay.scriptPubKey,market) ||
+            !tru_market09::branch(tx,control,tok)) return false;
+    }
     b.metaHash = s.substr(ownerPos + 40, 64);
     out = b;
     return true;

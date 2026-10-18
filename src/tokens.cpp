@@ -1,3 +1,5 @@
+#include "market_lock09.h"
+#include "wots_script09.h"
 #include "tokens.h"
 #include "utils.h"
 #include <nlohmann/json.hpp>
@@ -356,11 +358,17 @@ static void sha256Twice(const unsigned char* data, size_t len, unsigned char out
     SHA256_Final(out2, &c);
 }
 
-std::string extractAddressFromScriptPubKey(const std::string& scriptHex, const std::string& txid, uint32_t vout, const Blockchain* chain) {
+std::string extractAddressFromScriptPubKey(const std::string& scriptHex, const std::string& txid, uint32_t vout, const Blockchain* chain, uint32_t outputHeight) {
     // EXPLORER-MINERS-03: this helper is a hot path for explorer-derived data.
     // Do not synchronously flush two success/debug lines for every address parse.
     // Unknown/exceptional script logging below is retained. This is observational
     // only and changes no script, transaction, block, or consensus semantics.
+    tru_market09::Terms market09;
+    if (tru09::active(outputHeight,tru09::MARKET_HEIGHT) && tru_market09::parseLock(scriptHex,market09))
+        return extractAddressFromScriptPubKey(tru_market09::pay(market09.seller),txid,vout,chain,outputHeight);
+    std::vector<unsigned char> pqScript09;
+    if (tru09::active(outputHeight,tru09::WOTS_HEIGHT) && tru_market09::unhex(scriptHex,pqScript09) && tru_pq01::canonicalScript(pqScript09))
+        return txid + ":" + std::to_string(vout);
     if (scriptHex.rfind("6a", 0) == 0) {
         ExtendedTokenData td;
         std::string owner;

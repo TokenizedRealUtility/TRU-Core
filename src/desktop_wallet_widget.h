@@ -100,6 +100,7 @@ private:
     void showRecovery();
     void restoreRecovery();
     void refreshBalance();
+    void quantumTransactions();
     void sendTru();
     void refreshDidStatus(const QString& address, const QString& did);
     void showQrCodes();

@@ -1,5 +1,7 @@
 #include "desktop_wallet_widget.h"
 #include "desktop_rpc.h"
+#include "tru_market_login_v1.h"
+#include "tru_market_connect_qt_v2.h"
 
 #include <QApplication>
 #include <QClipboard>
@@ -305,6 +307,13 @@ DesktopWalletWidget::DesktopWalletWidget(
 
     auto* send = new QPushButton("Send TRU");
     send->setObjectName("truPrimaryAction");
+    // MARKET-03C: pairing is the primary marketplace action on every desktop OS.
+    auto* marketConnectButton = new QPushButton("Connect Marketplace", this);
+    marketConnectButton->setObjectName("truPrimaryAction");
+    marketConnectButton->setToolTip("Enter the single-use pairing code from Marketplace > Desktop Wallet. No coins move.");
+    auto* marketLogin = new QPushButton("Manual / Offline Login");
+    marketLogin->setObjectName("truSecondaryAction");
+    marketLogin->setToolTip("Advanced fallback: sign a full marketplace challenge and copy the response manually.");
     auto* axonFund = new QPushButton("Fund AXON Handoff");
     axonFund->setObjectName("truPrimaryAction");
     axonFund->setToolTip("Paste a short-lived tru:// AXON funding handoff. The connected local Core wallet signs; no private key is sent to NEROMESH.");
@@ -322,10 +331,18 @@ DesktopWalletWidget::DesktopWalletWidget(
     actions->addWidget(unlock, 1, 1);
     actions->addWidget(lock, 1, 2);
     actions->addWidget(axonFund, 2, 0, 1, 3);
+    actions->addWidget(marketConnectButton, 3, 0, 1, 3);
+    actions->addWidget(marketLogin, 4, 0, 1, 3);
+    auto* quantum = new QPushButton("Quantum Transactions (WOTS+)");
+    actions->addWidget(quantum, 5, 0, 1, 3);
+    connect(quantum, &QPushButton::clicked, this, [this]{ quantumTransactions(); });
     for (int column = 0; column < 3; ++column)
         actions->setColumnStretch(column, 1);
     root->addWidget(actionsBox);
 
+    auto* quantumRecoveryNote = new QLabel("Quantum recovery also requires the current .pq01 companion. Use Quantum Transactions > Backup Quantum State.");
+    quantumRecoveryNote->setWordWrap(true);
+    root->addWidget(quantumRecoveryNote);
     auto* securityBox = new QGroupBox("SECURITY & RECOVERY");
     auto* security = new QHBoxLayout(securityBox);
     auto* backup = new QPushButton("Backup Wallet");
@@ -368,6 +385,133 @@ DesktopWalletWidget::DesktopWalletWidget(
             this, [this]{ refreshBalance(); });
     connect(send, &QPushButton::clicked,
             this, [this]{ sendTru(); });
+
+    // MARKET-03A: the same native Qt approval on macOS, Windows and Linux.
+    auto marketConnectBusy=std::make_shared<bool>(false);
+    auto connectMarket=[this,marketConnectBusy](const QString& uri){
+        if(*marketConnectBusy)return;
+        *marketConnectBusy=true;
+        struct Guard{bool& value;~Guard(){value=false;}} guard{*marketConnectBusy};
+        window()->show();window()->raise();window()->activateWindow();
+        tru_market_connect_qt_v2::run(this,uri,[this]{
+            if(!wallet_.isUnlocked())unlockWallet();
+            QStringList result;
+            if(wallet_.isUnlocked())for(const auto& address:wallet_.addresses())result.append(QString::fromStdString(address));
+            return result;
+        },[this](const QString& address,const QString& message,QString& pub,QString& sig,QString& error){
+            return signAuthorization(address,message,pub,sig,error);
+        });
+    };
+    connect(marketConnectButton,&QPushButton::clicked,this,[connectMarket]{connectMarket({});});
+    auto* marketConnectTimer=new QTimer(this);
+    connect(marketConnectTimer,&QTimer::timeout,this,[marketConnectBusy,connectMarket]{
+        if(*marketConnectBusy)return;
+        const auto uri=tru_market_connect_qt_v2::takeUri();
+        if(!uri.isEmpty())connectMarket(uri);
+    });
+    marketConnectTimer->start(500);
+
+    connect(marketLogin, &QPushButton::clicked, this, [this] {
+        if (!wallet_.isUnlocked()) {
+            QMessageBox::information(this, "Marketplace Login",
+                "Unlock your TRU Desktop Wallet first. No signing RPC or remote wallet access is used.");
+            return;
+        }
+        QDialog dialog(this);
+        dialog.setWindowTitle("TRU Marketplace — Manual / Offline Login");
+        dialog.setMinimumWidth(500);
+        auto* layout = new QVBoxLayout(&dialog);
+        auto* intro = new QLabel(
+            "Manual fallback only. For a short pairing code, close this dialog and click Connect Marketplace.\n\n"
+            "Paste the exact marketplace challenge. Signing proves address ownership; "
+            "it does not transfer coins or approve a transaction. "
+            "Only market.tokenizedrealutility.com is supported.");
+        intro->setWordWrap(true);
+        layout->addWidget(intro);
+        auto* challenge = new QPlainTextEdit(&dialog);
+        challenge->setObjectName("truMarketLoginChallenge");
+        challenge->setPlaceholderText("TRU-MARKET-AUTH-V1\nnetwork:tru-mainnet\ndomain:market.tokenizedrealutility.com\n...");
+        challenge->setMaximumBlockCount(25);
+        challenge->setMinimumHeight(178);
+        layout->addWidget(challenge);
+        auto* approve = new QPushButton("Review and Sign Login", &dialog);
+        approve->setObjectName("truPrimaryAction");
+        layout->addWidget(approve);
+        auto* output = new QPlainTextEdit(&dialog);
+        output->setReadOnly(true);
+        output->setObjectName("truMarketLoginSignedResponse");
+        output->setPlaceholderText("Approved signed response appears here. Copy it back to the marketplace.");
+        output->setMinimumHeight(125);
+        layout->addWidget(output);
+        auto* buttons = new QHBoxLayout;
+        auto* copyResponse = new QPushButton("Copy Signed Response", &dialog);
+        copyResponse->setEnabled(false);
+        auto* close = new QPushButton("Close", &dialog);
+        buttons->addWidget(copyResponse);
+        buttons->addStretch();
+        buttons->addWidget(close);
+        layout->addLayout(buttons);
+        connect(close, &QPushButton::clicked, &dialog, &QDialog::reject);
+        connect(copyResponse, &QPushButton::clicked, &dialog, [output] {
+            QApplication::clipboard()->setText(output->toPlainText());
+        });
+        connect(approve, &QPushButton::clicked, &dialog,
+                [this, challenge, output, copyResponse, &dialog] {
+            QString exact = challenge->toPlainText();
+            // QPlainTextEdit may omit a final newline while pasting; the V1
+            // challenge serialization ALWAYS includes exactly one.
+            if (!exact.endsWith('\n')) exact += '\n';
+            if (exact.toUtf8().size() > 512) {
+                QMessageBox::warning(&dialog, "Marketplace Login", "Challenge is too long.");
+                return;
+            }
+            const QRegularExpression pattern(
+                R"(^TRU-MARKET-AUTH-V1\nnetwork:tru-mainnet\ndomain:market\.tokenizedrealutility\.com\naddress:(T[1-9A-HJ-NP-Za-km-z]{33})\nnonce:([0-9a-f]{48})\nexpires:([0-9]{10})\n$)");
+            const auto match = pattern.match(exact);
+            if (!match.hasMatch()) {
+                QMessageBox::warning(&dialog, "Marketplace Login",
+                    "Invalid challenge. Only canonical TRU mainnet challenges for market.tokenizedrealutility.com can be signed.");
+                return;
+            }
+            const QString address = match.captured(1);
+            const QString nonce = match.captured(2);
+            bool ok = false;
+            const qint64 expires = match.captured(3).toLongLong(&ok);
+            const qint64 current = QDateTime::currentSecsSinceEpoch();
+            if (!ok || expires <= current || expires > current + 600) {
+                QMessageBox::warning(&dialog, "Marketplace Login",
+                    "The challenge has expired or has an invalid expiration time. Generate a new challenge.");
+                return;
+            }
+            if (!wallet_.isUnlocked()) {
+                QMessageBox::warning(&dialog, "Marketplace Login", "Wallet is locked.");
+                return;
+            }
+            if (QMessageBox::question(&dialog, "Approve Marketplace Login",
+                    "Approve a LOGIN signature for:\n\n"
+                    "Site: https://market.tokenizedrealutility.com\n"
+                    "Network: tru-mainnet\n"
+                    "Address: " + address + "\n\n"
+                    "This is not a payment or transaction.\n"
+                    "Continue?", QMessageBox::Yes | QMessageBox::No,
+                    QMessageBox::No) != QMessageBox::Yes) return;
+            QString pub, sig, error;
+            if (!signAuthorization(address, exact, pub, sig, error)) {
+                QMessageBox::warning(&dialog, "Marketplace Login",
+                    error.isEmpty() ? "Wallet could not sign the challenge." : error);
+                return;
+            }
+            const QJsonObject receipt {
+                {"address", address}, {"nonce", nonce},
+                {"pubkey_hex", pub}, {"signature_hex", sig}
+            };
+            output->setPlainText(QString::fromUtf8(
+                QJsonDocument(receipt).toJson(QJsonDocument::Compact)));
+            copyResponse->setEnabled(true);
+            // Do not write challenge, signature, or private data to log files.
+        });
+        dialog.exec();
+    });
     connect(axonFund, &QPushButton::clicked,
             this, [this]{
         bool ok=false;
@@ -1852,3 +1996,5 @@ void DesktopWalletWidget::sendTru() {
                 });
         });
 }
+
+#include "quantum_desktop_widget_v1.inc"

@@ -1,3 +1,4 @@
+#include "quantum_chain_v1.h"
 #include "tru_agent_auto_policy.h"
 #include "tru_agent_checkpoint_v5.h"
 #include "magic_secret_cli_v2.h"
@@ -13,6 +14,12 @@
 #include "blockchain.h"
 #include "p2p.h"
 #include "wallet.h"
+#include "tru_market_login_v1.h"
+#include "tru_market_headless_v1.h"
+#include "tru_market_connect_v1.h"
+#include <functional>
+#include <openssl/sha.h>
+#include <openssl/crypto.h>
 #include "cli_address_selection_v1.h"  // CLI-ADDRESS-SELECT-01
 #include "tx.h"
 #include "mempool.h"
@@ -900,6 +907,9 @@ static bool dispatchPendingSignalEvents() {
     return true;
 }
 
+static std::function<void()> g_marketIdleHook;
+static bool g_marketHookActive=false;
+
 static void waitForSignalAwareStdin() {
     for (;;) {
         // Patch 08B.4A.1b v2 / N2: shutdown is sticky. If a nested bare
@@ -924,7 +934,16 @@ static void waitForSignalAwareStdin() {
         fds[1].events = POLLIN | POLLHUP | POLLERR;
 
         const int nfds = (g_signalWakePipe[0] >= 0) ? 2 : 1;
-        const int rc = ::poll(fds, nfds, -1);
+        // Readiness wins over an incoming wallet request; never interrupt typed input.
+        const bool marketIdle = g_cliMenuPromptActive.load(std::memory_order_acquire) &&
+            !g_marketHookActive && static_cast<bool>(g_marketIdleHook) && ::isatty(STDIN_FILENO);
+        const int rc = ::poll(fds, nfds, marketIdle ? 500 : -1);
+        if(rc==0 && marketIdle){
+            g_marketHookActive=true;
+            struct HookBusyGuard { ~HookBusyGuard(){g_marketHookActive=false;} } hookBusyGuard;
+            g_marketIdleHook();
+            continue;
+        }
 
         if (rc < 0) {
             if (errno == EINTR) {
@@ -5717,6 +5736,7 @@ static bool truDeckHighlightToken(const std::string& token)
     if (token.empty()) return false;
     if (token[0] >= '0' && token[0] <= '9') return true;
     return token == "C" || token == "M" || token == "sync" || token == "auditchain" ||
+           token == "marketlogin" || token == "qr" ||
            token == "hashredeem" || token == "timeredeem" || token == "magic";
 }
 
@@ -5913,8 +5933,9 @@ void displayMenu(int rows, std::mutex &coutMutex)
         "╠═════════════════════════ NETWORK // CHAIN & PEERS ═════════════════════════╣",
         "║                                                                            ║",
         "║  28 Chain Info    29 Peers     30 Lookup Block      31 Mempool             ║",
-        "║  auditchain Run explicit hash / proof-of-work audit                      ║",
         "║  32 Connect Peer      33 Message Peer      sync Check Sync                 ║",
+        "║  marketlogin Market Connect (Manual / Headless)                            ║",
+        "║  qr Quantum Transactions                                                   ║",
         "╠════════════════════════════════════════════════════════════════════════════╣",
         "╠════════════════════════════ COMPUTE // MINING ═════════════════════════════╣",
         "║                                                                            ║",
@@ -5944,7 +5965,8 @@ void displayMenu(int rows, std::mutex &coutMutex)
         "║  magic  Private Secrets                                            ║",
         "╠════════════════════════════════════════════════════════════════════╣",
         "╠═════════════════════════ CHAIN / COMPUTE ══════════════════════════╣",
-        "║                                                                    ║",
+        "║  marketlogin Market Connect (Manual / Headless)                    ║",
+        "║  qr Quantum Transactions                                           ║",
         "║  28 Info 29 Peers 30 Block 31 Mempool 32 Connect 33 Msg            ║",
         "║  34 CPU 35 GPU  sync Sync  C Clear  M Full  36 Exit                ║",
         "╚════════════════════════════════════════════════════════════════════╝"
@@ -6199,6 +6221,47 @@ void startCLI(Blockchain &chain, P2PNode &node, Wallet &wallet,
     CliWorkerStopGuard cliWorkerStopGuard{
         sizeMonitorRunning
     };
+    // MARKET-03: only service local requests while the top-level terminal is idle.
+    g_marketIdleHook = [&wallet, &coutMutex]() {
+        nlohmann::json request;
+        if(!tru_market_connect_v1::take("core",request))return;
+        auto respond=[&](const nlohmann::json& value){tru_market_connect_v1::reply("core",request,value);};
+        try{
+            if(request.at("op")=="accounts"){
+                respond({{"addresses",wallet.getAllAddresses()}});return;
+            }
+            tru_market_login_v1::Challenge c;std::string reason;
+            if(!tru_market_login_v1::parse(request.at("message").get<std::string>(),c,reason))throw std::runtime_error(reason);
+            const auto code=request.at("code").get<std::string>();
+            if(!std::regex_match(code,std::regex("[0-9A-F]{8}")))throw std::runtime_error("Invalid connection code");
+            if(!wallet.isWalletPrivateAccessAllowed())throw std::runtime_error("Unlock Core locally, then reconnect");
+            TruCliInputPaintGuard paintGuard;
+            std::cout << "\n\nTRU MARKETPLACE CONNECTION\nSite: https://market.tokenizedrealutility.com\n"
+                      << "Address: " << c.address << "\nMatch browser code: " << code
+                      << "\nLOGIN ONLY. No payment permission.\nType YES to approve (anything else declines): " << std::flush;
+            std::string approval;
+            if(!signalAwareGetline(approval) || approval!="YES")throw std::runtime_error("Connection declined");
+            if(!tru_market_login_v1::parse(c.exact,c,reason))throw std::runtime_error(reason);
+            struct Clean { std::string text; ~Clean(){if(!text.empty())OPENSSL_cleanse(text.data(),text.size());} } pem{wallet.getPrivateKeyForAddress(c.address)};
+            auto signer=ECDSAKey::fromPrivateKey(pem.text);auto pub=signer.getCompressedSec1();
+            if(pub.size()!=33 || !doesPubKeyMatchAddress(pub,c.address))throw std::runtime_error("Address not controlled by this wallet");
+            unsigned char digest[SHA256_DIGEST_LENGTH]{};
+            SHA256(reinterpret_cast<const unsigned char*>(c.exact.data()),c.exact.size(),digest);
+            Clean hash{std::string(reinterpret_cast<const char*>(digest),sizeof(digest))};OPENSSL_cleanse(digest,sizeof(digest));
+            auto sig=signer.sign(hash.text);
+            if(!ECDSAKey::isStrictDERLowS(sig))throw std::runtime_error("Invalid signature encoding");
+            respond({{"address",c.address},{"nonce",c.nonce},{"pubkey_hex",bytesToHex(pub)},{"signature_hex",bytesToHex(sig)}});
+            std::cout << "\nConnection approved. Return to the marketplace.\n" << std::flush;
+        }catch(const std::exception& e){respond({{"error",e.what()}});}
+    };
+    // Local isolation for parallel validation nodes: never consume another
+    // same-user Core's Marketplace connection requests when explicitly disabled.
+    if (const char* disabled = std::getenv("TRU_DISABLE_MARKET_CONNECT_IPC");
+        disabled && std::string(disabled) == "1") {
+        g_marketIdleHook = {};
+    }
+    struct MarketHookGuard { ~MarketHookGuard(){g_marketIdleHook={};} } marketHookGuard;
+
 
     while (g_running) {
         // Get current terminal size
@@ -6464,6 +6527,194 @@ void startCLI(Blockchain &chain, P2PNode &node, Wallet &wallet,
         // The visible CLI is 1..36 in screen order. Internally, route those
         // numbers to the established handler codes so command logic remains
         // untouched. Lettered legacy aliases remain accepted but unadvertised.
+        // MARKET-02B-CORE-01: Local interactive Core wallet login signer.
+        // Intentionally NOT an RPC method or tru-cli raw command.
+        if(choice=="quantum" || choice=="qr") {
+            if(!::isatty(STDIN_FILENO)){displayOutput("Quantum wallet requires local interactive terminal.",rows,coutMutex);continue;}
+            TruCliInputPaintGuard quantumPaintGuard;
+            try {
+                std::cout << "\nQUANTUM TRANSACTIONS (WOTS+)\nActions: receive, list, fund, send, exit, retry\nWhole selected TRU output is spent minus fee. Legacy sending is unchanged.\nAction (blank cancels): " << std::flush;
+                std::string action;if(!signalAwareGetline(action)||action.empty())continue;
+                nlohmann::json p=nlohmann::json::object();
+                if(action!="receive"&&action!="list"){
+                    std::cout << "Public transaction parameters as JSON (txid, vout, destination, fee_atoms; source for WOTS): " << std::flush;
+                    std::string line;if(!signalAwareGetline(line))continue;p=nlohmann::json::parse(line);
+                    std::cout << "Sign this exact transaction? Type SIGN (exit also requires confirm_exit:true): " << std::flush;
+                    if(!signalAwareGetline(line)||line!="SIGN")continue;
+                }
+                auto r=wallet.quantumTransaction(action,p);std::cout << r.dump(2) << "\n";
+                if(r.is_object()&&r.contains("rawHex")) {
+                    std::cout << "Broadcast saved transaction? Type SEND: " << std::flush;std::string line;
+                    if(signalAwareGetline(line)&&line=="SEND") {
+                        auto tx=Transaction::deserializeBinary(hexDecode(r.at("rawHex").get<std::string>()));
+                        tru_quantum::activeHeight(chain);
+                        if(!chain.broadcastTransaction(tx)) throw std::runtime_error("Submission rejected; preserve signed bytes and retry the SAME transaction");
+                        std::cout << "Quantum transaction submitted.\n";
+                    }
+                }
+            } catch(const std::exception& e){std::cout << "Quantum: " << e.what() << "\n";}
+            continue;
+        }
+        if (choice == "marketlogin") {
+            if (!::isatty(STDIN_FILENO)) {
+                displayOutput("Marketplace signing requires the local interactive Core terminal.", rows, coutMutex);
+                continue;
+            }
+            if (!wallet.isWalletPrivateAccessAllowed()) {
+                displayOutput("Wallet is locked. Unlock locally before signing.", rows, coutMutex);
+                continue;
+            }
+            std::cout << "\nMARKET CONNECT\n1. Manual Market Connect\n2. Headless Market Connect\n0. Cancel\nChoose: " << std::flush;
+            std::string marketMode;
+            if (!signalAwareGetline(marketMode) || marketMode == "0") continue;
+            if (marketMode == "2") {
+                TruCliInputPaintGuard marketPaintGuard;
+                try {
+                    const bool connected = tru_market_headless_v1::run(wallet.getAllAddresses(),
+                        [](std::string& line){ return static_cast<bool>(signalAwareGetline(line)); },
+                        [](const std::string& text){ std::cout << text << std::flush; },
+                        [&wallet](const tru_market_login_v1::Challenge& challenge) -> nlohmann::json {
+                            if (!wallet.isWalletPrivateAccessAllowed()) throw std::runtime_error("Wallet is locked");
+                // The wallet's private key is used only in this local process.
+                // Do not log the challenge, signature or private material.
+                struct WipeString {
+                    std::string content;
+                    ~WipeString() { if (!content.empty()) OPENSSL_cleanse(content.data(), content.size()); }
+                } pem{wallet.getPrivateKeyForAddress(challenge.address)};
+                ECDSAKey signer = ECDSAKey::fromPrivateKey(pem.content);
+                auto pub = signer.getCompressedSec1();
+                if (pub.size() != 33 || !doesPubKeyMatchAddress(pub, challenge.address))
+                    throw std::runtime_error("wallet key does not match requested compressed-key address");
+                unsigned char digest[SHA256_DIGEST_LENGTH] = {};
+                SHA256(reinterpret_cast<const unsigned char*>(challenge.exact.data()),
+                       challenge.exact.size(), digest);
+                WipeString prehash{std::string(reinterpret_cast<const char*>(digest), sizeof(digest))};
+                OPENSSL_cleanse(digest, sizeof(digest));
+                const auto signature = signer.sign(prehash.content); // ECDSA signs the SHA-256 digest; low-S DER.
+                if (!ECDSAKey::isStrictDERLowS(signature))
+                    throw std::runtime_error("signer returned a noncanonical DER signature");
+                nlohmann::json signedResponse = {
+                    {"address", challenge.address}, {"nonce", challenge.nonce},
+                    {"pubkey_hex", bytesToHex(pub)}, {"signature_hex", bytesToHex(signature)}
+                };
+                            return signedResponse;
+                        });
+                    if (!connected) displayOutput("Marketplace connection declined. Start a fresh browser connection to retry.", rows, coutMutex);
+                } catch (const std::exception& ex) {
+                    displayOutput(std::string("Marketplace connection failed: ") + ex.what(), rows, coutMutex);
+                }
+                continue;
+            }
+            if (marketMode != "1") {
+                displayOutput("Choose 1 for manual or 2 for headless.", rows, coutMutex);
+                continue;
+            }
+            displayOutput("MARKETPLACE LOGIN (NO PAYMENT)\n1. On the Marketplace press Copy Core login code.\n2. Paste the ONE-LINE code below (TRUM1:...).\n3. Verify the domain/address and type YES to approve.\nOld six-line challenges also work. Never paste wallet secrets.\n", rows, coutMutex);
+            std::cout << "Core login code or legacy first line: " << std::flush;
+            std::string first;
+            if (!signalAwareGetline(first)) {
+                displayOutput("Marketplace login cancelled: no input", rows, coutMutex);
+                continue;
+            }
+            if (!first.empty() && first.back() == '\r') first.pop_back();
+            tru_market_login_v1::Challenge challenge;
+            std::string invalidReason;
+            bool parsed = false;
+            if (first.rfind("TRUM1:", 0) == 0) {
+                // Expands to the exact six-line message that Marketplace V1
+                // already verifies. The login signature format is unchanged.
+                parsed = tru_market_login_v1::parseCompact(first, challenge, invalidReason);
+            } else if (first == "TRU-MARKET-AUTH-V1") {
+                const char* labels[5] = {"Network", "Domain", "Address", "Nonce", "Expires"};
+                std::string exact = first + "\n";
+                bool inputOK = true;
+                for (const char* label : labels) {
+                    std::cout << label << ": " << std::flush;
+                    std::string line;
+                    if (!signalAwareGetline(line)) { inputOK = false; break; }
+                    if (!line.empty() && line.back() == '\r') line.pop_back();
+                    exact += line + "\n";
+                    if (exact.size() > 512) { inputOK = false; break; }
+                }
+                if (inputOK) parsed = tru_market_login_v1::parse(exact, challenge, invalidReason);
+                else invalidReason = "legacy challenge input incomplete or too long";
+            } else {
+                invalidReason = "expected a TRUM1: code or TRU-MARKET-AUTH-V1 first line";
+            }
+            if (!parsed) {
+                displayOutput("Marketplace login declined: " + invalidReason, rows, coutMutex);
+                continue;
+            }
+            if (!isValidAddress(challenge.address)) {
+                displayOutput("Marketplace login declined: not a valid TRU mainnet address", rows, coutMutex);
+                continue;
+            }
+            std::cout << "\nSIGN LOGIN ONLY\n"
+                      << "Site: https://market.tokenizedrealutility.com\n"
+                      << "Network: tru-mainnet\n"
+                      << "Address: " << challenge.address << "\n"
+                      << "Expires (Unix): " << challenge.expires << "\n"
+                      << "This does NOT move TRU or authorize payments.\n"
+                      << "Type YES to approve: " << std::flush;
+            std::string approval;
+            if (!signalAwareGetline(approval) || approval != "YES") {
+                displayOutput("Marketplace login not signed.", rows, coutMutex);
+                continue;
+            }
+            try {
+                // The wallet's private key is used only in this local process.
+                // Do not log the challenge, signature or private material.
+                struct WipeString {
+                    std::string content;
+                    ~WipeString() { if (!content.empty()) OPENSSL_cleanse(content.data(), content.size()); }
+                } pem{wallet.getPrivateKeyForAddress(challenge.address)};
+                ECDSAKey signer = ECDSAKey::fromPrivateKey(pem.content);
+                auto pub = signer.getCompressedSec1();
+                if (pub.size() != 33 || !doesPubKeyMatchAddress(pub, challenge.address))
+                    throw std::runtime_error("wallet key does not match requested compressed-key address");
+                unsigned char digest[SHA256_DIGEST_LENGTH] = {};
+                SHA256(reinterpret_cast<const unsigned char*>(challenge.exact.data()),
+                       challenge.exact.size(), digest);
+                WipeString prehash{std::string(reinterpret_cast<const char*>(digest), sizeof(digest))};
+                OPENSSL_cleanse(digest, sizeof(digest));
+                const auto signature = signer.sign(prehash.content); // ECDSA signs the SHA-256 digest; low-S DER.
+                if (!ECDSAKey::isStrictDERLowS(signature))
+                    throw std::runtime_error("signer returned a noncanonical DER signature");
+                nlohmann::json signedResponse = {
+                    {"address", challenge.address}, {"nonce", challenge.nonce},
+                    {"pubkey_hex", bytesToHex(pub)}, {"signature_hex", bytesToHex(signature)}
+                };
+                // The Core's fixed-width console clips long JSON lines. Use an
+                // owner-only temporary file for the 5-minute login proof instead.
+                char name[] = "/tmp/tru_market_login_XXXXXX";
+                const int fd = ::mkstemp(name); // atomic create, permissions 0600
+                if (fd < 0) throw std::runtime_error("cannot create private login response file");
+                const std::string receipt = signedResponse.dump() + "\n";
+                std::size_t offset = 0;
+                bool writeOK = true;
+                while (offset < receipt.size()) {
+                    const auto count = ::write(fd, receipt.data() + offset, receipt.size() - offset);
+                    if (count <= 0) { writeOK = false; break; }
+                    offset += static_cast<std::size_t>(count);
+                }
+                if (::close(fd) != 0) writeOK = false;
+                if (!writeOK) {
+                    ::unlink(name);
+                    throw std::runtime_error("could not write private signed response");
+                }
+                displayOutput(std::string("SIGNED LOGIN ONLY (no transaction).\n") +
+                              "Private temporary response: " + name + "\n" +
+                              "In another SSH terminal: cat " + name + "\n" +
+                              "Paste JSON into Marketplace Core import, then remove: rm " + name + "\n" +
+                              "This proof expires after five minutes. Never post it publicly.",
+                              rows, coutMutex);
+            } catch (const std::exception& ex) {
+                displayOutput(std::string("Marketplace login signing failed: ") + ex.what(),
+                              rows, coutMutex);
+            }
+            continue;
+        }
+
         static const std::unordered_map<std::string, std::string>
             kPublicCliToLegacy = {
                 {"1",  "1"},   {"2",  "2"},   {"3",  "3"},

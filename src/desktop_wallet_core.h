@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <nlohmann/json.hpp>
 #include "tru_desktop_07_model.h"
 #include <string>
 #include <vector>
@@ -24,6 +25,14 @@ struct DesktopWalletSignedTx {
 
 class DesktopWalletCore {
 public:
+    void quantumBackup(const std::string& walletPath, const std::string& backupPath);
+    nlohmann::json quantumReceive(const std::string& walletPath);
+    nlohmann::json quantumList(const std::string& walletPath);
+    std::string quantumRetry(const std::string& walletPath, const std::string& source);
+    DesktopWalletSignedTx quantumSign(const std::string& walletPath, const DesktopWalletUtxo& input,
+        const std::string& source, const std::string& destination, std::uint64_t fee,
+        std::uint32_t candidateHeight, bool funding, bool confirmExit);
+
     DesktopWalletCore();
     ~DesktopWalletCore();
 

@@ -1,3 +1,4 @@
+#include "consensus09_commitment.h"
 #include "tru_network_params.h"
 #include <iostream>
 #include <thread>
@@ -852,6 +853,7 @@ static Block buildCandidateBlockFromTemplate(const nlohmann::json& tpl, const st
     Transaction coinbaseTx = buildCoinbaseTx(minerAddr, rewardSat, height, extraNonce);
     candidate.transactions.push_back(coinbaseTx);
     addTemplateTransactions(candidate, tpl);
+    tru_commit09::prepare(candidate);
     candidate.header.merkleRoot = computeMerkleRoot(candidate.transactions);
     
     Logger::log("[BLOCK] Built candidate block with " + std::to_string(candidate.transactions.size()) + 

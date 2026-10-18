@@ -102,7 +102,7 @@ public:
 
     // Text-based serialization
     std::string serialize() const;
-    static Transaction deserialize(const std::string &data);
+    static Transaction deserialize(const std::string &data, bool framedMetadata09 = false);
 
     // Binary (wire-format) serialization / deserialization
     std::vector<unsigned char> serializeBinary() const;

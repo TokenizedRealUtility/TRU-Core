@@ -1025,3 +1025,30 @@ void LevelDBStorage::iteratePrefixCheckedV1(const std::string& prefix,std::funct
     }
     if(!it->status().ok())throw std::runtime_error("supply database scan failed");
 }
+
+// MARKET-04: bounded snapshot; no repair, index writes or unbounded materialization.
+std::vector<std::pair<std::string,std::string>> LevelDBStorage::marketReadPrefix04(const std::string& prefix) const {
+    if(prefix!="tokenUTXO:" && prefix!="tokenMetadata:")throw std::runtime_error("Unsupported portfolio prefix");
+    auto mutex=getDbMutexHandle();if(!mutex)throw std::runtime_error("Portfolio database unavailable");
+    std::unique_lock<std::mutex> guard(*mutex,std::try_to_lock);
+    if(!guard.owns_lock())throw std::runtime_error("Portfolio database busy; retry shortly");
+    leveldb::ReadOptions opts;opts.fill_cache=false;
+    std::unique_ptr<leveldb::Iterator> it(db->NewIterator(opts));
+    std::vector<std::pair<std::string,std::string>> rows;
+    size_t bytes=0;
+    const auto began=std::chrono::steady_clock::now();
+    for(it->Seek(prefix);it->Valid()&&it->key().starts_with(prefix);it->Next()){
+        if(rows.size()>=10000 || std::chrono::steady_clock::now()-began>std::chrono::milliseconds(250))
+            throw std::runtime_error("Portfolio index exceeds bounded scan capacity");
+        const size_t length=it->key().size()+it->value().size();
+        if(length>4*1024*1024 || bytes>4*1024*1024-length)throw std::runtime_error("Portfolio index exceeds byte capacity");
+        bytes+=length;
+        const auto raw=it->value().ToString();const auto delimiter=raw.find('|');
+        if(delimiter!=64)throw std::runtime_error("Portfolio record checksum missing");
+        const auto value=raw.substr(delimiter+1);
+        if(raw.substr(0,delimiter)!=computeDataChecksum(value))throw std::runtime_error("Portfolio record checksum mismatch");
+        rows.emplace_back(it->key().ToString().substr(prefix.size()),value);
+    }
+    if(!it->status().ok())throw std::runtime_error("Portfolio index read failed");
+    return rows;
+}

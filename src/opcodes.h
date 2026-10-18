@@ -197,6 +197,8 @@ enum OpCode : unsigned char
     // They intentionally have no compileTextScript names yet.
     OP_UPGRADE_NOP1    = 0xbb,
     OP_UPGRADE_NOP2    = 0xbc,
+    OP_CHECKWOTSVERIFY = OP_UPGRADE_NOP1, // PQ01, activated semantics
+    OP_MARKETVERIFY    = OP_UPGRADE_NOP2, // MARKET-V1, activated semantics
     OP_UPGRADE_NOP3    = 0xbd,
     OP_UPGRADE_NOP4    = 0xbe,
     OP_UPGRADE_NOP5    = 0xbf,
@@ -208,3 +210,5 @@ enum OpCode : unsigned char
     // Invalid marker (end)
     OP_INVALIDOPCODE   = 0xff
 };
+
+#include "opcode_map09.h"

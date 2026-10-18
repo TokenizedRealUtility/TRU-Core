@@ -86,6 +86,7 @@ static void printUsage() {
 "  getinfo                          aggregate node + wallet snapshot\n"
 "  getbalance [address]             spendable TRU (defaults to wallet addr)\n"
 "  sendtoaddress <addr> <amount> [--dry-run]  locally authorized send; opt-in Core\n"
+"  quantum <receive|list|fund|send|exit|retry|input|submit> [JSON]\n"
 "  getblockcount                    current height\n"
 "  getchaininfo                     tip height/hash/difficulty/valid\n"
 "  getbestblockhash                 best block hash\n"
@@ -253,6 +254,16 @@ int main(int argc, char** argv) {
             json resp = rpcCall(cfg, method, params);
             printResultRaw(resp);
             return (resp.contains("error") && !resp["error"].is_null()) ? 2 : 0;
+        }
+
+        // Dedicated quantum namespace; JSON contains public data only.
+        if (cmd == "quantum") {
+            if(pos.size()<2 || pos.size()>3){std::cerr << "quantum <receive|list|fund|send|exit|retry|input|submit> [JSON]\n";return 2;}
+            json p=pos.size()==3?json::parse(pos[2]):json::object();
+            const auto action=pos[1];
+            std::string m=action=="input"?"getquantuminput":action=="submit"?"sendquantumtransaction":"quantumwallet";
+            if(m=="quantumwallet")p["action"]=action;
+            auto r=rpcCall(cfg,m,p);printResultRaw(r);return r.contains("error")&&!r["error"].is_null()?2:0;
         }
 
         // ---- friendly commands --------------------------------------------

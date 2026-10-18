@@ -1,3 +1,5 @@
+#include "market_lock09.h"
+#include "wots_script09.h"
 #include "mempool.h"
 #include "tru_limits.h"  // shared money/mempool limits
 #include "tokens.h"    
@@ -239,6 +241,13 @@ bool Mempool::isAllowedSmartContractScript(const std::string& scriptHex) const {
         return true;
     }
 
+    // Activated native families have exact output templates. Upgrade bytes
+    // in arbitrary custom scripts remain nonstandard.
+    const int tip09 = chain_.getBestTipHeight();
+    const uint32_t next09 = tip09 < 0 ? 0 : static_cast<uint32_t>(tip09)+1;
+    tru_market09::Terms market09;
+    if (tru09::active(next09, tru09::MARKET_HEIGHT) && tru_market09::parseLock(scriptHex,market09)) return true;
+    if (tru09::active(next09, tru09::WOTS_HEIGHT) && tru_pq01::canonicalScript(script)) return true;
     std::string customReason;
     if (isRelaySafeCustomScriptV1(script, customReason)) {
         Logger::log(
@@ -1037,6 +1046,8 @@ bool Mempool::isTransactionValidUnchecked(
         return false;
     }
 
+    if (!blockchain->validateConsensus09Transaction(tx, admissionExecHeight)) return false;
+
     for (std::size_t i = 0; i < tx.vin.size(); ++i) {
         const TxIn& input = tx.vin[i];
 
@@ -1184,8 +1195,8 @@ bool Mempool::isTransactionValidUnchecked(
         }
 
         ScriptResourceMetrics unlockMetrics, lockMetrics;
-        if (!AnalyzeScriptResources(input.scriptSig, unlockMetrics) ||
-            !AnalyzeScriptResources(scriptPubKey, lockMetrics)) {
+        if (!AnalyzeScriptResources(input.scriptSig, unlockMetrics, admissionExecHeight) ||
+            !AnalyzeScriptResources(scriptPubKey, lockMetrics, admissionExecHeight)) {
             Logger::log("[Mempool] malformed/over-budget script => TX=" + tx.txid);
             return false;
         }
@@ -1402,6 +1413,7 @@ bool Mempool::isTransactionValidUnchecked(
         ctxSpec.sighash = sighash;
         ctxSpec.chainCtx = &chain_;
         ctxSpec.execHeight = admissionExecHeight;
+        ctxSpec.marketValidated09 = tru09::active(admissionExecHeight, tru09::MARKET_HEIGHT);
         ctxSpec.sender = inputSender;
         ctxSpec.contractAddress = contractIdentity;
         // State remains unavailable in mempool until Patch 14D defines a

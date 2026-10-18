@@ -1,3 +1,6 @@
+#include "quantum_chain_v1.h"
+#include <climits>
+#include "consensus09_commitment.h"
 #include "token_continuation_metadata_v1.h"
 #include "magic_secret_service_v2.h"
 #include "rpc_server.h"
@@ -1872,7 +1875,7 @@ static json handleGetTRUScripts(Blockchain &chain, const json &params, int id) {
                 if (metadata.value("type", "") == "TRUSCRIPT" && 
                     metadata.value("owner", "") == ownerAddress) {
                     
-                    std::string txid = key.substr(prefix.length());
+                    std::string txid = key; // MARKET-03: iteratePrefix returns suffix only
                     
                     // Get the inscription data - try multiple sources
                     std::string inscriptionData;
@@ -3481,122 +3484,167 @@ static json handleTokenMetadataDisplay(Blockchain& chain, const json& params, in
 //================================================================
 //		GET TOKEN UTXO
 //================================================================
+
+// MARKET-03: canonical records are keyed by the controlling output, not OP_RETURN.
+// Both public readers share identity, live-output and owner checks.
+static json market03TokenRecord(Blockchain& chain, LevelDBStorage* storage,
+                                const std::string& txid, uint32_t control,
+                                const std::string& token = "", const std::string& owner = "") {
+    UTXO live;
+    if (!chain.utxoSet.getUTXO(txid, control, live)) return nullptr;
+    std::string raw;
+    if (!storage->getWithDataChecksum("tokenUTXO:"+txid+":"+std::to_string(control),raw))
+        throw std::runtime_error("Live token ownership index has no canonical token record");
+    const auto j=json::parse(raw);
+    const auto actualOwner=j.at("owner").get<std::string>();
+    const auto actualToken=normalizeTokenIDForLookupV2(j.at("tokenID").get<std::string>());
+    if (actualToken.empty() || (!token.empty() && actualToken!=token) ||
+        (!owner.empty() && actualOwner!=owner) ||
+        j.value("controllingVout", control)!=control ||
+        extractP2PKHAddressCorrect(live.scriptPubKey)!=actualOwner)
+        throw std::runtime_error("Token record does not match its live controlling output");
+    const auto amountText=j.at("amount").is_string()?j.at("amount").get<std::string>():j.at("amount").dump();
+    if(amountText.empty() || amountText.size()>20 || amountText.find_first_not_of("0123456789")!=std::string::npos)
+        throw std::runtime_error("Invalid token amount");
+    const uint64_t amount=std::stoull(amountText);
+    const auto type=j.at("type").get<std::string>();
+    if(type!="FT" && type!="NFT" && type!="SFT" && type!="NCFT")throw std::runtime_error("Invalid token type");
+    return {{"txid",txid},{"controllingVout",control},{"tokenVout",control>0?control-1:0},
+            {"amount",amount},{"owner",actualOwner},{"type",type},{"tokenID",actualToken}};
+}
+static json market03TokenHoldings(Blockchain& chain, LevelDBStorage* storage,
+                                  const std::string& token,const std::string& owner,int& orphaned) {
+    json result=json::array();std::string failure;
+    storage->iteratePrefix("tokenOwnerUTXO:"+token+":"+owner+":",[&](const std::string& key,const std::string&){
+        if(!failure.empty())return;
+        try{
+            auto pos=key.find(':');
+            if(pos!=64 || key.find(':',pos+1)!=std::string::npos || key.substr(0,pos).find_first_not_of("0123456789abcdefABCDEF")!=std::string::npos)
+                throw std::runtime_error("Malformed token ownership index");
+            auto v=key.substr(pos+1);
+            if(v.empty() || v.size()>10 || v.find_first_not_of("0123456789")!=std::string::npos)throw std::runtime_error("Invalid controlling output index");
+            auto n=std::stoull(v);if(n>UINT32_MAX)throw std::runtime_error("Controlling output index overflow");
+            auto r=market03TokenRecord(chain,storage,key.substr(0,pos),static_cast<uint32_t>(n),token,owner);
+            if(r.is_null())++orphaned;else result.push_back(r);
+        }catch(const std::exception& e){failure=e.what();}
+    });
+    if(!failure.empty())throw std::runtime_error(failure);
+    return result;
+}
 static json handleGetTokenUTXO(Blockchain& chain, const json& params, int id) {
-    LevelDBStorage* storage = chain.getStorage();
-    if (!storage) {
-        return makeError(-32000, "Storage not available");
-    }
-
-    if (params.contains("txid") && params.contains("vout")) {
-        // Handle specific UTXO request (for standalone mode token data fetch)
-        std::string txid = params["txid"].get<std::string>();
-        uint32_t vout = params["vout"].get<uint32_t>();
-        
-        std::string tokenUtxoKey = "tokenUTXO:" + txid + ":" + std::to_string(vout);
-        std::string tokenUtxoValue;
-        
-        if (!storage->getWithDataChecksum(tokenUtxoKey, tokenUtxoValue)) {
-            Logger::log("[handleGetTokenUTXO] No tokenUTXO data for specific " + tokenUtxoKey);
-            return makeError(-32000, "No token data at this UTXO");
+    try {
+        auto* storage=chain.getStorage();if(!storage)return makeError(-32000,"Storage not available");
+        if(params.contains("txid") && params.contains("vout")) {
+            auto r=market03TokenRecord(chain,storage,params.at("txid").get<std::string>(),params.at("vout").get<uint32_t>());
+            if(r.is_null())return makeError(-32000,"Token controlling output is spent or unavailable");
+            return makeResult(id,json::array({r}));
         }
-
-        try {
-            json j = json::parse(tokenUtxoValue);
-            json result = json::array();
-            result.push_back({
-                {"txid", txid},
-                {"tokenVout", vout},
-                {"controllingVout", j.value("controllingVout", vout + 1)},
-                {"amount", j["amount"]},
-                {"owner", j["owner"]},
-                {"type", j["type"]},
-                {"tokenID", j["tokenID"]}
-            });
-            return makeResult(id, result);
-        } catch (const std::exception& e) {
-            Logger::log("[handleGetTokenUTXO] Error parsing specific tokenUTXO data for " + tokenUtxoKey + ": " + e.what());
-            return makeError(-32000, "Failed to parse token data");
-        }
-    } else if (params.contains("tokenID") && params.contains("address")) {
-        // Existing code for fetching all UTXOs for token/address
-        std::string tokenID = params["tokenID"].get<std::string>();
-        std::string address = params["address"].get<std::string>();
-
-        if (tokenID.empty() || address.empty()) {
-            return makeError(-32602, "tokenID and address must not be empty");
-        }
-
-        std::string truncatedTokenID = normalizeTokenIDForLookupV2(tokenID);
-        if (truncatedTokenID.empty())
-            return makeError(-32602, "Invalid tokenID");
-        Logger::log("[handleGetTokenUTXO] Canonical/legacy token namespace ID: " +
-                    truncatedTokenID + " from " + tokenID);
-
-        std::string prefix = "tokenOwnerUTXO:" + truncatedTokenID + ":" + address + ":";
-        json result = json::array();
-
-        storage->iteratePrefix(prefix, [&](const std::string& keySansPrefix, const std::string& value) {
-            std::string fullKey = prefix + keySansPrefix;
-            std::vector<std::string> parts = splitString(fullKey.substr(prefix.length()), ':');
-            
-            if (parts.size() != 2) {
-                Logger::log("[handleGetTokenUTXO] Malformed tokenOwnerUTXO key: " + fullKey);
-                return;
-            }
-            
-            std::string txid = parts[0];
-            uint32_t controllingVout;
-            
-            try {
-                controllingVout = std::stoul(parts[1]);
-            } catch (const std::exception& e) {
-                Logger::log("[handleGetTokenUTXO] Invalid vout in key " + fullKey + ": " + e.what());
-                return;
-            }
-            
-            uint32_t tokenVout = controllingVout - 1;
-            std::string tokenUtxoKey = "tokenUTXO:" + txid + ":" + std::to_string(tokenVout);
-            std::string tokenUtxoValue;
-            
-            if (!storage->getWithDataChecksum(tokenUtxoKey, tokenUtxoValue)) {
-                Logger::log("[handleGetTokenUTXO] No tokenUTXO data for " + tokenUtxoKey);
-                return;
-            }
-
-            try {
-                json j = json::parse(tokenUtxoValue);
-                if (!j.contains("tokenID") || j["tokenID"].get<std::string>() != truncatedTokenID) {
-                    Logger::log("[handleGetTokenUTXO] TokenID mismatch in " + tokenUtxoKey);
-                    return;
-                }
-                
-                uint64_t amount = j["amount"].is_string() ? std::stoull(j["amount"].get<std::string>()) : j["amount"].get<uint64_t>();
-                result.push_back({
-                    {"txid", txid},
-                    {"controllingVout", controllingVout},
-                    {"tokenVout", tokenVout},
-                    {"amount", amount},
-                    {"owner", j["owner"].get<std::string>()},
-                    {"type", j["type"].get<std::string>()}
-                });
-            } catch (const std::exception& e) {
-                Logger::log("[handleGetTokenUTXO] Error parsing tokenUTXO data for " + tokenUtxoKey + ": " + e.what());
-            }
-        });
-
-        if (result.empty()) {
-            Logger::log("[handleGetTokenUTXO] No token UTXOs found for tokenID=" + truncatedTokenID + ", address=" + address);
-            return makeError(-32000, "No token UTXOs found for the given token ID and address");
-        }
-
-        Logger::log("[handleGetTokenUTXO] Returning response: " + result.dump());
-        return makeResult(id, result);
-    } else {
-        return makeError(-32602, "Missing required parameters (tokenID and address or txid and vout)");
-    }
+        if(!params.contains("tokenID") || !params.contains("address"))return makeError(-32602,"tokenID/address or txid/vout required");
+        auto token=normalizeTokenIDForLookupV2(params.at("tokenID").get<std::string>());
+        auto owner=params.at("address").get<std::string>();
+        if(token.empty() || !chain.isValidAddress(owner))return makeError(-32602,"Invalid token/address");
+        int orphaned=0;auto result=market03TokenHoldings(chain,storage,token,owner,orphaned);
+        return makeResult(id,result);
+    }catch(const std::exception& e){return makeError(-32000,e.what());}
 }
 
 
+
+
+// MARKET-04: bounded public collection discovery. Existing beta/explorer paths are unchanged.
+static json handleMarketPortfolio04(Blockchain& chain,const json& params,int id){
+    try{
+        if(!params.is_object() || params.size()!=1 || !params.contains("address") || !params["address"].is_string())
+            return makeError(-32602,"Only address is accepted");
+        const std::string owner=params["address"].get<std::string>();
+        if(!chain.isValidAddress(owner))return makeError(-32602,"Invalid TRU address");
+        static std::mutex gate;std::unique_lock<std::mutex> lock(gate,std::try_to_lock);
+        if(!lock.owns_lock())return makeError(-32000,"Portfolio busy; retry shortly");
+        auto* storage=chain.getStorage();if(!storage)throw std::runtime_error("Storage unavailable");
+        const auto began=std::chrono::steady_clock::now();
+        const auto tip=chain.getBestTipHash();uint64_t generation=0,after=0;
+        if(!storage->getMutationGeneration(generation))throw std::runtime_error("Cannot capture portfolio generation");
+        const auto records=storage->marketReadPrefix04("tokenUTXO:");
+        const auto metadata=storage->marketReadPrefix04("tokenMetadata:");
+        const auto checkTime=[&]{if(std::chrono::steady_clock::now()-began>std::chrono::seconds(2))throw std::runtime_error("Portfolio time budget exceeded");};
+        static const std::regex txPattern("[0-9a-fA-F]{64}"), indexPattern("[0-9]{1,10}");
+        std::map<std::string,json> meta;
+        json inscriptions=json::array();
+        for(const auto& row:metadata){
+            checkTime();
+            if(!std::regex_match(row.first,txPattern))throw std::runtime_error("Malformed metadata key");
+            // MARKET-04A: the storage snapshot already bounds ALL metadata to 4 MiB.
+            // Legitimate scripts/extended metadata can exceed 48 KB. Do not let
+            // one such record prevent every wallet from loading its collection.
+            const auto value=json::parse(row.second);
+            if(!value.is_object())throw std::runtime_error("Malformed token metadata");
+            meta.emplace(row.first,value);
+            if(value.value("type","")=="TRUSCRIPT" && value.value("owner","")==owner){
+                if(inscriptions.size()>=200)throw std::runtime_error("Inscription capacity exceeded");
+                std::string preview;
+                if(value.contains("data") && value["data"].is_string())preview=value["data"].get<std::string>().substr(0,1600);
+                inscriptions.push_back({{"txid",row.first},{"owner",owner},{"data",preview},
+                    {"inscriptionIndex",value.value("inscriptionIndex",json(0))}});
+            }
+        }
+        std::map<std::string,json> tokens;
+        for(const auto& row:records){
+            checkTime();
+            if(row.second.size()>8192)throw std::runtime_error("Token record too large");
+            const auto raw=json::parse(row.second);
+            if(raw.at("owner").get<std::string>()!=owner)continue;
+            const auto pos=row.first.find(':');
+            if(pos!=64 || !std::regex_match(row.first.substr(0,pos),txPattern))throw std::runtime_error("Malformed token outpoint");
+            const auto number=row.first.substr(pos+1);
+            if(!std::regex_match(number,indexPattern))throw std::runtime_error("Malformed control output");
+            const auto v=std::stoull(number);if(v>UINT32_MAX)throw std::runtime_error("Control output overflow");
+            const auto txid=row.first.substr(0,pos);
+            const auto record=market03TokenRecord(chain,storage,txid,static_cast<uint32_t>(v),"",owner);
+            if(record.is_null())continue;
+            const auto token=record.at("tokenID").get<std::string>();
+            const auto amount=record.at("amount").get<uint64_t>();
+            if(!amount)continue;
+            if(!tokens.count(token)){
+                if(tokens.size()>=200)throw std::runtime_error("Token capacity exceeded");
+                json display=json::object();auto it=meta.find(txid);
+                if(it==meta.end()){
+                    std::string issuance;
+                    if(storage->getWithDataChecksum("tokenIssuance:"+token,issuance))it=meta.find(issuance);
+                }
+                if(it!=meta.end() && it->second.contains("meta") && it->second["meta"].is_object()){
+                    const auto& original=it->second["meta"];
+                    // Return only fields consumed by the collection renderer.
+                    // Large auxiliary payloads are not artwork URLs and must not
+                    // inflate the RPC response or hide otherwise valid holdings.
+                    for(const auto* field:{"name","symbol","description","ai_engine","creator_signature",
+                            "meta_id","last_evolution","style_descriptor","image","ipfs_image","dynamic_visual"}){
+                        auto found=original.find(field);
+                        const size_t cap=(std::string(field)=="image" || std::string(field)=="ipfs_image")?2048:4096;
+                        if(found!=original.end() && found->is_string() && found->get_ref<const std::string&>().size()<=cap)
+                            display[field]=*found;
+                    }
+                    auto decimals=original.find("decimals");
+                    if(decimals!=original.end() && (decimals->is_number_integer() ||
+                       (decimals->is_string() && decimals->get_ref<const std::string&>().size()<=2)))display["decimals"]=*decimals;
+                }
+                tokens[token]={{"tokenID",token},{"owner",owner},{"type",record.at("type")},{"amount",uint64_t(0)},{"metadata",display}};
+            }
+            auto& out=tokens[token];
+            if(out["type"]!=record["type"])throw std::runtime_error("Conflicting token types");
+            const auto prior=out.at("amount").get<uint64_t>();
+            if(prior>UINT64_MAX-amount)throw std::runtime_error("Token balance overflow");
+            out["amount"]=prior+amount;
+        }
+        checkTime();
+        if(chain.getBestTipHash()!=tip || !storage->getMutationGeneration(after) || generation!=after)
+            throw std::runtime_error("Chain/index changed during collection read; retry");
+        json out=json::array();for(auto& entry:tokens){entry.second["amount"]=std::to_string(entry.second["amount"].get<uint64_t>());out.push_back(entry.second);}
+        json result={{"schema","TRU-MARKET-PORTFOLIO-V1"},{"address",owner},{"tip_hash",tip},
+          {"tokens",out},{"inscriptions",inscriptions},{"index_only",true},{"repair_performed",false}};
+        if(result.dump().size()>900000)throw std::runtime_error("Portfolio response exceeds byte capacity");
+        return makeResult(id,result);
+    }catch(const std::exception& e){return makeError(-32000,e.what());}
+}
 
 //================================================================
 //              GET TOKEN META DATA
@@ -3847,89 +3895,20 @@ static json handleIssueTokenSigned(Blockchain &chain, const json &params, int id
 // Handle Token Balance Verifyier
 //========================
 static json handleVerifyTokenBalance(Blockchain &chain, const json &params, int id) {
-    if (!params.contains("address") || !params.contains("tokenID")) {
-        return makeError(-32602, "Missing address or tokenID parameter");
-    }
-    
-    try {
-        std::string address = params["address"].get<std::string>();
-        std::string tokenID = params["tokenID"].get<std::string>();
-        
-        // TOKEN-AI-01B2: canonical lookup namespace is 16 hex.
-        std::string truncatedTokenID = normalizeTokenIDForLookupV2(tokenID);
-        if (truncatedTokenID.empty())
-            return makeError(-32602, "Invalid tokenID");
-        
-        Logger::log("[handleVerifyTokenBalance] Verifying balance for token: " + truncatedTokenID + ", address: " + address);
-        
-        LevelDBStorage* storage = chain.getStorage();
-        if (!storage) {
-            return makeError(-32000, "Storage not available");
-        }
-        
-        std::string prefix = "tokenOwnerUTXO:" + truncatedTokenID + ":" + address + ":";
-        uint64_t totalBalance = 0;
-        int utxoCount = 0;
-        int orphanedCount = 0;
-        json utxos = json::array();
-        
-        storage->iteratePrefix(prefix, [&](const std::string& keySuffix, const std::string& value) {
-            std::vector<std::string> parts = splitString(keySuffix, ':');
-            if (parts.size() >= 2) {
-                std::string txid = parts[0];
-                uint32_t controllingVout = std::stoul(parts[1]);
-                
-                // Check if the controlling UTXO still exists
-                UTXO utxo;
-                if (chain.utxoSet.getUTXO(txid, controllingVout, utxo)) {
-                    // Find the token UTXO data
-                    uint32_t tokenVout = controllingVout > 0 ? controllingVout - 1 : 0;
-                    std::string tokenUtxoKey = "tokenUTXO:" + txid + ":" + std::to_string(tokenVout);
-                    std::string tokenUtxoValue;
-                    
-                    if (storage->getWithDataChecksum(tokenUtxoKey, tokenUtxoValue)) {
-                        try {
-                            json tokenData = json::parse(tokenUtxoValue);
-                            uint64_t amount = tokenData["amount"].is_string() ? 
-                                std::stoull(tokenData["amount"].get<std::string>()) : 
-                                tokenData["amount"].get<uint64_t>();
-                            
-                            totalBalance += amount;
-                            utxoCount++;
-                            
-                            utxos.push_back({
-                                {"txid", txid},
-                                {"controllingVout", controllingVout},
-                                {"tokenVout", tokenVout},
-                                {"amount", amount}
-                            });
-                            
-                        } catch (const std::exception& e) {
-                            Logger::log("[handleVerifyTokenBalance] Error parsing token UTXO: " + std::string(e.what()));
-                        }
-                    }
-                } else {
-                    orphanedCount++;
-                    Logger::log("[handleVerifyTokenBalance] Found orphaned ownership entry: " + prefix + keySuffix);
-                }
-            }
-        });
-        
-        json result = {
-            {"tokenID", truncatedTokenID},
-            {"address", address},
-            {"totalBalance", totalBalance},
-            {"utxoCount", utxoCount},
-            {"orphanedCount", orphanedCount},
-            {"utxos", utxos}
-        };
-        
-        return makeResult(id, result);
-        
-    } catch (const std::exception& e) {
-        return makeError(-32000, e.what());
-    }
+    try{
+        if(!params.contains("address") || !params.contains("tokenID"))return makeError(-32602,"Missing address or tokenID");
+        auto owner=params.at("address").get<std::string>();
+        auto token=normalizeTokenIDForLookupV2(params.at("tokenID").get<std::string>());
+        if(token.empty() || !chain.isValidAddress(owner))return makeError(-32602,"Invalid token/address");
+        auto* storage=chain.getStorage();if(!storage)return makeError(-32000,"Storage not available");
+        int orphaned=0;auto records=market03TokenHoldings(chain,storage,token,owner,orphaned);
+        uint64_t total=0;
+        for(const auto& r:records){const auto n=r.at("amount").get<uint64_t>();if(n>UINT64_MAX-total)throw std::runtime_error("Token balance overflow");total+=n;}
+        return makeResult(id,{{"tokenID",token},{"address",owner},{"totalBalance",total},
+            {"utxoCount",records.size()},{"orphanedCount",orphaned},{"utxos",records}});
+    }catch(const std::exception& e){return makeError(-32000,e.what());}
 }
+
 
 //========================
 // Handle FIx Token Meta
@@ -4701,7 +4680,20 @@ static json handleGetBlockTemplate(Blockchain &chain, const json &params = json:
         coinbase.vout.push_back(output); coinbase.computeTxId();
         candidate.transactions.push_back(std::move(coinbase));
         candidate.transactions.insert(candidate.transactions.end(), selectedTransactions.begin(), selectedTransactions.end());
-        candidate.header.merkleRoot = computeMerkleRoot(candidate.transactions);
+        tru_commit09::prepare(candidate);
+        // Publish the required output and metadata to independent template
+        // consumers as well as the native/browser candidate builders.
+        if (tru09::active(static_cast<uint32_t>(candidate.height), tru09::COMMITMENT_HEIGHT)) {
+            gbt["coinbase_required_outputs"] = json::array();
+            for (const auto& out : candidate.transactions[0].vout) {
+                if (out.scriptPubKey.rfind(tru_commit09::prefix(), 0) == 0)
+                    gbt["coinbase_required_outputs"].push_back(
+                        {{"amount_atoms", out.amount}, {"scriptPubKey", out.scriptPubKey}});
+            }
+            gbt["required_token_metadata"] = candidate.tokenMetadata;
+            gbt["consensus_upgrade"] = "TRU-0.08.5-PQ01-MARKET-V1";
+        }
+    candidate.header.merkleRoot = computeMerkleRoot(candidate.transactions);
         candidate.blockHash = candidate.computeHash();
         return chain.checkMiningTemplate(candidate);
     };
@@ -4803,6 +4795,7 @@ static json handleGetBlockTemplate(Blockchain &chain, const json &params = json:
             candidate.transactions.push_back(std::move(memTx));
         }
 
+        tru_commit09::prepare(candidate);
         candidate.header.merkleRoot =
             computeMerkleRoot(candidate.transactions);
         candidate.header.nonce = 0;
@@ -6392,7 +6385,22 @@ static json handleSignRawTransactionWithKey(Blockchain &chain, const json &p, in
                 throw std::runtime_error("Missing UTXO for input " + std::to_string(i));
             }
             
-            std::string utxoAddress = extractP2PKHAddressCorrect(utxo.scriptPubKey);
+            tru_market09::Terms market09;
+            const bool nativeMarket09 = tru_market09::parseLock(utxo.scriptPubKey, market09);
+            if (nativeMarket09) {
+                const int tip09 = chain.getBestTipHeight();
+                if (tip09 < 0 || tip09 == INT_MAX ||
+                    !tru09::active(static_cast<uint32_t>(tip09) + 1, tru09::MARKET_HEIGHT))
+                    throw std::runtime_error("MARKET-V1 is not activated");
+                tru_market09::Spend spend09;
+                if (i != 0 || !tru_market09::spend(in.scriptSig, spend09))
+                    throw std::runtime_error("Invalid market unlock");
+                if (!chain.validateConsensus09Transaction(tx, static_cast<uint32_t>(tip09) + 1))
+                    throw std::runtime_error("Invalid market transaction");
+                if (spend09.mode == 1) continue;
+            }
+            std::string utxoAddress = extractP2PKHAddressCorrect(
+                nativeMarket09 ? tru_market09::pay(market09.seller) : utxo.scriptPubKey);
             Logger::log("[handleSignRawTransactionWithKey] Input " + std::to_string(i) + 
                        " requires signature from address: " + utxoAddress);
             
@@ -6454,6 +6462,7 @@ static json handleSignRawTransactionWithKey(Blockchain &chain, const json &p, in
                 std::vector<uint8_t> scriptSig;
                 
                 // Push signature length (including SIGHASH byte)
+                if (nativeMarket09) { scriptSig.push_back(1); scriptSig.push_back(2); }
                 scriptSig.push_back(static_cast<uint8_t>(signature.size()));
                 // Push signature bytes
                 scriptSig.insert(scriptSig.end(), signature.begin(), signature.end());
@@ -6509,7 +6518,20 @@ static json handleSignRawTransactionWithKey(Blockchain &chain, const json &p, in
                 throw std::runtime_error("Missing UTXO for input " + std::to_string(i));
             }
             
-            std::string utxoAddress = extractP2PKHAddressCorrect(utxo.scriptPubKey);
+            tru_market09::Terms market09;
+            const bool nativeMarket09=tru_market09::parseLock(utxo.scriptPubKey,market09);
+            if(nativeMarket09){
+                const int tip09=chain.getBestTipHeight();
+                if(tip09<0 || tip09==INT_MAX || !tru09::active(static_cast<uint32_t>(tip09)+1,tru09::MARKET_HEIGHT))
+                    throw std::runtime_error("MARKET-V1 is not activated");
+                tru_market09::Spend spend09;
+                if(i!=0 || !tru_market09::spend(in.scriptSig,spend09))throw std::runtime_error("Invalid market unlock");
+                if(!chain.validateConsensus09Transaction(tx,static_cast<uint32_t>(tip09)+1))throw std::runtime_error("Invalid market transaction");
+                // The buyer never supplies the seller key. Input zero's fill
+                // authorization is the native covenant; keep its exact bytes.
+                if(spend09.mode==1)continue;
+            }
+            std::string utxoAddress = extractP2PKHAddressCorrect(nativeMarket09 ? tru_market09::pay(market09.seller) : utxo.scriptPubKey);
             Logger::log("[handleSignRawTransactionWithKey] Input " + std::to_string(i) + 
                        " requires signature from address: " + utxoAddress);
             
@@ -6517,10 +6539,7 @@ static json handleSignRawTransactionWithKey(Blockchain &chain, const json &p, in
             for (const auto &privJson : p["privKeys"]) {
                 std::string privStr = privJson.get<std::string>();
                 
-                Logger::log("[handleSignRawTransactionWithKey] Trying private key (length: " + 
-                           std::to_string(privStr.length()) + ", first 10 chars: " + 
-                           privStr.substr(0, 10) + "...)");
-                
+
                 ECDSAKey k;
                 // Check if the private key is in PEM format or hex
                 if (privStr.find("-----BEGIN") != std::string::npos) {
@@ -6556,6 +6575,7 @@ static json handleSignRawTransactionWithKey(Blockchain &chain, const json &p, in
                 sig.push_back(0x01); // SIGHASH_ALL
                 
                 std::vector<uint8_t> ss;
+                if(nativeMarket09){ss.push_back(1);ss.push_back(2);} // refund action
                 ss.push_back(static_cast<uint8_t>(sig.size()));
                 ss.insert(ss.end(), sig.begin(), sig.end());
                 auto pub = k.getCompressedSec1();
@@ -9735,6 +9755,8 @@ static bool consumeRpcBucket(std::unordered_map<std::string, RpcRateBucket>& buc
 }
 
 static double rpcMethodCost(const std::string& method) {
+    if(method=="quantumwallet" || method=="getquantuminput" || method=="sendquantumtransaction") return 20.0;
+    if(method=="getmarketportfolio")return 8.0;
     if(method=="getmagicsecret" || method=="preparemagicsecret" || method=="publishmagicsecret") return 20.0;
     static const std::unordered_set<std::string> expensive = {
         "submitblock", "sendtoaddress", "sendrawtransaction", "sendrawtransactionWeb",
@@ -9967,6 +9989,8 @@ static json handleSendToAddressLocal(Blockchain& chain, Wallet& wallet, const js
 }
 } // namespace
 
+#include "market_rpc09.inc"
+
 void startRPCServer(Blockchain &chain, Wallet &wallet, P2PNode &node, int port,
                     const std::string &bindIP, int maxConnections,
                     const std::string &rpcAuthToken) {
@@ -10091,9 +10115,31 @@ void startRPCServer(Blockchain &chain, Wallet &wallet, P2PNode &node, int port,
         else if (m=="getrawmempool")       response=handleGetRawMempool(chain,params,id);
         else if (m=="listunspentWeb")         response=handleListUnspentWeb(chain,params,id);
         else if (m=="listunspent")         response=handleListUnspent(chain,params,id);
+        else if (m=="quantumwallet" || m=="getquantuminput" || m=="sendquantumtransaction") {
+            try {
+                if(m=="getquantuminput") response=makeResult(id,tru_quantum::inputJson(chain,params));
+                else if(m=="sendquantumtransaction") {
+                    tru_quantum::activeHeight(chain);
+                    auto tx=Transaction::deserializeBinary(tru_quantum::unhex(params.at("txHex")));
+                    if(tx.vin.size()!=1 || tx.vout.size()!=1 || !tx.tokenMetadata.empty()) throw std::runtime_error("Quantum Send requires one plain-TRU input/output");
+                    UTXO u; if(!chain.utxoSet.getUTXO(tx.vin[0].txid,tx.vin[0].vout,u)) throw std::runtime_error("Input not unspent");
+                    if(!tru_pq01::canonicalScript(tru_quantum::unhex(u.scriptPubKey)) && !tru_pq01::canonicalScript(tru_quantum::unhex(tx.vout[0].scriptPubKey))) throw std::runtime_error("Transaction has no PQ01 input/output");
+                    response=handleSendTransaction(chain,params,id);
+                } else {
+                    if(!rpcLocalPeer(req.remote_addr)||!rpcEnvEnabled("TRU_RPC_WALLET_SEND_ENABLE")) throw std::runtime_error("quantumwallet requires loopback and TRU_RPC_WALLET_SEND_ENABLE=1");
+                    const auto action=params.at("action").get<std::string>();
+                    if(action=="fund"||action=="send"||action=="exit") { auto u=tru_quantum::input(chain,params);if(u.amount>rpcMaxSendAtoms())throw std::runtime_error("Quantum selected input exceeds operator wallet send cap"); }
+                    std::lock_guard<std::mutex> guard(g_cliSendMutex);
+                    response=makeResult(id,wallet.quantumTransaction(action,params));
+                }
+            } catch(const std::exception& e){response=makeError(-32080,e.what());}
+        }
+        else if (m=="getconsensus09info") response=consensusInfo09(chain,id);
+        else if (m=="buildmarkettransaction09") response=buildMarket09(chain,params,id);
         else if (m=="createrawtransaction")      response=handleCreateRawTransaction(chain,params,id);
         else if (m=="signrawtransactionwithkeyWeb") response=handleSignRawTransactionWithKeyWeb(chain,params,id);
         else if (m=="signrawtransactionwithkey") response=handleSignRawTransactionWithKey(chain,params,id);
+        else if (m=="getmarketportfolio") response=handleMarketPortfolio04(chain,params,id);
         else if (m=="gettokenutxo")        response=handleGetTokenUTXO(chain, params, id);
         else if (m=="gettokenmetadata")    response=handleGetTokenMetadata(chain, params, id);
         else if (m=="verifytokenevolution") response=handleVerifyTokenEvolution(chain, params, id);

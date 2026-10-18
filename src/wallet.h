@@ -219,6 +219,7 @@ struct TruFreshSwapRoleKeysV1 {
 
 class Wallet {
 public:
+    nlohmann::json quantumTransaction(const std::string& action, const nlohmann::json& params);
     // Constructors
     explicit Wallet(const std::string& filePath, Blockchain *chainPtr = nullptr, const std::string& nodeIP = "", int nodePort = 0);
     Wallet();

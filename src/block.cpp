@@ -1,3 +1,4 @@
+#include "consensus09_commitment.h"
 #include "block.h"
 #include <openssl/sha.h>
 #include <sstream>
@@ -125,7 +126,7 @@ void Block::fromProto(const ::blockchain::BlockProto& proto) {
             Logger::log("[Block::fromProto] Deserializing transaction " + std::to_string(i) + ", data length: " + std::to_string(txData.length()));
             Logger::log("[Block::fromProto] Transaction data preview: " + txData.substr(0, std::min(txData.length(), size_t(100))));
             
-            Transaction tx = Transaction::deserialize(txData);
+            Transaction tx = Transaction::deserialize(txData, tru09::active(static_cast<uint32_t>(proto.height()), tru09::COMMITMENT_HEIGHT));
             this->transactions.push_back(tx);
             Logger::log("[Block::fromProto] Added transaction " + tx.txid + " at index " + std::to_string(i));
         } catch (const std::exception& e) {
@@ -472,7 +473,7 @@ Block Block::deserialize(const std::string& data) {
             std::string txData = data.substr(colonPos + 1, txLength);
             
             try {
-                Transaction tx = Transaction::deserialize(txData);
+                Transaction tx = Transaction::deserialize(txData, tru09::active(static_cast<uint32_t>(block.height), tru09::COMMITMENT_HEIGHT));
                 block.transactions.push_back(tx);
                 TRU_LOG_DEBUG_LAZY("[deserialize] Added transaction: " + tx.txid);
             } catch (const std::exception& e) {
@@ -490,7 +491,13 @@ Block Block::deserialize(const std::string& data) {
     }
     
     // Parse metadata if present
-    size_t metadataPos = data.find("|METADATA:", currentPos);
+    // Post-upgrade commitments require the redundant block metadata to
+    // survive persistence. The transaction loop already consumed its pipe.
+    // Preserve legacy parsing before activation for historical replay.
+    const size_t metadataSearchStart =
+        tru09::active(static_cast<uint32_t>(block.height), tru09::COMMITMENT_HEIGHT) && currentPos
+            ? currentPos - 1 : currentPos;
+    size_t metadataPos = data.find("|METADATA:", metadataSearchStart);
     if (metadataPos != std::string::npos) {
         size_t colonPos = data.find(':', metadataPos + 10);
         if (colonPos != std::string::npos) {
@@ -560,6 +567,12 @@ void Block::deserializeMetadata(const std::string& data) {
 }
 
 void Block::extractTokenMetadata(LevelDBStorage* storage) {
+    if (tru09::active(static_cast<uint32_t>(height),tru09::COMMITMENT_HEIGHT)) {
+        tokenMetadata.clear();
+        for(const auto& tx:transactions) for(const auto& kv:tx.tokenMetadata)
+            tokenMetadata[kv.first]=kv.second;
+        return; // no pre-validation metadata DB writes after activation
+    }
     Logger::log("[Block::extractTokenMetadata] Extracting metadata from " + 
                 std::to_string(transactions.size()) + " transactions");
     

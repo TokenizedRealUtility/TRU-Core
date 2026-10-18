@@ -60,6 +60,8 @@ bool Blockchain::checkMiningTemplate(const Block& block) {
         }
     }
 
+    if (!tru_commit09::check(block)) return false;
+
     // Step 2: Verify block hash
     std::string computedHash = block.computeHash();
     if (computedHash != block.blockHash) {
@@ -260,6 +262,7 @@ bool Blockchain::checkMiningTemplate(const Block& block) {
 
     // Step 8: Validate all transactions
     std::unordered_set<std::string> spentUTXOs;
+    std::unordered_set<std::string> seenTokenIds09;
     uint64_t totalFees = 0;
     uint64_t blockScriptOps = 0;
     uint64_t blockSigOps = 0;
@@ -283,6 +286,11 @@ bool Blockchain::checkMiningTemplate(const Block& block) {
         }
 
         const TruSigHashScopePerf06 sighashScope(tx);
+        if (!validateConsensus09TransactionUnlocked(tx, static_cast<uint32_t>(block.height), seenTokenIds09)) return false;
+        for (const auto& out09 : tx.vout) {
+            tru_market09::Token token09;
+            if (tru_market09::token(out09.scriptPubKey, token09)) seenTokenIds09.insert(token09.asset.id);
+        }
         uint64_t inSum = 0, outSum = 0;
         uint64_t txScriptOps = 0;
         uint64_t txSigOps = 0;
@@ -385,8 +393,8 @@ bool Blockchain::checkMiningTemplate(const Block& block) {
             }
 
             ScriptResourceMetrics unlockMetrics, lockMetrics;
-            if (!AnalyzeScriptResources(vin.scriptSig, unlockMetrics) ||
-                !AnalyzeScriptResources(scriptPubKeyBytes, lockMetrics) ||
+            if (!AnalyzeScriptResources(vin.scriptSig, unlockMetrics, static_cast<uint32_t>(block.height)) ||
+                !AnalyzeScriptResources(scriptPubKeyBytes, lockMetrics, static_cast<uint32_t>(block.height)) ||
                 !addScriptMetricsChecked(
                     unlockMetrics, lockMetrics,
                     txScriptOps, txSigOps, blockScriptOps, blockSigOps)) {
@@ -599,6 +607,7 @@ bool Blockchain::checkMiningTemplate(const Block& block) {
             ctxSpec.sighash = inputSighash;
             ctxSpec.chainCtx = this;
             ctxSpec.execHeight = static_cast<uint32_t>(block.height);
+            ctxSpec.marketValidated09 = tru09::active(ctxSpec.execHeight, tru09::MARKET_HEIGHT);
             ctxSpec.sender = inputSender;
             ctxSpec.state = &scratchState;
             ctxSpec.contractAddress = contractIdentity;

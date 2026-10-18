@@ -1,5 +1,7 @@
 #pragma once
 #include <cstdint>
+#include <vector>
+#include <utility>
 #include <string>
 #include <functional>
 #include <unordered_map>
@@ -18,6 +20,7 @@ public:
     explicit LevelDBStorage(const std::string &dbPath);
     ~LevelDBStorage();
 
+    std::vector<std::pair<std::string,std::string>> marketReadPrefix04(const std::string& prefix) const;
     bool get(const std::string &key, std::string &value) const;
     // exact on-disk read for durable undo pre-images.
     // Returns true for Found/NotFound; `found` distinguishes absence

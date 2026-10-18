@@ -1,3 +1,6 @@
+#include "token_metadata09.h"
+#include "market_lock09.h"
+#include "consensus09_commitment.h"
 #include <cstdlib>
 #include "token_continuation_metadata_v1.h"
 #include "blockchain.h"
@@ -2178,6 +2181,52 @@ int Blockchain::getConnectedPeerCount() const {
 //==================================================================================
 //                              GET TRANSACTION
 //==================================================================================
+
+bool Blockchain::validateConsensus09Transaction(const Transaction& tx, uint32_t height) const {
+    std::shared_lock<std::shared_mutex> lock(mtx);
+    return validateConsensus09TransactionUnlocked(tx, height);
+}
+bool Blockchain::validateConsensus09TransactionUnlocked(const Transaction& tx, uint32_t height,
+        const std::unordered_set<std::string>& seenIds) const {
+    if (!tru09::active(height, tru09::MARKET_HEIGHT)) return true;
+    try {
+        const auto read = [&](size_t i, Transaction& parent) {
+            if (i>=tx.vin.size() || tx.vin[i].vout<0) return false;
+            UTXO live;
+            if (!utxoSet.getUTXO(tx.vin[i].txid, static_cast<uint32_t>(tx.vin[i].vout), live)) return false;
+            const auto b=std::lower_bound(chain.begin(),chain.end(),live.createdAtHeight,
+                [](const Block& b,uint32_t h){return b.height<h;});
+            if(b==chain.end() || b->height!=live.createdAtHeight) return false;
+            for(const auto& candidate:b->transactions) if(candidate.txid==tx.vin[i].txid){
+                const size_t n=static_cast<size_t>(tx.vin[i].vout);
+                if(n>=candidate.vout.size() || candidate.vout[n].scriptPubKey!=live.scriptPubKey ||
+                   candidate.vout[n].amount!=live.amount) return false;
+                // Only the spent output and adjacent token record are needed;
+                // copying a 4 MiB parent for every input would amplify work.
+                parent.vout.resize(n+1); parent.vout[n]=candidate.vout[n];
+                if(n) parent.vout[n-1]=candidate.vout[n-1];
+                return true;
+            }
+            return false;
+        };
+        const auto exists = [&](const std::string& id) {
+            std::string issuance;
+            return seenIds.count(id)>0 || dbStorage.getWithDataChecksum("tokenIssuance:"+id,issuance);
+        };
+        const auto metadataAddress=[&](const std::string& owner){
+            return extractAddressFromScriptPubKey(tru_market09::pay(owner),tx.txid,0,this);
+        };
+        if(!tru_meta09::validate(tx,exists,generateMetaHash,metadataAddress)){
+            Logger::log("[CONSENSUS09] attached token metadata/control mismatch: "+tx.txid);return false;
+        }
+        const auto result=tru_market09::validate(tx,height,read,exists);
+        if(!result.ok) Logger::log("[CONSENSUS09] rejected "+tx.txid+": "+result.reason);
+        return result.ok;
+    } catch(const std::exception& e) {
+        Logger::log(std::string("[CONSENSUS09] validation error: ")+e.what()); return false;
+    }
+}
+
 bool Blockchain::getTransaction(const std::string& txid, Transaction& tx) const {
     std::shared_lock<std::shared_mutex> lock(mtx);
     
@@ -3287,6 +3336,8 @@ bool Blockchain::validateBlock(const Block& block) {
         }
     }
 
+    if (!tru_commit09::check(block)) return false;
+
     // Step 2: Verify block hash
     std::string computedHash = block.computeHash();
     if (computedHash != block.blockHash) {
@@ -3491,6 +3542,7 @@ bool Blockchain::validateBlock(const Block& block) {
 
     // Step 8: Validate all transactions
     std::unordered_set<std::string> spentUTXOs;
+    std::unordered_set<std::string> seenTokenIds09;
     uint64_t totalFees = 0;
     uint64_t blockScriptOps = 0;
     uint64_t blockSigOps = 0;
@@ -3513,6 +3565,11 @@ bool Blockchain::validateBlock(const Block& block) {
             return false;
         }
 
+        if (!validateConsensus09TransactionUnlocked(tx, static_cast<uint32_t>(block.height), seenTokenIds09)) return false;
+        for (const auto& out09 : tx.vout) {
+            tru_market09::Token token09;
+            if (tru_market09::token(out09.scriptPubKey, token09)) seenTokenIds09.insert(token09.asset.id);
+        }
         uint64_t inSum = 0, outSum = 0;
         uint64_t txScriptOps = 0;
         uint64_t txSigOps = 0;
@@ -3615,8 +3672,8 @@ bool Blockchain::validateBlock(const Block& block) {
             }
 
             ScriptResourceMetrics unlockMetrics, lockMetrics;
-            if (!AnalyzeScriptResources(vin.scriptSig, unlockMetrics) ||
-                !AnalyzeScriptResources(scriptPubKeyBytes, lockMetrics) ||
+            if (!AnalyzeScriptResources(vin.scriptSig, unlockMetrics, static_cast<uint32_t>(block.height)) ||
+                !AnalyzeScriptResources(scriptPubKeyBytes, lockMetrics, static_cast<uint32_t>(block.height)) ||
                 !addScriptMetricsChecked(
                     unlockMetrics, lockMetrics,
                     txScriptOps, txSigOps, blockScriptOps, blockSigOps)) {
@@ -3829,6 +3886,7 @@ bool Blockchain::validateBlock(const Block& block) {
             ctxSpec.sighash = inputSighash;
             ctxSpec.chainCtx = this;
             ctxSpec.execHeight = static_cast<uint32_t>(block.height);
+            ctxSpec.marketValidated09 = tru09::active(ctxSpec.execHeight, tru09::MARKET_HEIGHT);
             ctxSpec.sender = inputSender;
             ctxSpec.state = &scratchState;
             ctxSpec.contractAddress = contractIdentity;
@@ -13391,6 +13449,7 @@ bool Blockchain::debug08B4D2TRunFixture(
 
     candidate.transactions.clear();
     candidate.transactions.push_back(coinbase);
+    tru_commit09::prepare(candidate);
     candidate.header.merkleRoot =
         computeMerkleRoot(candidate.transactions);
     candidate.header.nonce = 0;
@@ -21011,6 +21070,7 @@ std::string Blockchain::mineBlockGPUChain(P2PNode* p2p, const std::string& miner
         return "[GPUChain] ERROR: candidate exceeds 64 MiB after metadata";
     }
 
+    tru_commit09::prepare(newBlk);
     newBlk.header.merkleRoot = computeMerkleRoot(newBlk.transactions);
     if (newBlk.header.merkleRoot.empty()) {
         unregisterMiner(minerAddr);
@@ -21378,7 +21438,8 @@ Block Blockchain::mineBlockCPU(P2PNode* p2p, const std::string& minerAddr) {
     }
 
     try {
-        newBlk.header.merkleRoot = computeMerkleRoot(newBlk.transactions);
+        tru_commit09::prepare(newBlk);
+    newBlk.header.merkleRoot = computeMerkleRoot(newBlk.transactions);
     } catch (const std::exception& e) {
         Logger::log(std::string("[mineBlockCPU] THROW in computeMerkleRoot: ") + e.what());
         unregisterMiner(minerAddr);

@@ -492,7 +492,7 @@ std::string Transaction::serialize() const {
 // =============================================================================
 //              DESERIALIZE - WITH METADATA SUPPORT
 // =============================================================================
-Transaction Transaction::deserialize(const std::string& data) {
+Transaction Transaction::deserialize(const std::string& data, bool framedMetadata09) {
     Transaction tx;
     
     if (data.empty()) {
@@ -500,9 +500,28 @@ Transaction Transaction::deserialize(const std::string& data) {
         throw std::runtime_error("Empty transaction data");
     }
     
-    // Split by delimiter to get all parts
+    // Post-upgrade block metadata is committed. Read its length-framed
+    // transaction JSON before splitting fields: JSON strings may contain '|'.
+    // Historical callers retain the legacy decoder unless explicitly gated.
+    std::string fieldData09 = data;
+    if (framedMetadata09) {
+        const auto marker09 = data.find("|METADATA:");
+        if (marker09 != std::string::npos) {
+            const auto colon09 = data.find(':', marker09 + 10);
+            if (colon09 == std::string::npos) throw std::runtime_error("Missing metadata length");
+            const auto length09 = data.substr(marker09 + 10, colon09 - marker09 - 10);
+            if (length09.empty() || length09.find_first_not_of("0123456789") != std::string::npos)
+                throw std::runtime_error("Invalid metadata length");
+            const auto bytes09 = std::stoull(length09);
+            if (bytes09 != data.size() - colon09 - 1) throw std::runtime_error("Metadata length mismatch");
+            tx.tokenMetadata = nlohmann::json::parse(data.substr(colon09 + 1))
+                .get<std::unordered_map<std::string, nlohmann::json>>();
+            fieldData09.resize(marker09);
+        }
+    }
+    // Split the non-JSON fields by delimiter.
     std::vector<std::string> parts;
-    std::istringstream iss(data);
+    std::istringstream iss(fieldData09);
     std::string part;
     while (std::getline(iss, part, '|')) {
         parts.push_back(part);

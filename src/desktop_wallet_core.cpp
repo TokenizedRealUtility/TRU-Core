@@ -1,3 +1,6 @@
+#include "quantum_wallet_v1.h"
+#include "consensus09_activation.h"
+#include "tru_limits.h"
 #include "desktop_wallet_core.h"
 #include "wallet_encryption_v1.h"
 
@@ -1626,3 +1629,5 @@ std::string DesktopWalletCore::formatAmount(
         << (atoms % kAtomsPerTru);
     return out.str();
 }
+
+#include "quantum_desktop_wallet_v1.inc"

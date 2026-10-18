@@ -1,3 +1,6 @@
+#include "consensus09_activation.h"
+#include "wots_pq01.h"
+#include "market_lock09.h"
 #include "script_interpreter.h"
 #include "tru_limits.h"  // TRU Security Patch 12A resource ceilings
 #include "opcodes.h"
@@ -297,7 +300,7 @@ static bool IsSupportedOpcode(unsigned char opcode)
 // TRU Security Patch 12A ------------------------------------------------------
 // Deterministic parser/resource accounting shared by mempool + consensus.
 bool AnalyzeScriptResources(const std::vector<unsigned char>& script,
-                            ScriptResourceMetrics& metrics)
+                            ScriptResourceMetrics& metrics, uint32_t execHeight)
 {
     metrics = {};
     if (script.size() > tru_limits::MAX_SCRIPT_BYTES) {
@@ -365,6 +368,8 @@ bool AnalyzeScriptResources(const std::vector<unsigned char>& script,
                    opcode == OP_CHECKMULTISIGVERIFY) {
             sigCost = 20; // interpreter permits n <= 20
         }
+        if (opcode == OP_CHECKWOTSVERIFY && tru09::active(execHeight, tru09::WOTS_HEIGHT)) sigCost = tru09::WOTS_SIGOPS;
+        if (opcode == OP_MARKETVERIFY && tru09::active(execHeight, tru09::MARKET_HEIGHT)) sigCost = tru09::MARKET_SIGOPS;
         if (sigCost > UINT64_MAX - metrics.sigOpCost) return false;
         metrics.sigOpCost += sigCost;
     }
@@ -969,7 +974,7 @@ bool EvaluateScript(const std::vector<unsigned char>& script,
 {
 
     ScriptResourceMetrics preflightMetrics;
-    if (!AnalyzeScriptResources(script, preflightMetrics)) {
+    if (!AnalyzeScriptResources(script, preflightMetrics, ctx.execHeight)) {
         Logger::log("[EvaluateScript] script resource preflight failed");
         return false;
     }
@@ -2234,7 +2239,46 @@ bool EvaluateScript(const std::vector<unsigned char>& script,
                     // previously-invalid bytecode valid. These are intentionally
                     // not exposed by compileTextScript yet.
                     case OP_UPGRADE_NOP1:
+                    {
+                        if (!tru09::active(ctx.execHeight, tru09::WOTS_HEIGHT)) {
+                            if (!consumeGas(ctx, 1)) return false;
+                            break;
+                        }
+                        // Never use the legacy ECDSA simulation success path.
+                        if (!ctx.tx || ctx.sighash.size() != 32 || stack.size() < 4 ||
+                            !consumeGas(ctx, tru09::WOTS_GAS)) return false;
+                        const auto root = popStack(); const auto seed = popStack();
+                        const auto version = popStack(); const auto signature = popStack();
+                        if (!tru_pq01::verify(signature, version, seed, root, ctx.sighash)) return false;
+                        break;
+                    }
                     case OP_UPGRADE_NOP2:
+                    {
+                        if (!tru09::active(ctx.execHeight, tru09::MARKET_HEIGHT)) {
+                            if (!consumeGas(ctx, 1)) return false;
+                            break;
+                        }
+                        if (!ctx.tx || !ctx.marketValidated09 || ctx.inputIndex != 0 ||
+                            !ctx.scriptPubKey || script != *ctx.scriptPubKey ||
+                            stack.size() != 4 || !consumeGas(ctx, tru09::MARKET_GAS)) return false;
+                        tru_market09::Terms terms; tru_market09::Spend action;
+                        if (!tru_market09::parseLock(tru_market09::hex(script), terms) ||
+                            !tru_market09::spend(ctx.tx->vin[0].scriptSig, action)) return false;
+                        size_t end = 0;
+                        if (!tru_market09::outputs(*ctx.tx, terms, action, ctx.execHeight, end)) return false;
+                        if (action.mode == 2) {
+                            unsigned char sha[32], h160[20];
+                            SHA256(action.pubkey.data(), action.pubkey.size(), sha);
+                            RIPEMD160(sha, 32, h160);
+                            if (tru_market09::hex(std::vector<unsigned char>(h160,h160+20)) != terms.seller ||
+                                ctx.sighash.size()!=32 || action.signature.back()!=1) return false;
+                            const std::string msg(ctx.sighash.begin(),ctx.sighash.end());
+                            const std::vector<unsigned char> der(action.signature.begin(),action.signature.end()-1);
+                            if (!ECDSAKey::verifyCanonicalTransactionSignature(action.pubkey,msg,der)) return false;
+                        }
+                        for (unsigned n=0;n<4;++n) dropStack();
+                        break;
+                    }
                     case OP_UPGRADE_NOP3:
                     case OP_UPGRADE_NOP4:
                     case OP_UPGRADE_NOP5:
@@ -2254,18 +2298,8 @@ bool EvaluateScript(const std::vector<unsigned char>& script,
                             Logger::log("[EvaluateScript] OP_SIZE: Stack underflow");
                             return false;
                         }
-                        std::vector<unsigned char> top = stack.back();
-                        std::vector<unsigned char> size_bytes;
-                        uint32_t size = top.size();
-                        if (size <= 252)
-                        {
-                            size_bytes.push_back(static_cast<unsigned char>(size));
-                        }
-                        else
-                        {
-                            // For larger sizes, encode properly (not needed for signatures)
-                            size_bytes.push_back(static_cast<unsigned char>(size));
-                        }
+                        const uint64_t size = stack.back().size();
+                        const auto size_bytes = tru09::sizeValue(size, ctx.execHeight);
                         if (!pushStack(size_bytes)) return false;
                         if (!consumeGas(ctx, 1)) return false;
                         Logger::log("[EvaluateScript] OP_SIZE: Pushed size " + std::to_string(size));
@@ -2605,6 +2639,7 @@ std::vector<unsigned char> compileTextScript(const std::string &scriptText)
         {"OP_SWAP", OP_SWAP}, {"OP_TUCK", OP_TUCK},
         {"OP_CAT", OP_CAT}, {"OP_SUBSTR", OP_SUBSTR}, {"OP_LEFT", OP_LEFT},
         {"OP_RIGHT", OP_RIGHT}, {"OP_SIZE", OP_SIZE},
+        {"OP_CHECKWOTSVERIFY", OP_CHECKWOTSVERIFY}, {"OP_MARKETVERIFY", OP_MARKETVERIFY},
         {"OP_INVERT", OP_INVERT}, {"OP_AND", OP_AND}, {"OP_OR", OP_OR},
         {"OP_XOR", OP_XOR}, {"OP_EQUAL", OP_EQUAL}, {"OP_EQUALVERIFY", OP_EQUALVERIFY},
         {"OP_1ADD", OP_1ADD}, {"OP_1SUB", OP_1SUB}, {"OP_2MUL", OP_2MUL},
