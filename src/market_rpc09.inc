@@ -1,7 +1,7 @@
 // Included by rpc_server.cpp after makeResult/makeError and all core helpers.
 static json consensusInfo09(Blockchain& chain,int id) {
     const int tip=chain.getBestTipHeight();const uint32_t h=tip<0?0:static_cast<uint32_t>(tip)+1;
-    return makeResult(id,json{{"core_version",tru_version::compiledCoreVersion()},{"release_status","mainnet-0.08.5"},{"activation_height",tru09::ACTIVATION_HEIGHT==tru09::NEVER?json(nullptr):json(tru09::ACTIVATION_HEIGHT)},
+    return makeResult(id,json{{"core_version",tru_version::compiledCoreVersion()},{"release_status",std::string("mainnet-")+tru_version::compiledCoreVersion()},{"activation_height",tru09::ACTIVATION_HEIGHT==tru09::NEVER?json(nullptr):json(tru09::ACTIVATION_HEIGHT)},
         {"candidate_height",h},{"active",tru09::active(h)},
         {"opcodes",{{"OP_CHECKWOTSVERIFY","0xbb"},{"OP_MARKETVERIFY","0xbc"},{"OP_SIZE","0x82"}}},
         {"wots",{{"version",1},{"algorithm","WOTS+ SHA2 n32 w16 len67 L-tree"},{"signature_bytes",2144},{"gas",tru09::WOTS_GAS},{"sigop_cost",tru09::WOTS_SIGOPS}}},

@@ -3,6 +3,7 @@
 #define BLOCKCHAIN_H
 
 #include <string>
+#include "fork_recovery_policy.h"
 #include "tx_relay_queue_v1.h"
 #include <chrono>
 #include <unordered_map>
@@ -142,6 +143,7 @@ public:
     //Block getBlockByHeight(int height) const;
     std::string getLatestCoinbaseTxid() const;
 
+    nlohmann::json getForkRecoveryInfo() const;
     int getBestTipHeight() const;
     std::string getBestTipHash() const;
     void getBestTipSnapshot(std::string& hashOut, int& heightOut) const;
@@ -370,6 +372,12 @@ public:
     //static bool looksLikeTokenIssuerScript(const std::string& scriptHex);
     uint32_t getMedianTimePast(const std::string& parentHash, int candidateHeight) const;
 private:
+    uint32_t validationForkHeight_{0}; // only set on private reorg sandboxes
+    mutable std::mutex forkRecoveryStatusMutex_;
+    nlohmann::json forkRecoveryStatus_{{"state", "idle"}, {"reason", "No recovery event recorded this session"}};
+    void setForkRecoveryStatus(const std::string& state, const std::string& reason,
+        uint64_t localHeight, uint64_t peerHeight, uint64_t forkHeight);
+
     bool isChainValidLockedPerf02() const;
     mutable std::mutex statusAuditMutex_;
     mutable std::mutex auditRunMutexPerf05_;
@@ -494,6 +502,8 @@ private:
         std::string mempoolPolicy;
     };
 
+    bool pruneBlockingLowerWorkSideDescendantsWithSubmissionLockHeld(
+        const ReorgPlan& plan, size_t& pruned, std::string& reason, bool allowPrune);
     bool buildReorgPlanLocked(const std::string& candidateTipHash,
                               ReorgPlan& planOut,
                               std::string& reasonOut) const;

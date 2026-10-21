@@ -5042,7 +5042,8 @@ static json handleGetChainInfo(Blockchain &chain,int id) {
         {"chainSize", static_cast<int64_t>(s.height) + 1}, {"difficulty", s.bits},
         {"tip_available", s.tipAvailable}, {"chainValid", perf05AuditBoolean(s)},
         {"chainvalid_scope", "last_explicit_audit_at_same_tip"},
-        {"chain_audit", perf05AuditInfo(s)}});
+        {"chain_audit", perf05AuditInfo(s)},
+        {"fork_recovery", chain.getForkRecoveryInfo()}});
 }
 static json handleAuditChainPerf05(Blockchain& chain, int id) {
     try {

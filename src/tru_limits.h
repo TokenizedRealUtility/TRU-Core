@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include "fork_recovery_policy.h"
 
 // one source of truth for TRU block/network size limits.
 // Keep the hard consensus limit separate from the miner/template assembly
@@ -70,7 +71,8 @@ inline constexpr std::uint32_t P2P_PEER_REAP_INTERVAL_SECONDS = 5;
 // untrusted-source side-fork quotas.
 // Global side-pool bounds remain in blockchain.cpp. These source quotas ensure
 // one peer IP (or the RPC/legacy-network bucket) cannot monopolize that pool.
-inline constexpr std::size_t MAX_SIDE_BLOCKS_PER_UNTRUSTED_SOURCE = 64;
+inline constexpr std::size_t MAX_SIDE_BLOCKS_PER_UNTRUSTED_SOURCE =
+    tru_fork_recovery::MAX_SIDE_BLOCKS_PER_SOURCE;
 inline constexpr std::size_t MAX_SIDE_BYTES_PER_UNTRUSTED_SOURCE =
     64ULL * 1024ULL * 1024ULL;
 inline constexpr std::size_t MAX_SIDE_CHILDREN_PER_PARENT_PER_UNTRUSTED_SOURCE = 2;

@@ -92,10 +92,10 @@ extern bool verifyZeroKnowledgeProof(const Transaction &tx);
 // RPC block templates and P2P transport cannot silently drift apart.
 static constexpr size_t MAX_BLOCK_BYTES = tru_limits::MAX_BLOCK_BYTES;
 // hard bounds for attacker-supplied side-chain data.
-static constexpr int MAX_SIDE_FORK_DEPTH = 100;
-static constexpr int MAX_SIDE_BRANCH_LENGTH = 100;
+static constexpr int MAX_SIDE_FORK_DEPTH = tru_fork_recovery::MAX_DISCONNECT_BLOCKS;
+static constexpr int MAX_SIDE_BRANCH_LENGTH = tru_fork_recovery::MAX_CONNECT_BLOCKS;
 static constexpr size_t MAX_SIDE_CHILDREN_PER_PARENT = 4;
-static constexpr size_t MAX_INDEXED_SIDE_BLOCKS = 256;
+static constexpr size_t MAX_INDEXED_SIDE_BLOCKS = tru_fork_recovery::MAX_INDEXED_SIDE_BLOCKS;
 static constexpr size_t MAX_SIDE_POOL_BYTES = 256ULL * 1024ULL * 1024ULL;
 
 // runtime stale-side pruning is deliberately bounded.
@@ -434,7 +434,7 @@ static constexpr size_t MAX_REORG_CONNECT_BYTES =
     256ULL * 1024ULL * 1024ULL;
 static constexpr size_t MAX_REORG_TOTAL_BYTES =
     MAX_REORG_DISCONNECT_BYTES + MAX_REORG_CONNECT_BYTES;
-static constexpr size_t MAX_REORG_PENDING_RECORD_BYTES = 64ULL * 1024ULL;
+static constexpr size_t MAX_REORG_PENDING_RECORD_BYTES = tru_fork_recovery::MAX_PENDING_RECORD_BYTES;
 
 enum class UndoJournalProbe {
     Absent,
@@ -2190,21 +2190,74 @@ bool Blockchain::validateConsensus09TransactionUnlocked(const Transaction& tx, u
         const std::unordered_set<std::string>& seenIds) const {
     if (!tru09::active(height, tru09::MARKET_HEIGHT)) return true;
     try {
+        // FORK-RECOVERY-02: parent authority comes from this chain instance's
+        // live UTXO set. Validation sandboxes intentionally have no chain[].
+        // Their canonical prefix is read from the consistent private snapshot;
+        // already-replayed candidate parents come from their own active index.
+        std::unordered_map<uint32_t, Block> parentCache;
+        size_t parentCacheBytes = 0;
         const auto read = [&](size_t i, Transaction& parent) {
-            if (i>=tx.vin.size() || tx.vin[i].vout<0) return false;
+            if (i >= tx.vin.size() || tx.vin[i].vout < 0) return false;
             UTXO live;
-            if (!utxoSet.getUTXO(tx.vin[i].txid, static_cast<uint32_t>(tx.vin[i].vout), live)) return false;
-            const auto b=std::lower_bound(chain.begin(),chain.end(),live.createdAtHeight,
-                [](const Block& b,uint32_t h){return b.height<h;});
-            if(b==chain.end() || b->height!=live.createdAtHeight) return false;
-            for(const auto& candidate:b->transactions) if(candidate.txid==tx.vin[i].txid){
-                const size_t n=static_cast<size_t>(tx.vin[i].vout);
-                if(n>=candidate.vout.size() || candidate.vout[n].scriptPubKey!=live.scriptPubKey ||
-                   candidate.vout[n].amount!=live.amount) return false;
-                // Only the spent output and adjacent token record are needed;
-                // copying a 4 MiB parent for every input would amplify work.
-                parent.vout.resize(n+1); parent.vout[n]=candidate.vout[n];
-                if(n) parent.vout[n-1]=candidate.vout[n-1];
+            if (!utxoSet.getUTXO(tx.vin[i].txid,
+                    static_cast<uint32_t>(tx.vin[i].vout), live)) return false;
+            const Block* parentBlock = nullptr;
+            bool snapshotParent = false;
+            if (!validationOnly_) {
+                const auto b=std::lower_bound(chain.begin(),chain.end(),live.createdAtHeight,
+                    [](const Block& b,uint32_t h){return b.height<h;});
+                if (b == chain.end() || b->height != live.createdAtHeight) return false;
+                parentBlock = &*b;
+            } else {
+                const auto mapped = heightToHash.find(live.createdAtHeight);
+                if (mapped != heightToHash.end()) {
+                    const auto indexed = blockIndex.find(mapped->second);
+                    if (indexed == blockIndex.end() ||
+                        indexed->second.height != static_cast<int>(live.createdAtHeight) ||
+                        indexed->second.block.blockHash != mapped->second) return false;
+                    parentBlock = &indexed->second.block;
+                } else {
+                    // Never consult the abandoned suffix in a snapshot. Above
+                    // the captured fork height, only replayed index entries own
+                    // parent identity; an absent entry must fail closed.
+                    if (!live.createdAtHeight ||
+                        live.createdAtHeight > validationForkHeight_) return false;
+                    auto cached = parentCache.find(live.createdAtHeight);
+                    if (cached == parentCache.end()) {
+                        std::string parentHash, payload;
+                        if (!dbStorage.getWithDataChecksum(
+                                "height:" + std::to_string(live.createdAtHeight), parentHash) ||
+                            parentHash.size() != 64 || !isValidHex(parentHash) ||
+                            !dbStorage.getWithDataChecksum("block:" + parentHash, payload) ||
+                            payload.size() > MAX_BLOCK_BYTES) return false;
+                        if (parentCache.size() >= tru_fork_recovery::PARENT_CACHE_ENTRIES ||
+                            payload.size() > tru_fork_recovery::PARENT_CACHE_BYTES - parentCacheBytes) {
+                            parentCache.clear(); parentCacheBytes = 0;
+                        }
+                        Block decoded = Block::deserialize(payload);
+                        if (decoded.height != static_cast<int>(live.createdAtHeight) ||
+                            decoded.blockHash != parentHash || decoded.computeHash() != parentHash ||
+                            computeMerkleRoot(decoded.transactions) != decoded.header.merkleRoot) return false;
+                        parentCacheBytes += payload.size();
+                        cached = parentCache.emplace(live.createdAtHeight, std::move(decoded)).first;
+                    }
+                    parentBlock = &cached->second;
+                    snapshotParent = true;
+                }
+            }
+            for (const auto& candidate : parentBlock->transactions) {
+                if (candidate.txid != tx.vin[i].txid) continue;
+                const size_t n = static_cast<size_t>(tx.vin[i].vout);
+                if (n >= candidate.vout.size() ||
+                    candidate.vout[n].scriptPubKey != live.scriptPubKey ||
+                    candidate.vout[n].amount != live.amount) return false;
+                if (snapshotParent) {
+                    auto checked = candidate; checked.computeTxId();
+                    if (checked.txid != candidate.txid) return false;
+                }
+                // The spent output and adjacent committed token record suffice.
+                parent.vout.resize(n+1); parent.vout[n] = candidate.vout[n];
+                if (n) parent.vout[n-1] = candidate.vout[n-1];
                 return true;
             }
             return false;
@@ -2426,6 +2479,7 @@ void Blockchain::syncWithPeers(
     const int maxConsecutiveFailures = 5;
     int consecutiveFailures = 0;
     bool wasFullySynced = false;
+    size_t syncPeerRotation = 0;
 
     auto waitBriefly = [&](int milliseconds) {
         const int slices = std::max(1, milliseconds / 100);
@@ -2487,6 +2541,7 @@ void Blockchain::syncWithPeers(
             // sessions. One common deadline avoids N sequential 10s waits.
             // These observations select a download source, NEVER a valid chain.
             uint64_t highestPeerHeight = 0;
+            std::vector<std::pair<std::shared_ptr<PeerConnection>, uint64_t>> usablePeers;
             std::shared_ptr<PeerConnection> bestPeer;
             std::vector<std::pair<std::shared_ptr<PeerConnection>, uint64_t>> requested;
             for (const auto& peer : peers) {
@@ -2514,19 +2569,30 @@ void Blockchain::syncWithPeers(
                     continue;
                 }
                 const auto peerHeight = peer->getPeerHeight();
-                if (peerHeight > 0 && (!bestPeer || peerHeight > highestPeerHeight)) {
-                    highestPeerHeight = peerHeight;
-                    bestPeer = peer;
-                }
+                if (peerHeight > 0) usablePeers.emplace_back(peer, peerHeight);
             }
 
+            // Fairly inspect every eligible peer, including shorter branches
+            // with potentially greater work. Height orders downloads only.
+            std::sort(usablePeers.begin(), usablePeers.end(), [](const auto& a, const auto& b) {
+                if (a.second != b.second) return a.second > b.second;
+                return a.first->getIp() < b.first->getIp();
+            });
+            if (!usablePeers.empty()) {
+                const auto& chosen = usablePeers[syncPeerRotation % usablePeers.size()];
+                ++syncPeerRotation;
+                bestPeer = chosen.first; highestPeerHeight = chosen.second;
+            }
             if (!bestPeer || highestPeerHeight == 0) {
                 publishStatus("Connected peers have not reported usable heights");
                 waitBriefly(3000);
                 continue;
             }
 
-            const uint64_t localHeight = static_cast<uint64_t>(getBestTipHeight());
+            std::string discoveryTipHash;
+            int discoveryTipHeight = 0;
+            getBestTipSnapshot(discoveryTipHash, discoveryTipHeight);
+            const uint64_t localHeight = static_cast<uint64_t>(std::max(discoveryTipHeight, 0));
             const uint64_t overlapHeight = std::min(localHeight, highestPeerHeight);
             uint64_t forkHeight = overlapHeight;
             bool diverged = false;
@@ -2554,34 +2620,40 @@ void Blockchain::syncWithPeers(
 
                 if (peerOverlap.blockHash != localOverlapHash) {
                     diverged = true;
-                    bool foundFork = false;
-                    uint64_t probe = overlapHeight;
-                    int walked = 0;
-
-                    while (probe > 0 && walked <= MAX_SIDE_FORK_DEPTH) {
-                        Block peerProbe;
-                        if (!requestPeerBlock(bestPeer, probe, peerProbe)) break;
-                        const std::string localHash = getBlockHashByHeight(probe);
-                        if (!localHash.empty() && peerProbe.blockHash == localHash) {
-                            forkHeight = probe;
-                            foundFork = true;
-                            break;
-                        }
-                        --probe;
-                        ++walked;
-                    }
-
-                    if (!foundFork) {
+                    const auto ancestor = tru_fork_recovery::findAncestor(
+                        localHeight, highestPeerHeight, MAX_SIDE_FORK_DEPTH,
+                        [&](uint64_t h, std::string& hash) {
+                            hash = getBlockHashByHeight(h); return !hash.empty();
+                        },
+                        [&](uint64_t h, std::string& hash) {
+                            Block probe;
+                            if (!requestPeerBlock(bestPeer, h, probe)) return false;
+                            hash = probe.blockHash; return true;
+                        });
+                    if (ancestor.state != tru_fork_recovery::Discovery::Found) {
+                        const bool beyond = ancestor.state == tru_fork_recovery::Discovery::BeyondWindow;
+                        setForkRecoveryStatus(beyond ? "recovery_required" : "discovery_failed",
+                            beyond ? "No common ancestor inside supported recovery window; do not choose by height" :
+                                     "Ancestor discovery could not obtain local/peer block identity",
+                            localHeight, highestPeerHeight, 0);
                         bestPeer->noteSyncFailure();
-                        Logger::log(
-                            "[MULTINODE-01B] FAIL-CLOSED: no common ancestor within " +
-                            std::to_string(MAX_SIDE_FORK_DEPTH) +
-                            " blocks; no side activation attempted");
-                        publishStatus("Fork exceeds bounded automatic-reorg discovery depth");
-                        ++consecutiveFailures;
-                        waitBriefly(5000);
-                        continue;
+                        Logger::log("[FORK-RECOVERY-02] discovery blocked peer=" + bestPeer->getIp() +
+                            " probes=" + std::to_string(ancestor.probes) +
+                            " maxDisconnect=" + std::to_string(MAX_SIDE_FORK_DEPTH));
+                        publishStatus(beyond ? "Recovery required: fork exceeds supported window" :
+                                              "Fork discovery unavailable; retrying another peer");
+                        ++consecutiveFailures; waitBriefly(2000); continue;
                     }
+                    std::string recheckedTipHash; int recheckedTipHeight = 0;
+                    getBestTipSnapshot(recheckedTipHash, recheckedTipHeight);
+                    if (recheckedTipHash != discoveryTipHash || recheckedTipHeight != discoveryTipHeight) {
+                        setForkRecoveryStatus("retry_tip_changed", "Local tip changed during discovery",
+                            localHeight, highestPeerHeight, ancestor.height);
+                        waitBriefly(100); continue;
+                    }
+                    forkHeight = ancestor.height;
+                    setForkRecoveryStatus("fetching_branch", "Contiguous intake; activation still requires full state validation and greater work",
+                        localHeight, highestPeerHeight, forkHeight);
 
                     Logger::log(
                         "[MULTINODE-01B] Divergence detected localHeight=" +
@@ -2598,6 +2670,8 @@ void Blockchain::syncWithPeers(
             // we are synchronized with this peer. Equal height is not enough unless
             // the exact overlap block hash matched above.
             if (!diverged && highestPeerHeight <= localHeight) {
+                setForkRecoveryStatus("synchronized_with_peer", "Overlap block identity matches selected peer",
+                    localHeight, highestPeerHeight, overlapHeight);
                 bestPeer->noteSyncSuccess();
                 consecutiveFailures = 0;
                 publishStatus("Fully synchronized at height " + std::to_string(localHeight));
@@ -2658,6 +2732,8 @@ void Blockchain::syncWithPeers(
                     // directly and never invents a second reorg executor.
                     if (!submitBlockFromNetwork(block, "peer:" + bestPeer->getIp())) {
                         bestPeer->noteSyncFailure();
+                        setForkRecoveryStatus("admission_rejected", "Authoritative branch admission rejected; inspect validation logs",
+                            getBestTipHeight(), highestPeerHeight, forkHeight);
                         Logger::log(
                             "[MULTINODE-01B] Authoritative block admission rejected height " +
                             std::to_string(h));
@@ -7398,17 +7474,9 @@ bool Blockchain::buildReorgPlanLocked(
             return false;
         }
 
-        // 4A cannot yet atomically demote an active block while preserving
-        // existing side-child accounting. Refuse such a plan before PREPARED
-        // can be written; 4B must implement/reserve that transition first.
-        auto sideChildIt = sideChildCount_.find(cursor);
-        if (sideChildIt != sideChildCount_.end() &&
-            sideChildIt->second != 0) {
-            reasonOut =
-                "disconnect suffix contains block with indexed side children; "
-                "4B demotion/reservation policy required";
-            return false;
-        }
+        // FORK-RECOVERY-02: full validation precedes bounded lower-work
+        // blocking-cache cleanup. The unchanged executor still requires an
+        // unblocked suffix before any live disconnect.
 
         size_t blockBytes = 0;
         try {
@@ -9864,6 +9932,13 @@ bool Blockchain::preflightReorgCandidateWithSubmissionLockHeld(
         }
     }
 
+    // Do not spend a sandbox budget on a candidate that cannot displace a
+    // cached blocker with equal/greater header work. This is ordering only;
+    // no branch is activated or discarded by this preliminary comparison.
+    size_t ignoredPruned = 0;
+    if (!pruneBlockingLowerWorkSideDescendantsWithSubmissionLockHeld(
+            before, ignoredPruned, reasonOut, false)) return false;
+
     // Before the expensive sandbox, prove the exact redo/undo sources exist on
     // disk. This is deliberately outside mtx: the caller owns submission
     // ordering, and LevelDB I/O/deserialization must not hold the chain lock.
@@ -9953,6 +10028,25 @@ bool Blockchain::preflightReorgCandidateWithSubmissionLockHeld(
             Logger::log("[Patch08B.4A] PREFLIGHT REJECT: " + reasonOut);
             return false;
         }
+    }
+
+    std::string cleanupWitness, cleanupWitnessReason;
+    if (!buildCandidateValidationCacheWitness(before, cleanupWitness, cleanupWitnessReason) ||
+        cleanupWitness != validationCacheWitness) {
+        reasonOut="candidate state changed before blocking-cache cleanup: "+cleanupWitnessReason;
+        return false;
+    }
+    size_t prunedBlockingSide = 0;
+    if (!pruneBlockingLowerWorkSideDescendantsWithSubmissionLockHeld(
+            before, prunedBlockingSide, reasonOut, true)) {
+        Logger::log("[FORK-RECOVERY-02] Candidate cleanup deferred: " + reasonOut);
+        return false;
+    }
+    if (prunedBlockingSide) {
+        // Never rebind a pre-cleanup validation proof to a new DB generation.
+        // The caller may make one new, normally budgeted validation attempt.
+        reasonOut="FORK-RECOVERY-02: blocking cache cleared; fresh validation required";
+        return false;
     }
 
     ReorgPlan after;
@@ -10050,7 +10144,10 @@ bool Blockchain::prepareReorgTransactionWithSubmissionLockHeld(
 
     if (!preflightReorgCandidateWithSubmissionLockHeld(
             candidateTipHash, planOut, reasonOut)) {
-        return false;
+        if (reasonOut != "FORK-RECOVERY-02: blocking cache cleared; fresh validation required")
+            return false;
+        if (!preflightReorgCandidateWithSubmissionLockHeld(candidateTipHash, planOut, reasonOut))
+            return false;
     }
     if (!persistPreparedReorgMarker(planOut, reasonOut)) {
         return false;
@@ -14759,9 +14856,9 @@ bool Blockchain::validateCandidateBranchStatefulImpl(
         }
 
         // Copy a LevelDB-consistent raw snapshot while block submission remains
-        // serialized. block:* payloads are intentionally omitted: the sandbox's
-        // bounded in-memory ancestry window supplies all block data required by
-        // MTP and integer retarget validation.
+        // serialized. Canonical prefix block payloads are required by activated transaction
+        // parent validation. Only needed rollback journals are retained; snapshot
+        // copying remains streamed in bounded batches.
         bool snapshotCopied = false;
         bool snapshotTipMatches = false;
         snapshotDestination =
@@ -14769,7 +14866,7 @@ bool Blockchain::validateCandidateBranchStatefulImpl(
         snapshotCopied =
             dbStorage.copyRawSnapshotTo(
                 *snapshotDestination,
-                true,
+                false, // include canonical parent block payloads for PQ01/market validation
                 &requiredUndoKeys);
 
         if (snapshotCopied) {
@@ -14882,7 +14979,8 @@ bool Blockchain::validateCandidateBranchStatefulImpl(
                     sandbox.bestTipHeight.store(forkHeight);
                     sandbox.difficulty = forkWindowIt->second.block.header.bits;
                     sandbox.contractStates = std::move(contractStateSnapshot);
-                    sandbox.chain.clear(); // validation-only mode never needs chain[]
+                    sandbox.chain.clear(); // parents resolved from private index/snapshot
+                    sandbox.validationForkHeight_ = static_cast<uint32_t>(forkHeight);
                     sandbox.blockIndex.clear();
                     sandbox.heightToHash.clear();
 
@@ -15813,7 +15911,7 @@ bool Blockchain::indexSideChainBlock(
         return true;
     };
 
-    // O(1) counters + <=100-link fork walk. No blockIndex-wide scan.
+    // O(1) counters plus policy-bounded fork walk. No blockIndex-wide scan.
     int preflightForkHeight = 0;
     {
         std::shared_lock<std::shared_mutex> lock(mtx);
@@ -16453,7 +16551,7 @@ bool Blockchain::pruneRuntimeStaleSideBlocksWithSubmissionLockHeld(
 
     // 4D.1 v1a deliberately does NOT call the general fork finder in the
     // per-block scan. Bound every ancestry walk to the side-branch policy
-    // window so accepted-tip latency has an explicit O(256 * 100) ceiling.
+    // window so accepted-tip latency has an explicit O(MAX_INDEXED_SIDE_BLOCKS * MAX_SIDE_BRANCH_LENGTH) ceiling.
     auto findActiveForkHeightBoundedLocked =
         [&](const std::string& startHash, int& forkHeightOut) -> bool {
             std::string cursor = startHash;
@@ -16484,8 +16582,8 @@ bool Blockchain::pruneRuntimeStaleSideBlocksWithSubmissionLockHeld(
     std::vector<CandidateIdentity> eligible;
     eligible.reserve(sideBlockSource_.size());
 
-    // Discovery is bounded by MAX_INDEXED_SIDE_BLOCKS (256), and each fork
-    // walk is bounded by MAX_SIDE_BRANCH_LENGTH (100). Only leaves can be
+    // Discovery is bounded by MAX_INDEXED_SIDE_BLOCKS, and each fork
+    // walk is bounded by MAX_SIDE_BRANCH_LENGTH. Only leaves can be
     // removed, so runtime pruning can never orphan an indexed side child.
     for (const auto& [hash, sourceKey] : sideBlockSource_) {
         (void)sourceKey;
@@ -19734,6 +19832,8 @@ bool Blockchain::maybeActivateIncomingWinningSideTipWithSubmissionLockHeld(
     // state transition and no reorg planning/durable marker work is attempted.
     if (!productionAutomaticReorgGateEnabled()) {
         reasonOut = "production automatic reorg gate is OFF";
+        setForkRecoveryStatus("automatic_reorg_disabled", "Set [network] automaticReorg=1 to opt in to validated work-based reorganization",
+            getBestTipHeight(), 0, 0);
         return true;
     }
 
@@ -19855,6 +19955,7 @@ bool Blockchain::maybeActivateIncomingWinningSideTipWithSubmissionLockHeld(
         reasonOut =
             "strict winner side block accepted; production prepare deferred/rejected: " +
             prepareReason;
+        setForkRecoveryStatus("candidate_deferred", reasonOut, getBestTipHeight(), 0, 0);
         Logger::log(
             "[Patch08B.4D.9B] DEFER candidate=" + candidateTipHash +
             " strictWinner=YES sideAccepted=YES mutationStarted=NO marker=ABSENT "
@@ -19867,6 +19968,7 @@ bool Blockchain::maybeActivateIncomingWinningSideTipWithSubmissionLockHeld(
     if (executePreparedReorgWithSubmissionLockHeld(
             candidateTipHash, executeReason, mutationStarted)) {
         reasonOut = executeReason;
+        setForkRecoveryStatus("activated", "Validated greater-work branch committed", getBestTipHeight(), 0, 0);
         Logger::log(
             "[Patch08B.4D.9B] AUTO ACTIVATION PASS candidate=" +
             candidateTipHash + " " + executeReason);
@@ -26129,4 +26231,139 @@ nlohmann::json Blockchain::getAddressHistoryV1(const std::string& address, int c
     std::shared_lock<std::shared_mutex> lock(mtx);
     return tru_address_history_v1::collect(chain, address, count, maxBlocks,
         truHistoryAddressOf, [](const std::string& s) { return hexDecode(s); });
+}
+
+// Only invoked after full candidate-state validation, before PREPARED exists.
+// Discard recomputable, strictly lower-work SIDE cache subtrees attached to the
+// losing active suffix. No active block, UTXO, wallet, or undo record is erased.
+bool Blockchain::pruneBlockingLowerWorkSideDescendantsWithSubmissionLockHeld(
+        const ReorgPlan& plan, size_t& pruned, std::string& reason, bool allowPrune) {
+    pruned = 0;
+    std::unique_lock<std::shared_mutex> lock(mtx);
+    if (validationOnly_ || reorgExecutionHalted_.load() ||
+        bestTipHash != plan.originalTipHash || bestTipHeight.load() != plan.originalTipHeight) {
+        reason = "blocking-side cleanup has no stable live transition base"; return false;
+    }
+    const auto candidate = blockIndex.find(plan.candidateTipHash);
+    if (candidate == blockIndex.end() || candidate->second.chainWork != plan.candidateChainWork ||
+        candidate->second.chainWork <= plan.originalChainWork ||
+        sideBlockCount_ > MAX_INDEXED_SIDE_BLOCKS || sidePoolBytes_ > MAX_SIDE_POOL_BYTES ||
+        sideBlockSource_.size() != sideBlockCount_) {
+        reason = "blocking-side cleanup candidate/accounting mismatch"; return false;
+    }
+    std::unordered_set<std::string> losing(plan.disconnectHashes.begin(),plan.disconnectHashes.end());
+    std::unordered_set<std::string> winning(plan.connectHashes.begin(),plan.connectHashes.end());
+    struct Victim { std::string hash,parent,source;size_t bytes; };
+    std::vector<Victim> victims;
+    std::unordered_map<std::string,size_t> removalsByParent;
+    size_t bytes = 0;
+    for (const auto& owned : sideBlockSource_) {
+        auto entry = blockIndex.find(owned.first);
+        if (entry == blockIndex.end() || !isValidSideSourceKey(owned.second)) {
+            reason = "blocking-side cleanup ownership/index mismatch"; return false;
+        }
+        const auto active = heightToHash.find(entry->second.height);
+        if (active != heightToHash.end() && active->second == owned.first) {
+            reason = "blocking-side cleanup encountered active ownership"; return false;
+        }
+        std::string cursor = entry->second.parentHash;
+        bool attached = false, terminated = false;
+        for (int steps=0;steps<=MAX_SIDE_BRANCH_LENGTH;++steps) {
+            if (losing.count(cursor)) { attached=true;terminated=true;break; }
+            const auto parent = blockIndex.find(cursor);
+            if (parent == blockIndex.end()) break;
+            const auto mapped = heightToHash.find(parent->second.height);
+            if (mapped != heightToHash.end() && mapped->second == cursor) { terminated=true;break; }
+            cursor = parent->second.parentHash;
+        }
+        if (!terminated) { reason="blocking-side cleanup ancestry unavailable";return false; }
+        if (!attached) continue;
+        if (winning.count(owned.first) || entry->second.chainWork >= plan.candidateChainWork) {
+            reason="blocking side subtree has equal/greater header work; retained for validation";return false;
+        }
+        if (!allowPrune) continue; // ordering check only; no cache/state writes
+        std::string marker,raw;
+        const std::string expected = std::string(SIDE_RULES_VERSION)+"|"+
+            std::to_string(entry->second.height)+"|"+entry->second.parentHash+"|"+owned.second;
+        if (!dbStorage.getWithDataChecksum("sideblock:"+owned.first,marker) || marker!=expected ||
+            !dbStorage.getWithDataChecksum("block:"+owned.first,raw) || raw.empty() ||
+            raw.size()>MAX_BLOCK_BYTES || raw!=entry->second.block.serialize() ||
+            entry->second.block.computeHash()!=owned.first ||
+            computeMerkleRoot(entry->second.block.transactions)!=entry->second.block.header.merkleRoot ||
+            raw.size()>MAX_SIDE_POOL_BYTES-bytes) {
+            reason="blocking-side cleanup durable payload/ownership witness failed";return false;
+        }
+        bytes+=raw.size();++removalsByParent[entry->second.parentHash];
+        victims.push_back({owned.first,entry->second.parentHash,owned.second,raw.size()});
+    }
+    if (victims.empty()) return true;
+    // During execute preflight a PREPARED marker may exist, but no new blockers
+    // may be pruned then. Submission ordering should make this path unreachable.
+    std::string pending;bool found=false;
+    if (!dbStorage.getRaw(REORG_PENDING_KEY,pending,found) || found) {
+        reason="blocking-side cleanup refused while durable reorg intent exists";return false;
+    }
+    if (sideBlockCount_<victims.size() || sidePoolBytes_<bytes) {
+        reason="blocking-side cleanup global accounting underflow";return false;
+    }
+    // Prepare complete counter replacements before the atomic durable delete;
+    // post-commit reconciliation uses only swaps, erases and scalar assignments.
+    auto children=sideChildCount_;
+    auto counts=sideBlockCountBySource_;
+    auto sourceBytes=sidePoolBytesBySource_;
+    auto sourceChildren=sideChildCountBySource_;
+    for (const auto& v:victims) {
+        const auto actualChildren=sideChildCount_.find(v.hash);
+        const auto removedChildren=removalsByParent.find(v.hash);
+        const size_t a=actualChildren==sideChildCount_.end()?0:actualChildren->second;
+        const size_t b=removedChildren==removalsByParent.end()?0:removedChildren->second;
+        if (a!=b) { reason="blocking-side cleanup would leave a dangling child";return false; }
+        auto child=children.find(v.parent);auto count=counts.find(v.source);auto size=sourceBytes.find(v.source);
+        auto owners=sourceChildren.find(v.source);
+        if (child==children.end() || !child->second || count==counts.end() || !count->second ||
+            size==sourceBytes.end() || size->second<v.bytes || owners==sourceChildren.end()) {
+            reason="blocking-side cleanup counter witness failed";return false;
+        }
+        auto nested=owners->second.find(v.parent);
+        if (nested==owners->second.end() || !nested->second) {
+            reason="blocking-side cleanup source-child witness failed";return false;
+        }
+        if (!--child->second) children.erase(child);
+        if (!--count->second) counts.erase(count);
+        size->second-=v.bytes;if (!size->second)sourceBytes.erase(size);
+        if (!--nested->second)owners->second.erase(nested);
+        if (owners->second.empty())sourceChildren.erase(owners);
+    }
+    leveldb::WriteBatch batch;
+    for (const auto& v:victims) { batch.Delete("sideblock:"+v.hash);batch.Delete("block:"+v.hash); }
+    if (!dbStorage.putBatch(batch)) { reason="blocking-side cleanup atomic delete failed";return false; }
+    children.swap(sideChildCount_);counts.swap(sideBlockCountBySource_);
+    sourceBytes.swap(sidePoolBytesBySource_);sourceChildren.swap(sideChildCountBySource_);
+    for (const auto& v:victims) { blockIndex.erase(v.hash);sideBlockSource_.erase(v.hash); }
+    sideBlockCount_-=victims.size();sidePoolBytes_-=bytes;pruned=victims.size();
+    Logger::log("[FORK-RECOVERY-02] Pruned authenticated lower-work blocking side cache count="+
+        std::to_string(pruned)+" activeStateChanged=NO undoDeleted=NO");
+    return true;
+}
+
+// FORK-RECOVERY-02: status is diagnostic node policy, never chain validity.
+void Blockchain::setForkRecoveryStatus(const std::string& state, const std::string& reason,
+        uint64_t localHeight, uint64_t peerHeight, uint64_t forkHeight) {
+    std::lock_guard<std::mutex> lock(forkRecoveryStatusMutex_);
+    forkRecoveryStatus_ = {{"state", state}, {"reason", reason.substr(0, 1024)},
+        {"local_height", localHeight}, {"peer_height", peerHeight}, {"fork_height", forkHeight}};
+}
+nlohmann::json Blockchain::getForkRecoveryInfo() const {
+    nlohmann::json status;
+    { std::lock_guard<std::mutex> lock(forkRecoveryStatusMutex_); status = forkRecoveryStatus_; }
+    status["automatic_reorg_enabled"] = productionAutomaticReorgGateEnabled();
+    status["fail_stop_bridge_ready"] = reorgFailStopShutdownReady();
+    status["execution_halted"] = reorgExecutionHalted_.load(std::memory_order_acquire);
+    status["max_disconnect_blocks"] = MAX_SIDE_FORK_DEPTH;
+    status["max_connect_blocks"] = MAX_SIDE_BRANCH_LENGTH;
+    status["undo_retention_target_blocks"] = UNDO_JOURNAL_RETENTION_DEPTH;
+    status["existing_pruned_undo_not_recreated"] = true;
+    status["missing_undo_policy"] = "fail_closed";
+    status["policy_version"] = "FORK-RECOVERY-02";
+    return status;
 }
