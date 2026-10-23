@@ -409,26 +409,6 @@ The block builder does not blindly copy an arbitrarily large mempool into a cand
 
 The P2P limit is kept above the consensus block cap so a valid large block is not accepted locally but rejected by the network transport layer.
 
-### Reusable block-size configuration
-
-After the large-block infrastructure is installed, the block size can be deliberately adjusted with:
-
-```bash
-python3 Block_Size_Increaser_or_Decreaser_Patch.py --show
-python3 Block_Size_Increaser_or_Decreaser_Patch.py --preset 1GB
-python3 Block_Size_Increaser_or_Decreaser_Patch.py --preset 2GB
-python3 Block_Size_Increaser_or_Decreaser_Patch.py --preset 3GB
-```
-
-Arbitrary sizes are also supported within the current transport design:
-
-```bash
-python3 Block_Size_Increaser_or_Decreaser_Patch.py --set-mib 512
-python3 Block_Size_Increaser_or_Decreaser_Patch.py --set-gib 1.5
-```
-
-A block-size increase is not a claim that the node has benchmarked that sustained throughput. Large-block production still depends on validation speed, storage, memory use, propagation, disk I/O, and peer capacity.
-
 ---
 
 # Transactions and UTXOs
