@@ -806,7 +806,7 @@ void MessageHandler::handleMessage(const blockchain::BaseMessage& msg, Blockchai
 
                         // queue admission is bounded and
                         // mempool validation is asynchronous behind that bounded queue.
-                        if (chain->addTransaction(tx)) {
+                        if (chain->addTransaction(tx, sender ? sender->getIp() : "p2p-unknown")) {
                             Logger::log(
                                 "[MessageHandler] Queued transaction for mempool validation: " +
                                 tx.txid);

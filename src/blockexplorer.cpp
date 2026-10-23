@@ -113,7 +113,7 @@ g_explorerServer.Get("/api/blocks", [&](const httplib::Request&, httplib::Respon
                 std::string amountStr = val.substr(firstDelim + 1, secondDelim - firstDelim - 1);
                 std::string scriptStr = val.substr(secondDelim + 1);
                 uint64_t atoms = std::stoull(amountStr);
-                std::string address = ::extractAddressFromScriptPubKey(scriptStr, txid, vout, blockchain_);
+                std::string address = ::displayAddressFromScriptPubKey(scriptStr, txid, vout, blockchain_);
                 if (!address.empty()) {
                     addressBalances[address] += atoms;
                 }
@@ -171,7 +171,7 @@ g_explorerServer.Get("/api/blocks", [&](const httplib::Request&, httplib::Respon
                     for (const auto& tx : block.transactions) {
                         bool involvesAddress = false;
                         for (const auto& vout : tx.vout) {
-                            std::string addr = ::extractAddressFromScriptPubKey(vout.scriptPubKey, tx.txid, 0, blockchain_);
+                            std::string addr = ::displayAddressFromScriptPubKey(vout.scriptPubKey, tx.txid, 0, blockchain_);
                             if (addr == address) {
                                 involvesAddress = true;
                                 break;
@@ -183,7 +183,7 @@ g_explorerServer.Get("/api/blocks", [&](const httplib::Request&, httplib::Respon
                                     Transaction prevTx;
                                     if (blockchain_->findTransaction(vin.txid, prevTx)) {
                                         for (const auto& prevVout : prevTx.vout) {
-                                            std::string prevAddr = ::extractAddressFromScriptPubKey(
+                                            std::string prevAddr = ::displayAddressFromScriptPubKey(
                                                 prevVout.scriptPubKey, prevTx.txid, 0, blockchain_);
                                             if (prevAddr == address) {
                                                 involvesAddress = true;
@@ -282,7 +282,7 @@ g_explorerServer.Get("/api/blocks", [&](const httplib::Request&, httplib::Respon
                     {"scriptPubKey", vout.scriptPubKey},
                     {"n", i}
                 };
-                std::string addr = ::extractAddressFromScriptPubKey(vout.scriptPubKey, tx.txid, static_cast<uint32_t>(i), blockchain_);
+                std::string addr = ::displayAddressFromScriptPubKey(vout.scriptPubKey, tx.txid, static_cast<uint32_t>(i), blockchain_);
                 if (!addr.empty()) {
                     output["address"] = addr;
                 }

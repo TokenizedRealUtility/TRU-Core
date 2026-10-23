@@ -1,3 +1,4 @@
+#include "tru_security_maintenance_01.h"
 #include "quantum_chain_v1.h"
 #include "tru_agent_auto_policy.h"
 #include "tru_agent_checkpoint_v5.h"
@@ -12619,28 +12620,17 @@ int main(int argc, char *argv[]) {
             externalIp = cfg["network"]["externalip"];
             Logger::log("[main] External IP set to: " + externalIp);
         }
-        // MULTINODE-01B: config-owned opt-in for the already-hardened 08B.4D.9
-        // chainwork reorganization executor. Missing key preserves environment
-        // behavior; explicit 0 disables; explicit 1 arms the exact existing magic.
-        bool automaticReorgConfigured = false;
-        bool automaticReorgEnabled = false;
-        if (cfg["network"].find("automaticReorg") != cfg["network"].end()) {
-            automaticReorgConfigured = true;
-            std::string value = cfg["network"]["automaticReorg"];
-            std::transform(value.begin(), value.end(), value.begin(),
-                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            if (value == "1" || value == "true" || value == "yes" || value == "on") {
-                automaticReorgEnabled = true;
-            } else if (value == "0" || value == "false" || value == "no" || value == "off") {
-                automaticReorgEnabled = false;
-            } else {
-                throw std::runtime_error(
-                    "Invalid [network] automaticReorg value; expected 0/1/true/false");
-            }
-            Logger::log(
-                std::string("[MULTINODE-01B] Config automaticReorg=") +
-                (automaticReorgEnabled ? "1" : "0"));
-        }
+        // SEC-MAINT-01: explicit config > explicit environment > enabled default.
+        const auto automaticReorgIt = cfg["network"].find("automaticReorg");
+        const bool automaticReorgConfigured = automaticReorgIt != cfg["network"].end();
+        const char* automaticReorgEnvironment = std::getenv(tru_maintenance01::AUTO_ENV);
+        const bool automaticReorgEnabled = tru_maintenance01::automaticReorg(
+            automaticReorgConfigured ? &automaticReorgIt->second : nullptr,
+            automaticReorgEnvironment);
+        Logger::log(std::string("[SEC-MAINT-01] automaticReorg=") +
+            (automaticReorgEnabled ? "1" : "0") + " source=" +
+            (automaticReorgConfigured ? "config" :
+             automaticReorgEnvironment ? "environment" : "default"));
 
 
         Logger::log("============================================================");
@@ -12691,7 +12681,7 @@ int main(int argc, char *argv[]) {
         Logger::log("[RPC-05] COOKIE_PATH=" + tru_rpc::defaultCookiePath(rpcPort).string());
         Logger::log("[RPC-05] DIRECT_BROWSER_RPC=FORBIDDEN");
 
-        if (automaticReorgConfigured) {
+        { // Always apply the resolved setting; explicit OFF clears inherited magic.
 #ifdef _WIN32
             if (automaticReorgEnabled) {
                 _putenv_s("TRU_ENABLE_08B4D9_AUTOMATIC_REORG",

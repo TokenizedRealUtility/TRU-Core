@@ -90,6 +90,8 @@ std::string buildTRUScript_OPRETURN(const std::string& text,const std::string& o
 
 bool parseExtendedTokenScript(const std::string& scriptPubKeyHex, const std::string& txid, ExtendedTokenData& td, std::string& ownerAddress, const Blockchain* blockchainPtr);
 std::string extractAddressFromScriptPubKey(const std::string& scriptPubKeyHex, const std::string& txid, uint32_t vout, const Blockchain* blockchainPtr, uint32_t outputHeight = 0);
+// SEC-MAINT-01: display only; must not replace consensus ownership/index keys.
+std::string displayAddressFromScriptPubKey(const std::string& scriptHex, const std::string& txid, uint32_t vout, const Blockchain* chain, uint32_t outputHeight = 0);
 std::string extractTokenOwner(const std::string &script);
 bool startsWithOpReturnHex(const std::string &scriptPubKeyHex);
 std::string createExtendedTokenScriptPubKeyHex(const ExtendedTokenData &data, const std::string &ownerAddress);

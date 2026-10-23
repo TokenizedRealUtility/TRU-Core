@@ -1,3 +1,4 @@
+#include "pq01_display_address.h"
 #include "market_lock09.h"
 #include "wots_script09.h"
 #include "tokens.h"
@@ -864,4 +865,15 @@ void cleanupOrphanedUTXOIndices(LevelDBStorage* storage) {
     }
     
     Logger::log("[cleanupOrphanedUTXOIndices] Cleaned up " + std::to_string(toDelete.size()) + " orphaned indices");
+}
+
+std::string displayAddressFromScriptPubKey(const std::string& scriptHex,
+        const std::string& txid, uint32_t vout, const Blockchain* chain,
+        uint32_t outputHeight) {
+    const auto descriptor = tru_pq01_display::address(scriptHex);
+    if (!descriptor.empty()) return descriptor;
+    tru_pq01::Bytes script;
+    if (tru_pq01_display::decode(scriptHex, script))
+        return txid + ":" + std::to_string(vout); // hybrid: outpoint, not truq1
+    return extractAddressFromScriptPubKey(scriptHex, txid, vout, chain, outputHeight);
 }

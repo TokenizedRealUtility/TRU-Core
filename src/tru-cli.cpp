@@ -70,68 +70,272 @@ struct Config {
 };
 
 static void printUsage() {
-    std::cout <<
-"tru-cli -- command-line RPC client for the TRU node\n\n"
-"Usage:\n"
-"  tru-cli [options] <command> [args...]\n"
-"  tru-cli [options] raw <method> ['{\"json\":\"params\"}']\n\n"
-"Options:\n"
-"  -rpcconnect=<ip>   node IP     (default 127.0.0.1)\n"
-"  -rpcport=<port>    node port   (default 21832)\n"
-"  -conf=<file>       read rpcconnect/rpcport from a tru.conf-style file\n"
-"  -json              print raw JSON result instead of a summary\n"
-"  -timeout=<sec>     read timeout (default 30)\n"
-"  -h, --help         show this help\n\n"
-"Common commands:\n"
-"  getinfo                          aggregate node + wallet snapshot\n"
-"  getbalance [address]             spendable TRU (defaults to wallet addr)\n"
-"  sendtoaddress <addr> <amount> [--dry-run]  locally authorized send; opt-in Core\n"
-"  quantum <receive|list|fund|send|exit|retry|input|submit> [JSON]\n"
-"  getblockcount                    current height\n"
-"  getchaininfo                     tip height/hash/difficulty/valid\n"
-"  getbestblockhash                 best block hash\n"
-"  getdifficulty                    current difficulty (hex)\n"
-"  getpeerinfo                      connected peers\n"
-"  getconnectioncount               number of peers\n"
-"  getnewaddress                    derive a new address\n"
-"  listaddresses                    wallet addresses\n"
-"  listunspent <address>            spendable UTXOs for an address\n"
-"  listtransactions <address>       tx history for an address\n"
-"  getblock <hash>                  block by hash\n"
-"  getblockbyheight <height>        block by height\n"
-"  gettransaction <txid>            transaction detail\n"
-"  getrawmempool                    mempool txids\n"
-"  gettokenmetadata <tokenID>       token metadata\n"
-"  verifytokenbalance <addr> <tid>  token balance for address\n\n"
-"Chain / transaction inspection:\n"
-"  gettxout <txid> <n>              one UTXO by outpoint\n"
-"  getrawtransaction <txid> [-v]    raw tx hex, -v for decoded\n"
-"  decoderawtransaction <hex>       decode a raw tx without broadcasting\n"
-"  getaddresstransactions <addr> [n]  richer history than listtransactions\n"
-"  getmempooltransactions           full mempool entries, not just txids\n\n"
-"Mining:\n"
-"  getallminers                     every miner this node knows\n"
-"  getminerstatus <addr>            one miner's status\n\n"
-"Contracts / tokens / scripts:\n"
-"  getcontracts                     contracts without the explorer\n"
-"  gettokenutxo <txid> <vout>       token UTXO by outpoint\n"
-"  verifytokenmetadata <txid>       metadata as committed on chain\n"
-"  verifytokenevolution <tokenID>   evolution chain for a token\n"
-"  getTRUScripts <ownerAddress>     TRUscriptions owned by an address\n"
-"  getTRUScriptDetails <txid>       one TRUscription\n"
-"  listmagiclocks [address]         magic locks, optionally filtered\n\n"
-"  raw <method> [jsonparams]        call ANY node method directly\n\n"
-"Other money-moving and HTLC methods remain reachable through 'raw' only.\n"
-"Funding, claim, refund and prepared-broadcast belong to the Swap Agent, which\n"
-"keeps the durable journal these commands would bypass.\n\n"
-"Examples:\n"
-"  tru-cli getinfo\n"
-"  tru-cli sendtoaddress TYourAddressHere 0.001 --dry-run\n"
-"  tru-cli getbalance 1Fyuq4Nzy65isRXwcbpaHaZJbcGPkS57hb\n"
-"  tru-cli -rpcconnect=137.184.68.43 getblockcount\n"
-"  tru-cli raw gettokenmetadata '{\"tokenID\":\"cottage\"}'\n"
-"  tru-cli gettxout f5306c5d2ff3...0e9a 1\n"
-"  tru-cli getaddresstransactions TQAwikxL4W5KcRSLP6KDPJpx86gkdFYxnZ 25\n";
+    std::cout << R"TRUHELP088(tru-cli -- command-line RPC client for TRU Core (0.08.8 help)
+
+Usage:
+  tru-cli [options] <command> [args...]
+  tru-cli [options] raw <method> ['{"json":"params"}']
+
+Options:
+  -rpcconnect=<ip>  node IP (default 127.0.0.1)
+  -rpcport=<port>   RPC port (default 21832; P2P uses 21833)
+  -conf=<file>      read connection settings from a tru.conf-style file
+  -json             print raw JSON result instead of a friendly summary
+  -timeout=<sec>    RPC read timeout (default 30 seconds)
+  -h, --help        show this help locally; no RPC connection needed
+  Place options before the command; later connection options override earlier ones.
+  Use single quotes around JSON in a POSIX shell. Method names are case-sensitive.
+
+Friendly commands -- these are all implemented direct command wrappers:
+  getinfo                          aggregate node + wallet snapshot
+  getbalance [address]             ordinary spendable TRU balance
+  sendtoaddress <addr> <amount> [--dry-run]
+                                   ordinary TRU send; local wallet opt-in required
+  getblockcount                    current tip height
+  getchaininfo                     tip summary; use -json for fork_recovery details
+  getbestblockhash                 current best block hash (via getchaininfo)
+  getdifficulty                    compact difficulty bits in hex (via getchaininfo)
+  getpeerinfo                      connected peer information
+  getconnectioncount               number of returned peer entries
+  getnewaddress                    derive ordinary wallet address
+  listaddresses                    ordinary wallet addresses
+  listunspent <address>            spendable UTXOs for an address
+  listtransactions <address>       transaction history for an address
+  getblock <hash>                  block by hash
+  getblockbyheight <height>        block at active-chain height
+  gettransaction <txid>            transaction state and confirmation details
+  getrawmempool                    mempool transaction IDs
+  gettxout <txid> <n>              UTXO by outpoint; n is a non-negative integer
+  getrawtransaction <txid> [-v]     raw bytes; -v, verbose or 1 selects decoded output
+  decoderawtransaction <hex>       decode saved bytes without broadcasting
+  getaddresstransactions <addr> [n] richer address history, optional count
+  getmempooltransactions           full mempool entries
+  getallminers                     miners known to this node
+  getminerstatus <addr>            miner status (minerAddress parameter)
+  getmininginfo                    legacy best-effort getminerstatus alias;
+                                   no address supplied, so Core may reject it
+  getcontracts                     contract inspection
+  gettokenutxo <txid> <vout>        token UTXO by outpoint
+  gettokenmetadata <tokenID>        token metadata
+  verifytokenmetadata <txid>        metadata committed by a transaction
+  verifytokenbalance <addr> <tid>   token balance for an address
+  verifytokenevolution <tokenID>    evolution proof/history inspection
+  getTRUScripts <ownerAddress>      inscriptions owned by an address
+  getTRUScriptDetails <txid>        one inscription
+  listmagiclocks [address]          MagicLocks, optionally filtered
+  quantum <action> [JSON]           dedicated PQ01 plain-TRU wallet path (below)
+  raw <method> [JSON]               authenticated passthrough to Core (below)
+
+Quantum actions -- quantum <action> [JSON]:
+  receive    create a fresh one-payment PQ01 descriptor
+  list       list local descriptors and signing state
+  status     inspect sidecar format and recovery information (0.08.8)
+  backup     {"backup_file":"/absolute/private/NEW.pqbackup"}
+             export encrypted state; refuses an existing destination (0.08.8)
+  restore    {"backup_file":"/absolute/private/current.pqbackup",
+              "confirm_recovery_only":true}
+             recovery-only import: ALL imported keys quarantined from new signing
+  input      {"txid":"TXID","vout":0}
+             inspect a confirmed unspent input; maps to getquantuminput
+  fund       {"txid":"ORDINARY_TXID","vout":0,"fee_atoms":10000,
+              "destination":"FRESH_TRUQ1_DESCRIPTOR"}
+             sign ordinary ECDSA funding into a PQ01 output; does NOT broadcast
+  send       {"txid":"PQ01_TXID","vout":0,"fee_atoms":10000,
+              "source":"SOURCE_DESCRIPTOR","destination":"FRESH_DESCRIPTOR"}
+             sign a WOTS+ spend to a fresh PQ01 output; does NOT broadcast
+  exit       {"txid":"PQ01_TXID","vout":0,"fee_atoms":10000,
+              "source":"SOURCE_DESCRIPTOR","destination":"ORDINARY_ADDRESS",
+              "confirm_exit":true}
+             sign a WOTS+ spend to an ordinary ECDSA output; does NOT broadcast
+  retry      {"source":"SOURCE_DESCRIPTOR"}
+             retrieve saved signed bytes; never creates a replacement signature
+  submit     {"txHex":"SAVED_RAW_HEX"}
+             explicitly broadcast saved bytes; maps to sendquantumtransaction
+
+  receive/list/status/backup/restore/fund/send/exit/retry map to quantumwallet
+  with the corresponding action. Wallet actions require authenticated loopback
+  RPC, an unlocked wallet and the operator's existing wallet-send opt-in.
+  In tru.conf use the supported rpcWalletSend setting; do not expose signing RPC.
+  Confirm active:true with raw getconsensus09info before funding or spending.
+  fund/send/exit spend the WHOLE input minus the fee: one input, one output,
+  no amount field, no change and no token metadata. 1 TRU = 100000000 atoms.
+  Fee must be >=10000 atoms AND satisfy wallet policy and operator input cap.
+  Decode and check rawHex before submit. A txid/accepted response is not confirmation.
+  Check gettransaction and quantum input after mining; pending inputs are refused.
+
+Quantum safety and migration:
+  ONE payment per descriptor; ONE signing intent per key. Never reuse keys or
+  send change back. Local "unused" does not prove an address never received funds.
+  Back up the ordinary wallet AND current .pq01 / .pq01.recovery state together.
+  Seed-only recovery is NOT supported. The local recovery copy is not off-machine
+  backup or rollback-proof protection. Never clone signers or roll back both copies.
+  State format 2 is unreadable by older binaries. Do not downgrade with stale files.
+  Restore imports quarantine keys, including matched local keys; saved completed
+  bytes can be retrieved, but imported keys cannot create new signatures.
+  An imported funded output without saved spending bytes may remain unspendable.
+  Use restore only for actual recovery after testing on a disposable wallet.
+  Local destination reservations cannot prevent payments from other wallets/raw tools.
+  Native desktop/Core hardening does not automatically update independent web/SDK code.
+
+Activation / recovery / market inspection (RAW calls, not direct wrappers):
+  tru-cli raw getconsensus09info '{}'
+  tru-cli -json getchaininfo
+  tru-cli raw getblocktemplate '{}'
+  tru-cli raw getmarketportfolio '{"address":"YOUR_TRU_ADDRESS"}'
+  getchaininfo.fork_recovery reports effective recovery state, reason and limits.
+  chainValid is the last hash/PoW audit at the same tip, not transaction/UTXO replay.
+  Compare hashes at a common height; equal heights alone do not prove one branch.
+  buildmarkettransaction09 builds market transactions: use its documented request
+  schema; it is not a new positional tru-cli command or proof of settlement.
+  Pool builders must retain coinbase_required_outputs (including TR09) and
+  required_token_metadata from the exact getblocktemplate payload they submit.
+
+Other RPC methods:
+  The catalog below lists method names from the reviewed 0.08.8 Core dispatcher.
+  Invoke with: tru-cli raw METHOD '{"parameter":"value"}'
+  It is a source snapshot, NOT live method discovery or complete parameter help.
+  Some methods require parameters, wallet access, explicit approval or feature gates.
+  No new friendly aliases or permissions are created by this help update.
+  Internal/Web-suffixed methods remain subject to their own access constraints.
+  HTLC funding/claim/refund/prepared-broadcast and swap state operations belong
+  to the Swap Agent's durable journal; do not bypass it with ad-hoc raw calls.
+
+Reviewed Core RPC method catalog (117 method names):
+  auditchain
+  axonwalletfund
+  axonwalletinspect
+  buildmarkettransaction09
+  burntoken
+  committokenevolutionsigned
+  configureAIProvider
+  createAIToken
+  createburntokentransaction
+  createcontracttransaction
+  createDID
+  createmagiclock
+  createrawtransaction
+  createsendtokentransaction
+  createsocialpost
+  createtokentransaction
+  createTransferTRUScriptTransaction
+  debugtokentx
+  decoderawtransaction
+  getaddresstransactions
+  getAIProviders
+  getAIResponse
+  getAITokenState
+  getallminers
+  getbalance
+  getblock
+  getblockbyheight
+  getblockcount
+  getblocktemplate
+  getchainhealth
+  getchaininfo
+  getchainmetadata
+  getchainsupply
+  getconsensus09info
+  getcontractoutpoint07b
+  getcontracts
+  getdatafeedblock
+  getdatafeedinfo
+  getdatafeedrecord
+  getdesktopinfo
+  getDIDMapping
+  getinfo
+  getmagicsecret
+  getmarketportfolio
+  getmempooltransactions
+  getminerstatus
+  getnewaddress
+  getpeerinfo
+  getquantuminput
+  getrawmempool
+  getrawtransaction
+  gettokenburninfo
+  gettokenmetadata
+  gettokenutxo
+  gettransaction
+  getTRUScriptDetails
+  getTRUScripts
+  gettxout
+  getvotingv1snapshot07b
+  htlcbroadcastprepared
+  htlcclaim
+  htlccreate
+  htlcgeneratesecret
+  htlcpreparedrelease
+  htlcpreparedstatus
+  htlcpreparefunding
+  htlcrefund
+  inscribeTRUScript
+  inscribeTRUScriptSigned
+  interactWithAIToken
+  issuetoken
+  issuetokensigned
+  listaddresses
+  listmagiclocks
+  listmempooltransactions
+  listtransactions
+  listunspent
+  listunspentWeb
+  preparemagicsecret
+  preparevotingv1ballot07b
+  preparevotingv1create07b
+  previewtokenevolution
+  publishdatafeed
+  publishmagicsecret
+  quantumwallet
+  redeemhashlock
+  redeemtimelock
+  registerDIDSigned
+  registerminer
+  reportmineractivity
+  sendquantumtransaction
+  sendrawtransaction
+  sendrawtransactionWeb
+  sendtoaddress
+  sendtoken
+  sendtokenweb
+  signrawtransactionwithkey
+  signrawtransactionwithkeyWeb
+  startmining
+  submitblock
+  swaprecordcreate
+  swaprecordget
+  swaprecordlist
+  swaprecordtransition
+  swaptestexitmempoolaccept
+  swapwalletfreshkeys
+  swapwalletfreshselfproof
+  swapwalletrolekeys
+  testAIProvider
+  tokenmetadisplay
+  trainAIToken
+  transferTRUScript
+  unlockmagiclock
+  unregisterminer
+  verifytokenbalance
+  verifytokenevolution
+  verifytokenmetadata
+
+Examples (replace TXIDs, descriptors, addresses and paths):
+  tru-cli getinfo
+  tru-cli sendtoaddress YOUR_ADDRESS 0.001 --dry-run
+  tru-cli gettxout FUND_TXID 0
+  tru-cli quantum receive
+  tru-cli quantum status
+  tru-cli quantum input '{"txid":"FUND_TXID","vout":0}'
+  tru-cli quantum backup '{"backup_file":"/absolute/private/NEW.pqbackup"}'
+  tru-cli quantum retry '{"source":"SOURCE_DESCRIPTOR"}'
+  tru-cli decoderawtransaction SAVED_RAW_HEX
+  tru-cli quantum submit '{"txHex":"SAVED_RAW_HEX"}'
+  tru-cli gettransaction SUBMITTED_TXID
+  tru-cli raw quantumwallet '{"action":"list"}'
+
+This executable is the RPC client. The node's interactive Quantum Transactions
+menu uses qr in tru_advanced --cli; it is not a tru-cli qr command.
+)TRUHELP088";
 }
 
 // std::stoul("-3") does NOT throw: it wraps to a huge unsigned value, so a
@@ -258,7 +462,7 @@ int main(int argc, char** argv) {
 
         // Dedicated quantum namespace; JSON contains public data only.
         if (cmd == "quantum") {
-            if(pos.size()<2 || pos.size()>3){std::cerr << "quantum <receive|list|fund|send|exit|retry|input|submit> [JSON]\n";return 2;}
+            if(pos.size()<2 || pos.size()>3){std::cerr << "quantum <receive|list|status|backup|restore|fund|send|exit|retry|input|submit> [JSON]\n";return 2;}
             json p=pos.size()==3?json::parse(pos[2]):json::object();
             const auto action=pos[1];
             std::string m=action=="input"?"getquantuminput":action=="submit"?"sendquantumtransaction":"quantumwallet";

@@ -1,6 +1,6 @@
 # TRU — Tokenized Real Utility
 
-> **A UTXO-based Proof-of-Work Layer 1 combining Bitcoin-style ownership, stateful smart contracts, native tokenization, AI-oracle anchoring, Living Tokens, CPU/GPU mining, and a complete node / wallet / CLI / explorer stack.**
+> **A UTXO-based Proof-of-Work Layer 1 combining Bitcoin-style ownership, stateful smart contracts, native tokenization, WOTS+ protected transactions, marketplace settlement, AI-oracle anchoring, Living Tokens, CPU/GPU mining, and a complete node / wallet / CLI / explorer stack.**
 
 TRU is an independent Layer-1 blockchain written in C++17. The chain is internally known as **TRU**, its native asset is **TRU**, and the project is focused on **Tokenized Real Utility**: bringing ownership, programmable assets, verifiable state, real-world data workflows, and AI-assisted applications together on one UTXO-based network.
 
@@ -52,18 +52,18 @@ and their jurisdiction.
 
 ---
 
-### Public Launch Record
+### Historical Public Launch Record
 
 Public announcement: 9-12-2026
 Network activation:  9-12-2026
 
-Node image:
+Historical launch image (not a current upgrade recommendation):
 ghcr.io/agreatopportunity/tru-node:2.0.2
 
 Immutable image digest:
 sha256:b2d0dc79b4f690fd8d65a5bb8ee9647120d66023474e1d82c7af134d1345e3ac
 
-Genesis hash:
+Genesis hash: not recorded in this README; verify against the source/network before publishing one.
 
 
 Initial block reward:
@@ -72,6 +72,42 @@ Initial block reward:
 Mining:
 Public Proof-of-Work
 No reserved founder or project mining reward
+
+## Current Version and Upgrade Status
+
+**Documentation target: TRU Core 0.08.8 (QUANTUM-RECOVERY-02 candidate).**
+
+The 0.08.5 mainnet consensus upgrade activated at **block 50,000, inclusive**.
+Versions 0.08.6–0.08.8 retain that activation and the existing WOTS+ parameters.
+They address recovery, maintenance, and wallet behavior without scheduling a new
+consensus activation.
+
+| Version | Main changes |
+|---|---|
+| **0.08.5** | Activated PQ01 WOTS+ verification, marketplace lock/fill/refund validation, canonical `OP_SIZE` behavior, and TR09 block-payload commitments at height 50,000. Added dedicated quantum transaction functions alongside ordinary sends. |
+| **0.08.6** | Corrected confirmed-parent lookup during isolated fork validation; added logarithmic ancestor discovery, 4,096-block disconnect/connect windows, expanded side-storage limits and future undo retention to 8,192 blocks, and `getchaininfo.fork_recovery` status. |
+| **0.08.7** | Addressed height lookup/locking, automatic reorg defaults, rollback balance-cache work, canonical quantum address display, and admission limits for expensive peer transaction work. |
+| **0.08.8 candidate** | Adds a second encrypted quantum state copy, conservative replica repair, explicit encrypted backup/recovery-only import, and persistent destination-use reservations. Preserves existing signing-intent and exact-byte retry safeguards. |
+
+**Qualification:** both 0.08.8 candidate cores passed full node/client builds,
+native wallet-state regression tests, and the controlled live P2P/reorg/crash
+suite. A throwaway-wallet RPC workflow check remains before recommending
+funded-wallet deployment or public release. Qt GUI runtime and the independent
+browser wallet/SDK require separate integration qualification. Passing these
+tests is not an independent security audit or proof of universal recovery.
+
+Check the running node rather than relying only on its source `VERSION` file:
+
+```bash
+./build-native/bin/tru-cli raw getconsensus09info '{}'
+./build-native/bin/tru-cli raw getchaininfo '{}'
+```
+
+`getconsensus09info` reports the running Core version, activation height,
+`active` status, opcode map, market capabilities, and WOTS parameters. Candidate
+height is the next block height; it is not the current tip height.
+
+---
 
 ## Highlights
 
@@ -82,6 +118,9 @@ No reserved founder or project mining reward
 - **Large-block architecture** with size-aware block assembly, P2P headroom, and a reusable block-size configurator.
 - **Stateful UTXO smart contracts** with persistent contract storage and gas metering.
 - **Real ECDSA single-signature and multisignature verification** over secp256k1.
+- **Dedicated PQ01 WOTS+ transactions**, separate from legacy sends, with one-time descriptors and explicit signing/broadcast steps.
+- **On-chain marketplace locks** with partial/full fills, TRU purchases, token swaps, and seller refunds after expiry.
+- **Bounded automatic fork recovery** with cumulative-work validation, recovery diagnostics, and crash-recovery safeguards.
 - **Four native token classes**: FT, NFT, SFT, and NCFT.
 - **TRUSCRIPT inscriptions** for on-chain text/data ownership.
 - **Living Token Evolution** with cryptographically linked AI-generated metadata epochs.
@@ -97,31 +136,50 @@ No reserved founder or project mining reward
 
 ## Table of Contents
 
-1. [Chain Parameters](#chain-parameters)
-2. [Architecture](#architecture)
-3. [Consensus and Proof-of-Work](#consensus-and-proof-of-work)
-4. [Large-Block Architecture](#large-block-architecture)
-5. [Transactions and UTXOs](#transactions-and-utxos)
-6. [Smart Contracts and Opcodes](#smart-contracts-and-opcodes)
-7. [Native Token System](#native-token-system)
-8. [TRUSCRIPT Inscriptions](#truscript-inscriptions)
-9. [AI Oracle](#ai-oracle)
-10. [Living Token Evolution](#living-token-evolution)
-11. [Interactive Node CLI](#interactive-node-cli)
-12. [`tru-cli`](#tru-cli)
-13. [Wallets](#wallets)
-14. [Mining](#mining)
-15. [P2P Networking](#p2p-networking)
-16. [Storage](#storage)
-17. [JSON-RPC API](#json-rpc-api)
-18. [Block Explorer](#block-explorer)
-19. [Building and Running](#building-and-running)
-20. [Docker](#docker)
-21. [Configuration](#configuration)
-22. [Implementation Status](#implementation-status)
-23. [Security Notes](#security-notes)
-24. [Scaling Direction](#scaling-direction)
-25. [Additional Documentation](#additional-documentation)
+1. [Current Version and Upgrade Status](#current-version-and-upgrade-status)
+2. [Chain Parameters](#chain-parameters)
+3. [Architecture](#architecture)
+4. [Consensus and Proof-of-Work](#consensus-and-proof-of-work)
+5. [Large-Block Architecture](#large-block-architecture)
+6. [Transactions and UTXOs](#transactions-and-utxos)
+7. [Smart Contracts and Opcodes](#smart-contracts-and-opcodes)
+8. [Native Token System](#native-token-system)
+9. [TRUSCRIPT Inscriptions](#truscript-inscriptions)
+10. [MagicMiner and MagicLock](#magicminer-and-magiclock)
+11. [AI Oracle](#ai-oracle)
+12. [Living Token Evolution](#living-token-evolution)
+13. [Interactive Node CLI](#interactive-node-cli)
+14. [`tru-cli`](#tru-cli)
+15. [Wallets](#wallets)
+16. [Quantum Transactions](#quantum-transactions)
+17. [Marketplace Locks and Atomic Settlement](#marketplace-locks-and-atomic-settlement)
+18. [Mining](#mining)
+19. [P2P Networking](#p2p-networking)
+20. [Storage](#storage)
+21. [JSON-RPC API](#json-rpc-api)
+22. [Prefer authenticated tru-cli for ordinary use:](#prefer-authenticated-tru-cli-for-ordinary-use)
+23. [For direct curl, use a protected token source; never paste the token publicly.](#for-direct-curl-use-a-protected-token-source-never-paste-the-token-publicly)
+24. [The default cookie path for port 21832 is usually ~/.tru/rpc-cookie-21832.](#the-default-cookie-path-for-port-21832-is-usually-trurpc-cookie-21832)
+25. [Block Explorer](#block-explorer)
+26. [Building and Running](#building-and-running)
+27. [Docker](#docker)
+28. [Configuration](#configuration)
+29. [TRU MAINNET EXAMPLE — review values for your own machine](#tru-mainnet-example--review-values-for-your-own-machine)
+30. [Bootstrap peers. Comma-separated IP:port pairs; no spaces after commas.](#bootstrap-peers-comma-separated-ipport-pairs-no-spaces-after-commas)
+31. [Automatic cumulative-work recovery: enabled by default in current builds.](#automatic-cumulative-work-recovery-enabled-by-default-in-current-builds)
+32. [Optional privileged RPC wallet-send feature, DISABLED by default.](#optional-privileged-rpc-wallet-send-feature-disabled-by-default)
+33. [Keys may be set here in [network] or [default], but not twice.](#keys-may-be-set-here-in-network-or-default-but-not-twice)
+34. [Alternative equivalent names recognized by this build:](#alternative-equivalent-names-recognized-by-this-build)
+35. [AI oracle funding / wallet options (only configure when needed).](#ai-oracle-funding--wallet-options-only-configure-when-needed)
+36. [Enable only after installing and reviewing the private policy file.](#enable-only-after-installing-and-reviewing-the-private-policy-file)
+37. [Documentary example: see notes below about which fields are consumed.](#documentary-example-see-notes-below-about-which-fields-are-consumed)
+38. [Implementation Status](#implementation-status)
+39. [Testing and Qualification](#testing-and-qualification)
+40. [Security Notes](#security-notes)
+41. [Scaling Direction](#scaling-direction)
+42. [Additional Documentation](#additional-documentation)
+43. [Project Direction](#project-direction)
+44. [Links](#links)
 
 ---
 
@@ -142,16 +200,20 @@ No reserved founder or project mining reward
 | Retarget adjustment clamp | 0.5× to 2× target movement per interval |
 | Coinbase maturity | 100 blocks |
 | Maximum supply | 21,000,000 TRU |
-| Address format | Base58Check P2PKH |
+| Ordinary address format | Base58Check P2PKH |
+| Quantum descriptor format | Canonical `truq1:…` PQ01 script descriptor with checksum; one payment per descriptor |
+| PQ01 / market activation | Block **50,000**, inclusive |
+| Automatic recovery window | Up to **4,096** blocks disconnected and **4,096** connected, subject to required state availability |
+| Future undo retention target | **8,192** blocks; previously pruned undo is not recreated |
 | Default RPC port | 21832 |
 | Default P2P port | 21833 |
 | Default explorer port | 8001 |
 
-### Current staged large-block profile
+### Configured large-block profile
 
 The large-block infrastructure centralizes block and network sizing so miners, validation, templates, and P2P transport stay aligned.
 
-| Limit | Staged value |
+| Limit | Configured value |
 |---|---:|
 | Hard consensus block cap | **64 MiB** |
 | Miner/template assembly budget | **56 MiB** |
@@ -277,7 +339,41 @@ Retarget movement is clamped to avoid sudden extreme changes. The compact-target
 
 ## Fork choice
 
-Each indexed block carries cumulative chain work. TRU can identify a common ancestor and reorganize when a competing valid branch contains strictly more accumulated Proof-of-Work.
+Each indexed block carries cumulative chain work. A competing branch must pass
+full state validation and contain **strictly greater cumulative work** before
+activation. Height alone, a peer's version string, accepted mining shares, or a
+local hash/PoW audit does not establish which competing branch should win.
+
+Current recovery behavior includes:
+
+- Logarithmic common-ancestor discovery rather than walking every height over the network.
+- Up to 4,096 blocks disconnected and 4,096 connected per recovery, subject to available undo and branch state.
+- Expanded side-storage limits and an 8,192-block future undo-retention target. The upgrade cannot recreate already pruned undo.
+- Confirmed-parent lookup that works in the isolated reorg sandbox even when its active chain vector is empty.
+- Recovery markers and restart handling for interrupted branch activation. Missing undo, corrupt markers, or conflicting state fail closed.
+- Automatic recovery enabled by default unless explicitly disabled. An explicit `automaticReorg` configuration takes precedence over the supported environment fallback.
+
+Inspect effective status:
+
+```bash
+./tru-cli raw getchaininfo '{}'
+./tru-cli getpeerinfo
+./tru-cli getblockbyheight 51035
+```
+
+`fork_recovery` reports the policy version, configured windows, whether execution
+is halted, recovery state/reason, and event-specific heights when available.
+`idle` is not proof that a particular fork was resolved. Compare block hashes at
+the **same height** across nodes, then inspect recovery state and logs if they
+disagree. Peers reporting the same height can still be on different branches.
+
+### What `chainValid` means
+
+`chainValid: true` means the last explicit **in-memory block hash / proof-of-work
+walk** passed at the current tip. `null` means there is no applicable audit at
+that tip; a new block makes an earlier audit stale. This audit is not historical
+transaction replay or a UTXO database audit. Inspect `chain_audit.scope`,
+`same_tip`, and `transaction_replay` before describing its result.
 
 ---
 
@@ -376,6 +472,7 @@ The live interpreter supports real ECDSA validation for:
 - `OP_CHECKSIGVERIFY`
 - `OP_CHECKMULTISIG`
 - `OP_CHECKMULTISIGVERIFY`
+- `OP_CHECKWOTSVERIFY` (`0xbb`), activated at height 50,000 for PQ01 WOTS+ verification
 
 Multisig enforces signature/public-key bounds and performs ordered M-of-N verification.
 
@@ -416,6 +513,18 @@ Important state and control opcodes include:
 | `OP_DELEGATECHECK` | Delegate/trusted signature | Stub |
 | NOVO bridge opcodes | Wrapped NOVO bridge path | Scaffold |
 | BSTY bridge opcodes | Wrapped BSTY bridge path | Scaffold |
+
+### Activated 0.08.5 opcode map
+
+| Opcode | Byte | Activated behavior |
+|---|---|---|
+| `OP_SIZE` | `0x82` | Canonical stack-item byte-size behavior |
+| `OP_CHECKWOTSVERIFY` | `0xbb` | PQ01 WOTS+ signature verification |
+| `OP_MARKETVERIFY` | `0xbc` | Marketplace lock/fill/refund validation |
+
+The reported WOTS suite is **WOTS+ SHA2 n32 w16 len67 L-tree**, version 1:
+2,144 signature bytes, 125,000 gas, and a sigop cost of 256. These are protocol
+parameters, not a claim that ordinary ECDSA outputs became quantum resistant.
 
 ### Gas
 
@@ -648,53 +757,12 @@ For larger documents or media, store the content externally and place only a cry
 
 ## RPC examples
 
-Create a MagicLock:
+Use the authenticated local client with the appropriate wallet authorization:
 
 ```bash
-curl -sS \
-  -H 'Content-Type: application/json' \
-  --data '{
-    "jsonrpc":"2.0",
-    "id":1,
-    "method":"createmagiclock",
-    "params":{
-      "amount":0.001,
-      "targetPrefix":"21e8"
-    }
-  }' \
-  http://127.0.0.1:21832/rpc
-```
-
-List MagicLocks:
-
-```bash
-curl -sS \
-  -H 'Content-Type: application/json' \
-  --data '{
-    "jsonrpc":"2.0",
-    "id":1,
-    "method":"listmagiclocks",
-    "params":{}
-  }' \
-  http://127.0.0.1:21832/rpc
-```
-
-Unlock one:
-
-```bash
-curl -sS \
-  -H 'Content-Type: application/json' \
-  --data '{
-    "jsonrpc":"2.0",
-    "id":1,
-    "method":"unlockmagiclock",
-    "params":{
-      "txid":"<MAGICLOCK_TXID>",
-      "vout":0,
-      "recipient":"<TRU_ADDRESS>"
-    }
-  }' \
-  http://127.0.0.1:21832/rpc
+./tru-cli raw createmagiclock '{"amount":0.001,"targetPrefix":"21e8"}'
+./tru-cli raw listmagiclocks '{}'
+./tru-cli raw unlockmagiclock '{"txid":"MAGICLOCK_TXID","vout":0,"recipient":"YOUR_TRU_ADDRESS"}'
 ```
 
 ## Why MagicLock is different
@@ -885,6 +953,16 @@ Friendly wrappers cover common commands, but `raw` can call any RPC method expos
 ./tru-cli raw verifytokenbalance '{"address":"<TRU_ADDRESS>","tokenID":"example"}'
 ```
 
+The dedicated quantum namespace is:
+
+```text
+quantum <receive|list|status|backup|restore|fund|send|exit|retry|input|submit> [JSON]
+```
+
+`status`, `backup`, and `restore` are new in the 0.08.8 candidate. See
+[Quantum Transactions](#quantum-transactions) for access requirements and safety
+boundaries. `sendtoaddress` remains the separate ordinary TRU send command.
+
 Useful options include:
 
 ```text
@@ -924,7 +1002,219 @@ User interfaces include:
 - RPC access,
 - `tru-cli` for node/RPC operations.
 
-Protect wallet files and WIF/private-key material carefully.
+Protect wallet files and WIF/private-key material carefully. PQ01 keys require the additional quantum state files described in [Quantum Transactions](#quantum-transactions); ordinary HD seed recovery does not cover them.
+
+---
+
+# Quantum Transactions
+
+PQ01 is a separate **WOTS+ protected plain-TRU transaction path**. Legacy TRU,
+token, TRUSCRIPT, and contract sending functions retain their existing roles.
+The dedicated wallet path currently uses **one confirmed input and one output**,
+spending the whole selected input minus its fee. It has no amount field or change
+output and does not carry token metadata.
+
+## Protection and boundaries
+
+- `fund` uses the ordinary input's ECDSA key to move TRU into a fresh PQ01 output.
+- `send` spends a PQ01 output with WOTS+ into another fresh PQ01 descriptor.
+- `exit` spends with WOTS+ into an ordinary address and requires `confirm_exit: true`; the resulting output has ordinary ECDSA protection.
+- A `truq1:…` value is a checksummed locking-script descriptor. It is not a reusable account or a Base58 ordinary address. Copy it in full; aliases or renamed labels do not change the underlying script.
+- WOTS+ keys are **one-time signing keys**. Use **one payment per descriptor**, never send change back to a used descriptor, and never run cloned signers.
+- `unused` means no signing history is recorded locally. It does **not** prove that a descriptor has never received a payment or was never used by another copy of the wallet.
+
+This provides a hash-based signature spending condition for the protected output.
+It does not replace all ECDSA keys throughout TRU, prove every application quantum
+resistant, or remove normal network, implementation, custody, and chain-reorg risks.
+
+## Access and command map
+
+Use your authenticated local `tru-cli` and an unlocked wallet. Wallet actions
+require loopback RPC and the operator's existing wallet-send opt-in. Ordinary
+remote/public endpoints must not be turned into a quantum signing service.
+
+```bash
+cd "$HOME/TRU-Core/build-native/bin"
+TRUCLI="$PWD/tru-cli"
+"$TRUCLI" raw getconsensus09info '{}'
+"$TRUCLI" quantum list
+```
+
+Confirm `active: true` before funding or spending. For a checkout named `NEW_TRU`,
+use that checkout's `build-native/bin` instead.
+
+| CLI action | Purpose | RPC mapping |
+|---|---|---|
+| `quantum receive` | Create a fresh receiving descriptor | `quantumwallet`, action `receive` |
+| `quantum list` | List local descriptors and signing state | `quantumwallet`, action `list` |
+| `quantum input` | Inspect a confirmed, unspent input | `getquantuminput` |
+| `quantum fund` | Sign ordinary TRU → PQ01 funding | `quantumwallet`, action `fund` |
+| `quantum send` | Sign PQ01 → fresh PQ01 | `quantumwallet`, action `send` |
+| `quantum exit` | Sign PQ01 → ordinary TRU | `quantumwallet`, action `exit` |
+| `quantum retry` | Retrieve saved signed bytes; no new signature | `quantumwallet`, action `retry` |
+| `quantum submit` | Explicitly submit saved transaction bytes | `sendquantumtransaction` |
+| `quantum status` | Inspect quantum state/recovery information; new in 0.08.8 | `quantumwallet`, action `status` |
+| `quantum backup` | Export an encrypted backup; new in 0.08.8 | `quantumwallet`, action `backup` |
+| `quantum restore` | Import in recovery-only mode; new in 0.08.8 | `quantumwallet`, action `restore` |
+
+The interactive node command is **`qr`**, labelled Quantum Transactions. It is
+separate from `tru-cli quantum …`. The native desktop wallet has a separate
+quantum transaction flow. This maintenance package does **not** update the
+independent website/browser signer or the SDK automatically.
+
+## Funding and sending: example sequence
+
+The following are templates. Replace every placeholder and inspect every result;
+do not paste all steps as an unattended script. Start with a small confirmed
+ordinary output you own, such as 0.01 TRU (1,000,000 atoms). Never choose a token
+or control output. Inspect the actual output index and amount:
+
+```bash
+"$TRUCLI" listunspent YOUR_ORDINARY_ADDRESS
+"$TRUCLI" quantum input '{"txid":"ORDINARY_TXID","vout":0}'
+"$TRUCLI" quantum receive
+```
+
+Save the returned descriptor as A. **Make a consistent backup of the wallet and
+current quantum state before funding.** Then sign the funding transaction:
+
+```bash
+"$TRUCLI" quantum fund \
+  '{"txid":"ORDINARY_TXID","vout":0,"fee_atoms":10000,"destination":"DESCRIPTOR_A"}'
+```
+
+Inspect `signed: true`, `broadcast: false`, `input_atoms`, `send_atoms`,
+`fee_atoms`, and `rawHex`. The implementation requires at least 10,000 fee atoms
+and also enforces wallet fee policy; the chosen fee must satisfy both. The
+selected-input cap is controlled by the operator's wallet-send configuration.
+
+Decode the returned bytes, verify A's output script and value, then explicitly
+submit those same bytes:
+
+```bash
+"$TRUCLI" decoderawtransaction FUND_RAW_HEX
+"$TRUCLI" quantum submit '{"txHex":"FUND_RAW_HEX"}'
+"$TRUCLI" gettransaction FUND_TXID
+"$TRUCLI" quantum input '{"txid":"FUND_TXID","vout":0}'
+```
+
+A successful submission or transaction ID is not confirmation. Wait until the
+funding output is confirmed and unspent. An early `Input must be confirmed and
+unspent` response can simply mean it is still in the mempool.
+
+Create a fresh destination B (or obtain a fresh descriptor from the recipient),
+back up the updated local wallet state, and sign the protected spend:
+
+```bash
+"$TRUCLI" quantum receive
+"$TRUCLI" quantum send \
+  '{"txid":"FUND_TXID","vout":0,"fee_atoms":10000,"source":"DESCRIPTOR_A","destination":"DESCRIPTOR_B"}'
+"$TRUCLI" decoderawtransaction SEND_RAW_HEX
+"$TRUCLI" quantum submit '{"txHex":"SEND_RAW_HEX"}'
+"$TRUCLI" gettransaction SEND_TXID
+"$TRUCLI" quantum input '{"txid":"SEND_TXID","vout":0}'
+"$TRUCLI" quantum list
+```
+
+Verify the decoded destination and amount before submitting. **Do not create a
+different signature with A after signing.** If signing times out or the response
+is lost, retrieve the saved bytes:
+
+```bash
+"$TRUCLI" quantum retry '{"source":"DESCRIPTOR_A"}'
+```
+
+Check transaction status before resubmitting the exact saved bytes. Never clear
+signing state, restore stale files, or reset A to unused to work around a failure.
+
+## Recorded mainnet example
+
+The following results were observed on the operator's node; verify current chain
+membership and confirmations independently before treating them as current:
+
+| Step | Transaction / result |
+|---|---|
+| Ordinary funding output | `e53e542ca52f1083a1caea93602e9c1c14d4038fcc195578b7464f3a80bd7ce6:0`, 1,000,000 atoms |
+| Funding A | `75450982cb6a094e5ccbfc977bb154908576c0f04ccc32a6124f0ea5188a9f78:0`, 990,000 atoms; observed confirmed at height 52,690 |
+| WOTS+ spend A → B | `14ec11a1a75c4a9eb62e451a7d63489c85bba2ddaff06274523f1e59858d71ac:0`, 980,000 atoms; observed confirmed at height 52,696 |
+
+Each step paid 10,000 atoms. The final 0.0098 TRU remained in **B's PQ01 output**,
+not an ordinary TRU address. A was recorded as `reserved_or_signed` with saved
+transaction bytes; B appeared locally unused because it had not signed a spend.
+
+## 0.08.8 backup and recovery behavior
+
+Quantum state is stored alongside the wallet, typically `tru.dat.pq01`. The
+candidate adds `tru.dat.pq01.recovery`, written durably before the primary copy.
+Both are authenticated and encrypted. A missing replica can be rebuilt from its
+surviving authentic counterpart; inconsistent signing histories or failed
+authentication stop the operation rather than silently discarding evidence.
+
+The first quantum operation on an existing v1 sidecar without a recovery replica
+migrates it to state format 2. **Older binaries reject that format.** Back up the
+wallet and its current quantum state together before migration; do not downgrade
+by restoring stale signer files.
+
+For the new actions, choose a private existing directory and a fresh filename:
+
+```bash
+"$TRUCLI" quantum status
+"$TRUCLI" quantum backup \
+  '{"backup_file":"/absolute/private/path/quantum-current-UNIQUE.pqbackup"}'
+```
+
+Backup export refuses an existing destination. Keep a current encrypted backup
+off the signing machine; the local recovery copy is not an off-machine backup.
+Recovery requires the matching wallet master as well as the quantum state.
+
+**External backup import is recovery-only, not normal replica repair.** It merges
+history and quarantines all imported keys, including matching local records.
+Saved completed transaction bytes can be retrieved, but imported keys cannot
+create new signatures. There is no quarantine override. An imported funded key
+without saved spending bytes may remain unspendable through this recovery path.
+Test import only on a disposable wallet before considering actual recovery:
+
+```bash
+"$TRUCLI" quantum restore \
+  '{"backup_file":"/absolute/private/path/current.pqbackup","confirm_recovery_only":true}'
+```
+
+**Limits:** ordinary seed recovery alone cannot reconstruct existing random
+quantum descriptors. Rolling back both replicas or running cloned signers can
+defeat local history protection. Destination reservations cover this wallet's
+own operations; other wallets and raw builders can still pay a reused script.
+No consensus-level prohibition of WOTS key reuse is introduced by 0.08.8.
+
+---
+
+# Marketplace Locks and Atomic Settlement
+
+At activation height 50,000, `OP_MARKETVERIFY` enabled validated marketplace
+locks for native token sales and swaps. Supported asset classes reported by Core
+include TRU, FT, SFT, NFT, and NCFT; market version 1 uses 8-byte token IDs.
+
+- A seller authorizes an on-chain asset lock before settlement.
+- Full or partial fills must satisfy the lock's price, asset, and payment rules.
+- TRU purchases and token-for-token swaps are supported by the validated paths.
+- Seller-authorized refunds are allowed at/after expiry; early or forged refunds fail validation.
+- Conflicting fills and duplicate lock spends are rejected.
+
+Inspect capabilities and holdings through authenticated RPC:
+
+```bash
+./tru-cli raw getconsensus09info '{}'
+./tru-cli raw getmarketportfolio '{"address":"YOUR_TRU_ADDRESS"}'
+```
+
+`buildmarkettransaction09` is the dedicated transaction-builder RPC. Use the
+current marketplace integration/API schema for lock, fill, and refund requests;
+do not treat a portfolio entry or off-chain listing as a confirmed escrow.
+Builders, signatures, broadcast, and confirmation are distinct steps.
+
+Core support does not automatically upgrade an external marketplace website,
+matching service, pool engine, browser wallet, or SDK. Each must use the activated
+formats and be qualified for its own workflow. No TRUSCRIPT marketplace support
+is implied by the native token asset list above.
 
 ---
 
@@ -976,6 +1266,32 @@ P2P relay
 ```
 
 Miners can report activity and hashrate to the node, allowing the interactive interface to show live mining information.
+
+## Pool and independent miner compatibility after height 50,000
+
+Upgrading the node alone is insufficient if an external pool hardcodes the
+coinbase layout or discards block metadata. Its block builder must consume the
+current template, including:
+
+- `coinbase_required_outputs`: include **every** required output, including the zero-value `TR09` commitment output; do not hardcode one coinbase output.
+- `required_token_metadata`: preserve and serialize the template's required metadata in the submitted block's supported format.
+- `previousblockhash`, height, bits, and the exact selected transaction payload that the commitment covers.
+
+Rebuild work when the template changes. A commitment taken from a different
+transaction/metadata payload is not valid merely because it starts with `TR09`.
+The node validates these fields on submission. Accepted shares do not establish
+that a complete block was accepted or retained on the active chain.
+
+```bash
+./tru-cli raw getblocktemplate '{}'
+./tru-cli raw getchaininfo '{}'
+./tru-cli getblockbyheight BLOCK_HEIGHT
+```
+
+Record the full candidate hash, height, and exact `submitblock` result. Confirm
+the hash at that height on other independently connected nodes. Block intervals
+vary with luck, effective hash rate, and difficulty; a slow interval by itself
+does not prove a validation stall.
 
 ---
 
@@ -1048,7 +1364,7 @@ Example:
 
 ```bash
 # Prefer authenticated tru-cli for ordinary use:
-./build-native/bin/tru-cli raw getchaininfo '[]'
+./build-native/bin/tru-cli raw getchaininfo '{}'
 
 # For direct curl, use a protected token source; never paste the token publicly.
 # The default cookie path for port 21832 is usually ~/.tru/rpc-cookie-21832.
@@ -1073,6 +1389,7 @@ getblock
 getblockbyheight
 getblocktemplate
 submitblock
+getconsensus09info
 ```
 
 ## Transactions and UTXOs
@@ -1098,6 +1415,23 @@ getbalance
 getnewaddress
 listaddresses
 getaddresstransactions
+```
+
+## Quantum wallet and marketplace
+
+```text
+quantumwallet               # action-based private wallet operations
+getquantuminput             # confirmed unspent input inspection
+sendquantumtransaction      # submit saved one-input/one-output PQ01-related tx
+buildmarkettransaction09    # dedicated market builder
+getmarketportfolio          # holdings/index inspection
+```
+
+For example:
+
+```bash
+./tru-cli raw quantumwallet '{"action":"list"}'
+./tru-cli raw getquantuminput '{"txid":"FUND_TXID","vout":0}'
 ```
 
 ## Tokens and inscriptions
@@ -1199,7 +1533,7 @@ The explorer can run with the node or as a standalone explorer process against t
 
 ## Dependencies
 
-Linux, 2 GB RAM minimum (plus swap), roughly 10 minutes.
+Linux with a C++17 toolchain and sufficient RAM, swap, and disk for the selected build. Build duration and peak memory depend on configuration and parallelism.
 
 ```bash
 ./install-deps.sh          # once per machine
@@ -1234,17 +1568,25 @@ Binaries land in:
 build-native/bin/
 ```
 
-**Use `agnostic_rebuild.sh`, not `rebuild.sh`.** `rebuild.sh` runs
-`rm -rf build-native`, and a native wallet lives in `build-native/bin/`.
-`agnostic_rebuild.sh` preserves the encrypted wallet set through
-`~/.local/share/tru/wallet/` and restores it after the build.
+**Protect runtime files before rebuilding.** In common installations,
+`build-native/bin/` contains the wallet and chain data as well as executables.
+Do not delete that directory or assume a helper script preserves newly added
+quantum files. Review the exact script before using it.
 
-Back up your wallet before any rebuild:
+For an already configured build, an incremental update is:
 
 ```bash
-tar czf ~/tru-wallet-$(date +%F).tgz -C ~/NEW_TRU/build-native/bin \
-  tru.dat.enc tru.dat.public wallet_seed.dat.enc
+cmake --build build-native --target tru_advanced tru-cli --parallel 2
 ```
+
+Before switching running binaries, cleanly stop Core and wallet activity and
+make a consistent private backup of the ordinary wallet files (including
+`tru.dat.enc`, `tru.dat.public`, and `wallet_seed.dat.enc` where used), the
+current `*.pq01` state, and any `*.pq01.recovery` replica. Include any other
+wallet files used by your actual configuration. Keep the current set together
+and off-machine; never restore stale quantum state into an active signer.
+Chain databases must also be stopped or copied through a supported consistent
+snapshot mechanism. An installer source backup is not a wallet backup.
 
 Binaries are produced under the native build output, typically:
 
@@ -1298,14 +1640,14 @@ The Docker documentation defines separate roles for:
 | `tru-miner-cpu` | standalone CPU miner |
 | `tru-miner-gpu` | OpenCL GPU miner |
 
-Basic node example:
+Basic local-image node example (build and verify the intended source version first):
 
 ```bash
 docker run -it --name tru-node \
   -p 21833:21833 \
   -v tru-data:/app/data \
   -v "$(pwd)/tru.conf:/app/tru.conf:ro" \
-  tru-node:latest --cli
+  tru-node:local-verified --cli
 ```
 
 P2P port `21833` is the public peer port.
@@ -1325,6 +1667,18 @@ Docker Compose profiles can run:
 - node + GPU miner.
 
 See `README_DOCKER.md` for the full deployment and persistence guide.
+
+The current project CPU image repository is
+`ghcr.io/tokenizedrealutility/tru-node`. Use an explicitly published, verified
+version tag or immutable digest. This README does not assert that a 0.08.8 image
+has been published. Container status `Up` alone does not establish that RPC is
+listening, synchronization completed, or a branch was fully validated.
+
+When replacing a container, retain its named data volume and all wallet mounts.
+Quantum users must also persist the actual `.pq01` and `.pq01.recovery` paths;
+mounting only the ordinary encrypted wallet files is insufficient. Never run two
+containers signing from cloned wallet state. Building or pulling a new image
+does not update an existing container until it is deliberately recreated.
 
 ---
 
@@ -1349,7 +1703,8 @@ addnode=137.184.68.43:21833
 #seeds=137.184.68.43:21833
 #externalip=YOUR_PUBLIC_IP
 
-# Multinode cumulative-work reorganization opt-in; review operational risks.
+# Automatic cumulative-work recovery: enabled by default in current builds.
++# An explicit setting overrides the supported environment fallback.
 automaticReorg=1
 
 # Optional privileged RPC wallet-send feature, DISABLED by default.
@@ -1394,7 +1749,7 @@ networkType=mainnet
 | `[network]` | `addnode` | Comma-separated bootstrap `IP:port` peers. |
 | `[network]` | `seeds` | Alternative/additional bootstrap peer list parsed by P2P initialization. |
 | `[network]` | `externalip` | Advertised external IP where supported by the node startup logic. |
-| `[network]` | `automaticReorg` | Explicitly enables/disables the current multi-node automatic cumulative-work reorganization path. An operationally significant choice, not an agent setting. |
+| `[network]` | `automaticReorg` | Explicit enable/disable of automatic cumulative-work recovery. Current default is enabled; explicit configuration takes precedence over the supported environment fallback. Inspect effective `fork_recovery` status. |
 | `[network]` or `[default]` | `rpcWalletSend` / `TRU_RPC_WALLET_SEND_ENABLE` | Optional local RPC wallet sending (strict `0`/`1`). Default disabled. Use only one spelling/section. |
 | `[network]` or `[default]` | `rpcWalletSendMaxAtoms` / `TRU_RPC_WALLET_SEND_MAX_ATOMS` | Spending cap as a positive number of atoms, or explicitly `unlimited`; do not duplicate. |
 | `[default]` | `node.ip` | RPC host used by the legacy AI oracle service. |
@@ -1461,6 +1816,9 @@ TRU is a working independent blockchain, but the project intentionally distingui
 - P2P transaction/block transport
 - ECDSA signatures
 - ECDSA multisig
+- activated PQ01 WOTS+ and market validation at height 50,000
+- dedicated quantum funding, signing, explicit submission, and saved-byte retry
+- recovery status and bounded automatic cumulative-work reorganization
 - stateful contract storage
 - gas metering
 - deterministic chain-state reads
@@ -1492,11 +1850,44 @@ These items should not be represented as completed production capabilities until
 
 ---
 
+# Testing and Qualification
+
+Test outcomes describe the supplied source revisions and fixtures, not every
+future deployment. Keep the run logs, source provenance, and machine-readable
+qualification results with release records.
+
+| Test area | Observed evidence and scope |
+|---|---|
+| 0.08.5 regressions / isolated chain | Mainnet-dormant and test-height build guards; real-PoW maturity prefix; preactivation behavior; invalid WOTS/payload mutation rejection; market purchase, partial fill, swap, refund, and journal/restart paths passed. |
+| Historical replay | Supplied historical snapshot replay through height 45,837 and restart checks passed. This is bounded snapshot evidence, not an ongoing audit of every later mainnet block or equivalence of all local auxiliary records. |
+| 0.08.5 network/template | Mixed-version preactivation synchronization, activated template outputs/submission, upgraded relay, fresh IBD across activation, higher-work reorg, and restart tests passed. External pool software was a separate integration requirement. |
+| 0.08.7 maintenance | Focused regressions and both full builds passed. |
+| 0.08.8 wallet candidate | Both full node/client builds, version/help checks, installer checks, and native quantum-state regressions passed. Native tests cover v1 migration, replica repair, conflicting history rejection, signing-intent persistence through failure/crash, saved-byte retry, backup authentication, and recovery quarantine. |
+| 0.08.8 controlled live suite | Both candidate source variants verified; signed WOTS/market/OP_SIZE real-PoW fixture; 128-block disconnect; shorter/heavier winner; fresh IBD; mixed 0.08.6 serving; ledger-state comparison; prepared retry; deliberate crash/restart; corrupt marker and missing undo refusal all passed. |
+| Remaining 0.08.8 release checks | Throwaway-wallet RPC backup/restore/sign/retry integration remains pending. Qt GUI runtime and independent SDK/browser signer are not qualified by these results. |
+
+The **4,096-block policy boundaries** were checked; the live fixture exercised
+**128 blocks disconnected**, not a 4,096-block live reorg. Controlled loopback
+P2P tests do not reproduce every WAN, CGNAT/Starlink, remote pool, hostile-load,
+power-loss, or filesystem failure condition. A passing recovery suite does not
+mean competing branches can never occur.
+
+The supplied qualification package uses isolated source copies, throwaway wallet
+material, private test activation, loopback peers, and test databases. Never run
+fault injection, intentional state corruption, or restore experiments on a
+funded production wallet. Production activation remains height 50,000.
+
+---
+
 # Security Notes
 
 TRU is still an evolving independent chain and should be treated accordingly.
 
 Current considerations include:
+
+- WOTS+ one-time key state and current quantum backups are essential; local replicas are not rollback-proof and seed-only recovery is not provided.
+- A protected PQ01 output does not convert legacy ECDSA addresses, token ownership, or every application into a quantum-resistant system.
+- Fork recovery has finite windows and requires undo/state availability; upgrading does not reconstruct historical undo that was already pruned.
 
 - The chain is primarily enforced by one codebase.
 - It has not yet had the years of adversarial exposure of mature public blockchains.
@@ -1555,18 +1946,11 @@ The project should measure real throughput rather than advertise configured bloc
 
 # Additional Documentation
 
-```
-./rebuild.sh
-    → rebuild binaries
-    → NEVER touch wallet
-    → NEVER touch chain
-
-./rebuild.sh --fresh-chain
-    → preserve/enforce wallet backup
-    → archive chain database
-    → create empty chain database
-    → NEVER touch encrypted wallet
-```
+Use the reviewed build instructions above. Do not run a destructive rebuild or
+fresh-chain helper against a live wallet/database. A resync changes chain state,
+not private keys, but confirmed balances and mining rewards still depend on the
+validated active branch; recovery cannot guarantee that rewards from a losing
+branch remain spendable.
 
 More focused documentation is available in the repository:
 
@@ -1596,21 +1980,17 @@ That combination is the core of **Tokenized Real Utility**.
 
 # Links
 
-### Run a node
+### Source and deployment
 
-```bash
-# CPU
-docker pull ghcr.io/agreatopportunity/tru-node:v2.0.8
+- Core source: [TokenizedRealUtility/TRU-Core](https://github.com/TokenizedRealUtility/TRU-Core)
+- SDK: [TokenizedRealUtility/TRU-SDK](https://github.com/TokenizedRealUtility/TRU-SDK)
+- CPU container repository: `ghcr.io/tokenizedrealutility/tru-node`
+- Deployment guide: `README_DOCKER.md` in the matching source release.
 
-# NVIDIA GPU
-docker pull ghcr.io/agreatopportunity/tru-node-gpu:v2.0.8
-```
-
-Full deployment guide: **[TRU-DOCKER](https://github.com/agreatopportunity/TRU-DOCKER)**
-
-All published image versions:
-[tru-node](https://github.com/users/agreatopportunity/packages/container/tru-node/versions) ·
-[tru-node-gpu](https://github.com/users/agreatopportunity/packages/container/tru-node-gpu/versions)
+Check release/tag availability and the running binary's version before an
+upgrade. Historical `agreatopportunity` launch image references above document
+the launch; they are not current deployment recommendations. Independent miner,
+SDK, marketplace, and browser-wallet releases have their own compatibility scope.
 
 ### Network
 

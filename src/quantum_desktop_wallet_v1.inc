@@ -13,12 +13,14 @@ DesktopWalletSignedTx DesktopWalletCore::quantumSign(const std::string& path,con
  std::string raw;
  if(funding){
   if(u.keyIndex>=nextIndex_||u.scriptPubKey!=scriptForAddress(address(u.keyIndex)))throw std::runtime_error("Funding requires a local ordinary P2PKH input");
+  tru_quantum::Store destinationStore(path+".pq01",seed_,true);destinationStore.reserveDestination(destination,toHex(serializeTx(tx)));
   auto digest=canonicalSigHash(tx,0,previous);tru_quantum::Secret priv{derivePrivate(u.keyIndex)};auto sig=strictDerLowSSign(priv.bytes,digest);sig.push_back(1);pushData(tx.vin[0].scriptSig,sig);pushData(tx.vin[0].scriptSig,compressedPublic(priv.bytes));raw=toHex(serializeTx(tx));
  }else{
   if(previous!=tru_quantum::script(source)||destination==source)throw std::runtime_error("Source mismatch or reused quantum destination");
   auto digest=canonicalSigHash(tx,0,previous);auto unsignedHex=toHex(serializeTx(tx));
   tx.vin[0].scriptSig=tru_quantum::Bytes(2147,0);if(fee<serializeTx(tx).size()*tru_limits::MIN_RELAY_FEE_SAT_PER_BYTE)throw std::runtime_error("Fee below WOTS relay policy");tx.vin[0].scriptSig.clear();
   tru_quantum::Store store(path+".pq01",seed_);
+  if(!exit)store.reserveDestination(destination,unsignedHex);
   raw=store.sign(source,tru_quantum::Bytes(digest.begin(),digest.end()),unsignedHex,[&](const tru_quantum::Bytes& sig){tx.vin[0].scriptSig={0x4d,0x60,0x08};tx.vin[0].scriptSig.insert(tx.vin[0].scriptSig.end(),sig.begin(),sig.end());return toHex(serializeTx(tx));});
  }
  Tx idTx=tx;for(auto& in:idTx.vin)in.scriptSig.clear();auto ser=serializeTx(idTx);auto hash=doubleSha(ser.data(),ser.size());

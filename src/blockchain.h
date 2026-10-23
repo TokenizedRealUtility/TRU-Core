@@ -113,7 +113,7 @@ public:
     Block mineBlockCPU(P2PNode* p2pNode, const std::string& minerAddress);
     bool mineBlock(Block& block, uint64_t& foundNonce, std::vector<unsigned char>& finalHash, uint64_t maxNonce = UINT64_MAX);
     std::string mineBlockGPUChain(P2PNode* p2pNode, const std::string& minerAddress);
-    bool addTransaction(const Transaction& tx);  // bounded ingress queue
+    bool addTransaction(const Transaction& tx, const std::string& sourcePeer = {});  // bounded ingress queue
 
     void removeMempoolTransaction(const std::string& txid);
     std::vector<Transaction> getMempoolTransactions() const;
@@ -640,6 +640,7 @@ private:
 
     // bounded pre-validation transaction queue.
     std::queue<Transaction> txQueue_;
+    std::queue<std::string> txQueueSources_; // SEC-MAINT-01: no retained peer pointers
     std::queue<std::size_t> txQueueSizes_;
     std::queue<std::uint8_t> txQueueRetries_;
     std::unordered_set<std::string> txQueueTxids_;

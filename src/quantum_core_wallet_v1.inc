@@ -4,10 +4,13 @@ nlohmann::json Wallet::quantumTransaction(const std::string& action,const nlohma
  const auto& seed=getWalletSecurityMode()==WalletSecurityModeV1::ENCRYPTED_UNLOCKED?walletSecurityController_->unlockedSeed():masterSeed;
  const std::string path=walletFilePath+".pq01";
  if(action=="receive"){tru_quantum::Store store(path,seed,true);return store.receive();}
- tru_quantum::Store store(path,seed);
+ tru_quantum::Store store(path,seed,action=="restore"||action=="fund");
  if(action=="list")return store.list();
+ if(action=="status")return store.status();
+ if(action=="backup"){store.backupTo(p.at("backup_file").get<std::string>());return {{"backed_up",true},{"seed_only_recovery",false},{"warning","Store this encrypted backup separately. Restore/import is recovery-only for uncertain key histories."}};}
+ if(action=="restore"){if(!p.value("confirm_recovery_only",false))throw std::runtime_error("Restore requires confirm_recovery_only=true; imported keys cannot create signatures");return store.restoreFrom(p.at("backup_file").get<std::string>());}
  if(action=="retry")return {{"rawHex",store.saved(p.at("source"))},{"signed",true}};
- if(action!="fund"&&action!="send"&&action!="exit")throw std::runtime_error("Quantum action must be receive, list, fund, send, exit or retry");
+ if(action!="fund"&&action!="send"&&action!="exit")throw std::runtime_error("Quantum action must be receive, list, status, backup, restore, fund, send, exit or retry");
  if(!isLocalChain||!blockchainPtr)throw std::runtime_error("Quantum signing requires local chain");
  auto u=tru_quantum::input(*blockchainPtr,p);
  if(isSwapPreparedFundingInputReserved(blockchainPtr->getStorage(),u.txid,u.vout))throw std::runtime_error("Input reserved by another wallet operation");
@@ -23,12 +26,14 @@ nlohmann::json Wallet::quantumTransaction(const std::string& action,const nlohma
   bool owned=false;for(const auto& address:getAllAddresses())if(u.scriptPubKey==createP2PKHScriptHexFromAddress(address)){owned=true;break;}
   if(!owned||u.scriptPubKey.size()!=50)throw std::runtime_error("Funding requires a wallet-owned ordinary P2PKH input");
   if(fee<estimateWalletPolicyFee(tx))throw std::runtime_error("Fee below wallet policy");
+  store.reserveDestination(destination,tru_quantum::hex(tx.serializeBinary()));
   if(!signTransaction(tx))throw std::runtime_error("Quantum funding ECDSA signature failed");raw=tru_quantum::hex(tx.serializeBinary());
  }else{
   const auto source=p.at("source").get<std::string>();if(u.scriptPubKey!=tru_quantum::hex(tru_quantum::script(source)))throw std::runtime_error("Input does not match quantum source");
   if(destination==source)throw std::runtime_error("Never send change or funds back to a used WOTS key");
   auto previous=tru_quantum::unhex(u.scriptPubKey);auto digest=tx.getSigHash(0,previous);auto unsignedHex=tru_quantum::hex(tx.serializeBinary());
   tx.vin[0].scriptSig=tru_quantum::Bytes(2147,0);if(fee<estimateWalletPolicyFee(tx))throw std::runtime_error("Fee below WOTS transaction policy");tx.vin[0].scriptSig.clear();
+  if(action!="exit")store.reserveDestination(destination,unsignedHex);
   raw=store.sign(source,digest,unsignedHex,[&](const tru_quantum::Bytes& sig){tx.vin[0].scriptSig={0x4d,0x60,0x08};tx.vin[0].scriptSig.insert(tx.vin[0].scriptSig.end(),sig.begin(),sig.end());return tru_quantum::hex(tx.serializeBinary());});
  }
  return {{"rawHex",raw},{"input_atoms",u.amount},{"send_atoms",u.amount-fee},{"fee_atoms",fee},{"signed",true},{"broadcast",false},{"note","Whole selected output is spent; no reused-key change. Submit with sendquantumtransaction."}};

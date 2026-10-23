@@ -66,6 +66,7 @@
 #include <shared_mutex>
 #include "contract_storage.h"
 #include "tru_network_params.h"
+#include "tru_security_maintenance_01.h"
 #include "tru_version.h"  // NETWORK-VERSION-01
 #include "peer_observability_v1.h"
 #include "script_context_builder.h"  // shared execution context
@@ -4676,92 +4677,39 @@ Block Blockchain::getBlock(const std::string& blockHash) const {
 //			Get Block by Hash Height
 //================================================================================
 std::string Blockchain::getBlockHashByHeight(int height) const {
+    // SEC-MAINT-01: read-only lookup. Never upgrade mtx or repair shared state
+    // while holding a reader lock. Cache entries are NOT proof of active ancestry.
     std::shared_lock<std::shared_mutex> lock(mtx);
-    
-    // Input validation
-    if (height < 1 || height > bestTipHeight) {
-        Logger::log("[getBlockHashByHeight] Height out of range: " + std::to_string(height) + 
-                    ", bestTipHeight: " + std::to_string(bestTipHeight));
+    const int tipHeight = bestTipHeight.load();
+    if (height < 0 || height > tipHeight || bestTipHash.empty())
         throw std::runtime_error("Height out of range");
+
+    if (!chain.empty() && chain.back().blockHash == bestTipHash &&
+        static_cast<int>(chain.back().height) == tipHeight) {
+        // Support either stored genesis convention, but authenticate the height
+        // and active-vector index before returning anything.
+        const int firstHeight = static_cast<int>(chain.front().height);
+        const auto index = static_cast<long long>(height) - firstHeight;
+        if ((firstHeight == 0 || firstHeight == 1) && index >= 0 &&
+            static_cast<size_t>(index) < chain.size() &&
+            static_cast<int>(chain[static_cast<size_t>(index)].height) == height)
+            return chain[static_cast<size_t>(index)].blockHash;
     }
-    
-    // Check chain vector first (most reliable source)
-    if (height <= static_cast<int>(chain.size())) {
-        // Chain is 0-indexed but heights are 1-indexed, so adjust index
-        int chainIndex = height - 1;
-        if (chainIndex >= 0 && chainIndex < static_cast<int>(chain.size())) {
-            std::string hashFromChain = chain[chainIndex].blockHash;
-            
-            // Verify the block has the expected height
-            if (chain[chainIndex].height != height) {
-                Logger::log("[getBlockHashByHeight] WARNING: Chain block height mismatch at index " + 
-                           std::to_string(chainIndex) + ": stored=" + std::to_string(chain[chainIndex].height) + 
-                           ", requested=" + std::to_string(height));
-                
-                // Try to find the correct block by scanning
-                for (size_t i = 0; i < chain.size(); i++) {
-                    if (chain[i].height == height) {
-                        hashFromChain = chain[i].blockHash;
-                        Logger::log("[getBlockHashByHeight] Found correct block at different index: " + 
-                                   std::to_string(i) + ", hash: " + hashFromChain);
-                        break;
-                    }
-                }
-            }
-            
-            // Also check if heightToHash map is consistent, update if not
-            auto it = heightToHash.find(height);
-            if (it == heightToHash.end() || it->second != hashFromChain) {
-                std::unique_lock<std::shared_mutex> writeLock(const_cast<std::shared_mutex&>(mtx));
-                const_cast<Blockchain*>(this)->heightToHash[height] = hashFromChain;
-                Logger::log("[getBlockHashByHeight] Updated heightToHash mapping for height " + 
-                           std::to_string(height) + " to " + hashFromChain);
-            }
-            
-            Logger::log("[getBlockHashByHeight] Returning hash from chain for height " + 
-                       std::to_string(height) + ": " + hashFromChain);
-            return hashFromChain;
-        }
+
+    // Sandbox or incomplete vector: follow authenticated in-memory parents from
+    // the active tip. Do not call a public accessor that takes mtx recursively.
+    std::string current = bestTipHash;
+    for (int h = tipHeight; h >= height; --h) {
+        const auto it = blockIndex.find(current);
+        if (it == blockIndex.end() || it->second.height != h ||
+            it->second.block.blockHash != current)
+            throw std::runtime_error("Active ancestry is incomplete");
+        if (h == height) return current;
+        if (it->second.parentHash.empty() || it->second.parentHash == current)
+            throw std::runtime_error("Invalid active ancestry");
+        current = it->second.parentHash;
     }
-    
-    // If not found in chain, look in heightToHash map
-    auto mapIt = heightToHash.find(height);
-    if (mapIt != heightToHash.end()) {
-        // Validate the hash by checking the blockIndex
-        auto blockIt = blockIndex.find(mapIt->second);
-        if (blockIt != blockIndex.end()) {
-            if (blockIt->second.height == height) {
-                Logger::log("[getBlockHashByHeight] Returning hash from heightToHash map for height " + 
-                           std::to_string(height) + ": " + mapIt->second);
-                return mapIt->second;
-            } else {
-                Logger::log("[getBlockHashByHeight] ERROR: Height mismatch in map. Map has height=" + 
-                           std::to_string(height) + " pointing to hash=" + mapIt->second + 
-                           " but blockIndex has height=" + std::to_string(blockIt->second.height));
-            }
-        } else {
-            Logger::log("[getBlockHashByHeight] ERROR: Hash in map not found in blockIndex: " + 
-                       mapIt->second);
-        }
-    }
-    
-    // If still not found, try rebuilding the height-to-hash map
-    {
-        std::unique_lock<std::shared_mutex> writeLock(const_cast<std::shared_mutex&>(mtx));
-        const_cast<Blockchain*>(this)->rebuildHeightToHashIfNeeded();
-    }
-    
-    // Check if rebuild helped
-    mapIt = heightToHash.find(height);
-    if (mapIt != heightToHash.end()) {
-        Logger::log("[getBlockHashByHeight] Found hash after rebuilding map for height " + 
-                   std::to_string(height) + ": " + mapIt->second);
-        return mapIt->second;
-    }
-    
-    Logger::log("[getBlockHashByHeight] ERROR: Failed to find block hash for height " + 
-               std::to_string(height));
-    throw std::runtime_error("No block hash found for height " + std::to_string(height));
+    throw std::runtime_error("No active block at requested height");
 }
 //================================================================================
 //                      Get Block by Height
@@ -6782,6 +6730,7 @@ void Blockchain::processQueue() {
 
     while (running_) {
         Transaction tx;
+        std::string sourcePeer;
         std::size_t queuedSize = 0;
         std::uint8_t busyRetries = 0;
 
@@ -6797,11 +6746,12 @@ void Blockchain::processQueue() {
             if (!running_) break;
             if (txQueue_.empty()) continue;
 
-            if (txQueueSizes_.empty() || txQueueRetries_.empty()) {
+            if (txQueueSizes_.empty() || txQueueRetries_.empty() || txQueueSources_.empty()) {
                 Logger::log(
                     "[processQueue] ERROR: transaction queue accounting mismatch; "
                     "dropping queued entries fail-closed");
                 while (!txQueue_.empty()) txQueue_.pop();
+                while (!txQueueSources_.empty()) txQueueSources_.pop();
                 while (!txQueueSizes_.empty()) txQueueSizes_.pop();
                 while (!txQueueRetries_.empty()) txQueueRetries_.pop();
                 txQueueTxids_.clear();
@@ -6811,6 +6761,8 @@ void Blockchain::processQueue() {
 
             tx = std::move(txQueue_.front());
             txQueue_.pop();
+            sourcePeer = std::move(txQueueSources_.front());
+            txQueueSources_.pop();
 
             queuedSize = txQueueSizes_.front();
             txQueueSizes_.pop();
@@ -6854,6 +6806,7 @@ void Blockchain::processQueue() {
                         tru_limits::MAX_TX_QUEUE_BYTES - queuedSize) {
 
                     txQueue_.push(tx);
+                    txQueueSources_.push(sourcePeer);
                     txQueueSizes_.push(queuedSize);
                     txQueueRetries_.push(
                         static_cast<std::uint8_t>(busyRetries + 1));
@@ -6929,7 +6882,8 @@ void Blockchain::processQueue() {
             case MempoolAddStatus::INVALID:
             default:
                 Logger::log(
-                    "[processQueue] Mempool rejected queued TX => " + tx.txid);
+                    "[processQueue] Mempool rejected queued TX => " + tx.txid +
+                    " source=" + (sourcePeer.empty() ? "local-or-rpc" : sourcePeer));
                 break;
         }
     }
@@ -20461,33 +20415,29 @@ bool Blockchain::handleChainReorganization(const std::vector<Block>& newChain) {
 //			Rebuild Height to Hash if Needed
 //=============================================================================
 void Blockchain::rebuildHeightToHashIfNeeded() {
-    std::unique_lock<std::shared_mutex> lock(mtx); // Ensure thread-safe access to blockchain state
-    heightToHash.clear(); // Clear existing mappings to rebuild from scratch
-    
-    std::string currentHash = bestTipHash;
-    int currentHeight = bestTipHeight;
-
-    // Traverse from the best tip to the genesis block
-    while (currentHeight >= 1 && !currentHash.empty()) {
-        heightToHash[currentHeight] = currentHash;
-        Logger::log("[rebuildHeightToHashIfNeeded] Mapped height " + std::to_string(currentHeight) + " to hash " + currentHash);
-        
-        // Retrieve the block using the current hash
-        Block currentBlock = getBlock(currentHash);
-        if (currentBlock.header.prevHash.empty() && currentHeight > 1) {
-            Logger::log("[rebuildHeightToHashIfNeeded] Error: Invalid blockchain state at height " + std::to_string(currentHeight));
-            break; // Prevent infinite loop or invalid traversal
-        }
-        
-        currentHash = currentBlock.header.prevHash; // Move to the parent block
-        currentHeight--;
+    // SEC-MAINT-01: this public repair operation owns its sole chain lock.
+    // Build completely before publication; a failure preserves the old map.
+    std::unique_lock<std::shared_mutex> lock(mtx);
+    decltype(heightToHash) rebuilt;
+    std::string current = bestTipHash;
+    int height = bestTipHeight.load();
+    if (current.empty() || height < 0)
+        throw std::runtime_error("No active tip to rebuild");
+    for (;;) {
+        const auto it = blockIndex.find(current);
+        if (it == blockIndex.end() || it->second.height != height ||
+            it->second.block.blockHash != current)
+            throw std::runtime_error("Cannot rebuild incomplete active ancestry");
+        rebuilt.emplace(height, current);
+        const std::string parent = it->second.parentHash;
+        if (height == 0 || (height == 1 &&
+            (parent.empty() || parent == std::string(64, '0')))) break;
+        if (height <= 0 || parent.empty() || parent == current)
+            throw std::runtime_error("Invalid parent while rebuilding heights");
+        current = parent;
+        --height;
     }
-
-    if (currentHeight < 1 && !heightToHash.empty()) {
-        Logger::log("[rebuildHeightToHashIfNeeded] Successfully rebuilt heightToHash map from height 1 to " + std::to_string(bestTipHeight));
-    } else {
-        Logger::log("[rebuildHeightToHashIfNeeded] Failed to rebuild heightToHash map; blockchain may be empty or corrupted");
-    }
+    heightToHash.swap(rebuilt);
 }
 //-----------------------------------------
 //           rollbackBlock
@@ -20835,78 +20785,48 @@ bool Blockchain::rollbackBlockWithSubmissionLockHeld(
 
     lock.unlock();
 
-    // Derived caches are not consensus state. Invalidate/rebuild them only after
-    // the durable disconnect succeeds. Clearing is safer than trying to infer a
-    // partial inverse from historical cache contents.
-    // [EXPLORER-ADDRESS-01] Durable-derived explorer cache repair.
-    // Build a complete replacement OFF-LOCK, then publish it atomically.
-    // This changes no confirmed state; it only reconstructs addressCache.
+    // SEC-MAINT-01: authenticated undo already identifies changed address
+    // counts. Repair only those entries; no full address-table scan per block.
+    // Caller still owns submission ordering; never hold addressCacheMutex
+    // across storage/balance lookups. Unrelated cached rows are preserved.
     invalidateUTXOCache();
-    {
-        std::unordered_set<std::string> explorerAddressSet;
-        dbStorage.iteratePrefix("address:", [&](const std::string& key, const std::string&) {
-            std::string rest = key;
-            if (rest.rfind("address:", 0) == 0) {
-                rest = rest.substr(sizeof("address:") - 1);
-            }
-
-            // Mirror explorer-startup parsing: reject canonical contract outpoints
-            // before slicing the first ':' as the TRU address boundary.
-            const size_t firstColon = rest.find(':');
-            const size_t secondColon = firstColon == std::string::npos
-                ? std::string::npos
-                : rest.find(':', firstColon + 1);
-            if (firstColon != std::string::npos &&
-                secondColon != std::string::npos &&
-                tru_contract_state::IsCanonicalContractOutpoint(
-                    rest.substr(0, secondColon))) {
-                return;
-            }
-
-            const std::string addr = (firstColon == std::string::npos)
-                ? rest
-                : rest.substr(0, firstColon);
-            if (!addr.empty() && isValidAddress(addr)) {
-                explorerAddressSet.insert(addr);
-            }
-        });
-
-        decltype(addressCache) rebuiltAddressCache;
-        for (const auto& addr : explorerAddressSet) {
-            int txCount = 0;
-            std::string rawCount;
-            if (dbStorage.getWithDataChecksum(
-                "address:" + addr + ":txCount", rawCount)) {
-                try { txCount = std::stoi(rawCount); }
-                catch (...) { txCount = 0; }
-            }
-
-            double balanceTru = 0.0;
-            try {
-                const uint64_t atoms = calculate_balance(addr);
-                balanceTru = static_cast<double>(atoms) / 100000000.0;
-            } catch (const std::exception& e) {
-                Logger::log(
-                    "[EXPLORER-ADDRESS-01] balance rebuild failed for " +
-                    addr + ": " + e.what());
-            } catch (...) {
-                Logger::log(
-                    "[EXPLORER-ADDRESS-01] balance rebuild failed for " + addr);
-            }
-
-            rebuiltAddressCache[addr].balance = balanceTru;
-            rebuiltAddressCache[addr].txCount = txCount;
-        }
-
-        const size_t rebuiltCount = rebuiltAddressCache.size();
+    for (const auto& addr : affectedAddresses) {
+        if (!isValidAddress(addr)) continue;
+        uint64_t revision = 0;
         {
             std::unique_lock<std::shared_mutex> cacheLock(addressCacheMutex);
-            ++addressCacheRevision; // EXPLORER-LOCK-01: reject stale warmup writes.
-            addressCache.swap(rebuiltAddressCache);
+            ++addressCacheRevision;
+            addressCache.erase(addr);
+            revision = addressCacheRevision;
         }
-        Logger::log(
-            "[EXPLORER-ADDRESS-01] Canonical address cache rebuilt entries=" +
-            std::to_string(rebuiltCount));
+        try {
+            int count = 0;
+            std::string rawCount;
+            const bool exists = dbStorage.getWithDataChecksum(
+                "address:" + addr + ":txCount", rawCount);
+            if (exists) {
+                size_t consumed = 0;
+                count = std::stoi(rawCount, &consumed);
+                if (consumed != rawCount.size() || count < 0)
+                    throw std::runtime_error("Invalid restored address count");
+            }
+            if (!exists || count == 0) continue;
+            const double balance = static_cast<double>(calculate_balance(addr)) /
+                                   100000000.0;
+            std::unique_lock<std::shared_mutex> cacheLock(addressCacheMutex);
+            if (addressCacheRevision == revision) {
+                addressCache[addr].balance = balance;
+                addressCache[addr].txCount = count;
+                ++addressCacheRevision;
+            }
+        } catch (const std::exception& e) {
+            // Durable disconnect has committed. Leave this cache row absent;
+            // detail reads can rebuild it rather than return a fabricated zero.
+            Logger::log("[SEC-MAINT-01] Deferred restored address cache: " +
+                        addr + ": " + e.what());
+        } catch (...) {
+            Logger::log("[SEC-MAINT-01] Deferred restored address cache");
+        }
     }
 
     if (walletPtr) {
@@ -22696,7 +22616,7 @@ void Blockchain::initGenesisBlock(const std::string& genesisAddr) {
 //       addTransaction => bounded mempool ingress queue
 //-----------------------------------------
 
-bool Blockchain::addTransaction(const Transaction& tx) {
+bool Blockchain::addTransaction(const Transaction& tx, const std::string& sourcePeer) {
     // bound attacker-controlled work BEFORE a transaction
     // can accumulate in the asynchronous queue.
     if (tx.txid.size() != 64 || !isValidHex(tx.txid)) {
@@ -22727,6 +22647,20 @@ bool Blockchain::addTransaction(const Transaction& tx) {
         return false;
     }
 
+    // SEC-MAINT-01: bounded policy cost before P2P queue admission. Local
+    // and authenticated-RPC callers retain their existing admission path.
+    if (!sourcePeer.empty()) {
+        double units = 1.0;
+        for (const auto& input : tx.vin) {
+            if (input.scriptSig.size() >= 2000)
+                units += static_cast<double>((input.scriptSig.size() + 255) / 256);
+        }
+        if (!tru_maintenance01::txIngressBudget().admit(
+                sourcePeer, units, tru_maintenance01::monotonicSeconds())) {
+            return false;
+        }
+    }
+
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
 
@@ -22753,6 +22687,7 @@ bool Blockchain::addTransaction(const Transaction& tx) {
         }
 
         txQueue_.push(tx);
+        txQueueSources_.push(sourcePeer);
         txQueueSizes_.push(serializedSize);
         txQueueRetries_.push(0);
         txQueueTxids_.insert(tx.txid);

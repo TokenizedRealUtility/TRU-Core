@@ -1,3 +1,4 @@
+#include "pq01_display_address.h"
 #include "quantum_chain_v1.h"
 #include <climits>
 #include "consensus09_commitment.h"
@@ -2043,7 +2044,8 @@ static json handleGetRawTransaction(Blockchain &chain, const json &params, int i
                             {"value", output.amount / 1e8},
                             {"n", i},
                             {"scriptPubKey", {
-                                {"hex", output.scriptPubKey}
+                                {"hex", output.scriptPubKey},
+                                {"quantum_address", tru_pq01_display::address(output.scriptPubKey)}
                             }}
                         });
                     }
@@ -2084,7 +2086,8 @@ static json handleGetRawTransaction(Blockchain &chain, const json &params, int i
                         {"value", output.amount / 1e8},
                         {"n", i},
                         {"scriptPubKey", {
-                            {"hex", output.scriptPubKey}
+                            {"hex", output.scriptPubKey},
+                                {"quantum_address", tru_pq01_display::address(output.scriptPubKey)}
                         }}
                     });
                 }
@@ -5568,6 +5571,7 @@ static json handleDecodeRawTransaction(const json &params, int id) {
         std::string txHex = params["txHex"].get<std::string>();
         auto raw = hexDecode(txHex);
         Transaction tx = Transaction::deserializeBinary(raw);
+        tx.computeTxId(); // SEC-MAINT-01: populate the read-only decoded identity
         
         json result = {
             {"txid", tx.txid},
@@ -5600,6 +5604,11 @@ static json handleDecodeRawTransaction(const json &params, int id) {
                     {"hex", output.scriptPubKey}
                 }}
             };
+            const auto quantumAddress = tru_pq01_display::address(output.scriptPubKey);
+            if (!quantumAddress.empty()) {
+                out["scriptPubKey"]["address"] = quantumAddress;
+                out["scriptPubKey"]["type"] = "pq01-wots-v1";
+            }
             result["vout"].push_back(out);
         }
         
