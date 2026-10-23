@@ -485,14 +485,59 @@ Important state and control opcodes include:
 | `OP_HALT` | Halt execution | Implemented |
 | `OP_REVERT` | Revert execution/state | Implemented |
 | `OP_OUTPUTAMOUNT` | Current output amount | Implemented |
-| `OP_MINT_TOKEN` | Mint contract tokens | Implemented |
-| `OP_TOKEN_BALANCE` | Contract token balance | Partial |
-| `OP_BURN_TOKEN` | Burn contract tokens | Partial |
-| `OP_EXTERNALDATA` | Generic external-data opcode | Placeholder |
-| `OP_DATAFEED` | Generic keyed data-feed opcode | Placeholder |
+| `OP_MINT_TOKEN` | Legacy mint opcode | Reserved/unsupported; fails closed. Use checked Token Issuer V1 family transitions. |
+| `OP_TOKEN_BALANCE` | Legacy contract token-balance opcode | Named/reserved; unsupported by current execution preflight |
+| `OP_BURN_TOKEN` | Legacy contract burn opcode | Named/reserved; unsupported by current execution preflight |
+| `OP_EXTERNALDATA` | External/off-chain data | Disabled in deterministic execution; fails closed |
+| `OP_DATAFEED` | Deterministic Oracle Feed V1 | Implemented for three canonical chain keys; see below |
 | `OP_DELEGATECHECK` | Delegate/trusted signature | Stub |
-| NOVO bridge opcodes | Wrapped NOVO bridge path | Scaffold |
-| BSTY bridge opcodes | Wrapped BSTY bridge path | Scaffold |
+| NOVO bridge opcodes | Legacy bridge path | Reserved/disabled pending deterministic redesign |
+| BSTY bridge opcodes | Legacy bridge path | Reserved/disabled pending deterministic redesign |
+
+## OP_DATAFEED and application data feeds are separate
+
+`OP_DATAFEED` is implemented by the deterministic Oracle Feed V1 handler in
+`script_interpreter.cpp`. It consumes a key from the stack and resolves only:
+
+| Canonical key | Value derived from execution context |
+|---|---|
+| `chain:block_height` | Explicit script execution height |
+| `chain:total_supply` | Issued supply calculated through that height |
+| `chain:block_reward` | Block subsidy at that height |
+
+Each value is a canonical **8-byte little-endian uint64**. The opcode charges
+50 gas for the lookup. Unknown keys, missing chain context, or noncanonical
+results fail closed. It never consults HTTP, AI providers, local configuration,
+wall-clock data, or a replaceable feed callback. This handler predates the
+0.08.8 wallet-maintenance update; 0.08.8 does not activate a new data-feed rule.
+
+Separately, the application DataFeed service records feed data or commitments in
+ordinary transactions using **`TRUDF1:` envelopes in zero-value OP_RETURN
+outputs**. It supports inline records and hash-mode commitments with a 254-byte
+payload bound. The read path also recognizes supported legacy TRUSCRIPT framing.
+The CLI/tooling can queue, batch, publish and inspect such records; this is the
+path used for application feeds such as HAM/sensor records, not a direct
+`OP_DATAFEED` VM lookup of those measurements.
+
+Relevant authenticated RPC methods:
+
+```bash
+./tru-cli raw getdatafeedinfo '{}'
+./tru-cli raw getdatafeedrecord '{"txid":"DATAFEED_TXID"}'
+./tru-cli raw getdatafeedblock '{"height":52696}'
+```
+
+`publishdatafeed` requires a `data` string containing a valid envelope, an
+`owner`, a positive integer `max_fee_atoms`, and the existing local wallet-send
+opt-in. Use the feed tooling to build the envelope and respect its explicit
+publication workflow. `getdatafeedrecord` reads actual transaction output bytes
+and reports active-chain confirmation state rather than trusting a local
+metadata cache.
+
+A confirmed data record proves inclusion of submitted bytes/commitments; it
+does not prove the truth of a sensor reading or make arbitrary off-chain values
+consensus-readable. Neither this service nor ordinary token issuance/burn RPCs
+imply that similarly named legacy opcodes are enabled.
 
 ### Activated 0.08.5 opcode map
 
@@ -822,7 +867,7 @@ Provider selection can change without changing TRU consensus or the on-chain com
 
 Secrets belong in environment variables or protected local configuration and should never be committed to the blockchain.
 
-> The generic `OP_EXTERNALDATA` and `OP_DATAFEED` interpreter opcodes remain placeholders. They are separate from the implemented AI-oracle service and must not be confused with live deterministic consensus data feeds.
+> `OP_EXTERNALDATA` is disabled and fails closed. `OP_DATAFEED` implements the bounded deterministic Oracle Feed V1 chain keys described below; it does not fetch model responses, arbitrary published feed records, HTTP APIs or sensor data during validation.
 
 ---
 
@@ -1819,12 +1864,12 @@ TRU is a working independent blockchain, but the project intentionally distingui
 
 ## Partial / intentionally incomplete
 
-- `OP_EXTERNALDATA` — placeholder generic external data
-- `OP_DATAFEED` — placeholder generic data-feed values
+- `OP_EXTERNALDATA` — reserved; execution fails closed for external/off-chain values
+- Arbitrary external values through `OP_DATAFEED` — not supported; only the three canonical deterministic chain keys are implemented
 - `OP_DELEGATECHECK` — stub
-- `OP_TOKEN_BALANCE` — partial
-- `OP_BURN_TOKEN` — partial
-- NOVO/BSTY bridge opcodes — bridge scaffolding, not a live production bridge
+- `OP_TOKEN_BALANCE` / `OP_BURN_TOKEN` — legacy named/reserved opcodes, unsupported by current execution preflight
+- `OP_MINT_TOKEN` — legacy opcode disabled; checked Token Issuer V1 transitions are the separate supported issuance path
+- NOVO/BSTY bridge opcodes — reserved/disabled pending deterministic redesign, not a live production bridge
 
 These items should not be represented as completed production capabilities until their validation and trust models are finished.
 
