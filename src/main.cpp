@@ -12391,6 +12391,11 @@ int main(int argc, char *argv[]) {
             "TRU_RPC_WALLET_SEND_ENABLE", "rpcWalletSend");
         const std::string confSendCap = rpcSendConf(
             "TRU_RPC_WALLET_SEND_MAX_ATOMS", "rpcWalletSendMaxAtoms");
+        // MANAGED-TRU-02: this dedicated Core may enable managed-wallet RPC
+        // from its own tru.conf. The RPC handlers still require loopback and
+        // the ordinary wallet-send gate as defense in depth.
+        const std::string confManagedWalletEnabled = rpcSendConf(
+            "TRU_RPC_MANAGED_WALLET_ENABLE", "rpcManagedWallet");
         if (!confSendEnabled.empty()) {
             if (confSendEnabled != "0" && confSendEnabled != "1")
                 throw std::runtime_error("tru.conf RPC spend enable must be 0 or 1");
@@ -12398,6 +12403,17 @@ int main(int argc, char *argv[]) {
             ::setenv("TRU_RPC_WALLET_SEND_ENABLE", confSendEnabled.c_str(), 1);
 #else
             _putenv_s("TRU_RPC_WALLET_SEND_ENABLE", confSendEnabled.c_str());
+#endif
+        }
+        if (!confManagedWalletEnabled.empty()) {
+            if (confManagedWalletEnabled != "0" && confManagedWalletEnabled != "1")
+                throw std::runtime_error("tru.conf managed-wallet enable must be 0 or 1");
+#ifndef _WIN32
+            ::setenv("TRU_RPC_MANAGED_WALLET_ENABLE",
+                     confManagedWalletEnabled.c_str(), 1);
+#else
+            _putenv_s("TRU_RPC_MANAGED_WALLET_ENABLE",
+                      confManagedWalletEnabled.c_str());
 #endif
         }
         if (!confSendCap.empty()) {

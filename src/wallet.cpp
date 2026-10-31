@@ -568,36 +568,15 @@ Transaction Wallet::createSocialPostTransaction(const std::string& senderAddress
                                        const std::string& content, 
                                        const std::vector<std::string>& mediaUrls, 
                                        const std::string& privateKey) {
-    Transaction tx;
-    
-    // Derive public key from private key
-    ECDSAKey key = ECDSAKey::fromPrivateKey(privateKey);
-    std::vector<unsigned char> pubkeyBytes = key.getCompressedSec1();
-    std::string pubkey = bytesToHex(pubkeyBytes);  // Convert to hex string
-
-    // Prepare data to sign (example: concatenate content and media URLs)
-    std::string dataToSign = senderAddress + content;
-    for (const auto& url : mediaUrls) {
-        dataToSign += url;
-    }
-
-    // Sign the data
-    std::vector<unsigned char> signatureBytes = key.sign(dataToSign);
-    std::string signature = bytesToHex(signatureBytes);
-
-    // Create OP_RETURN data (example payload)
-    std::string opReturnData = "social:" + pubkey + ":" + signature + ":" + content;
-    std::vector<unsigned char> opReturnBytes(opReturnData.begin(), opReturnData.end());
-    
-    // Encode OP_RETURN script
-    std::string opReturnHex = "6a" + varIntEncode(opReturnData.size()) + bytesToHex(opReturnBytes);
-
-    // Populate transaction
-    tx.vin = {};  // Add real inputs as needed
-    tx.vout.push_back({0, opReturnHex});  // OP_RETURN output
-    tx.sender = senderAddress;  // Use sender instead of senderAddress
-
-    return tx;
+    // The legacy builder has no funded inputs and no interoperable signed
+    // payload format. Refuse locally; do not alter shared signature rules.
+    (void)senderAddress;
+    (void)content;
+    (void)mediaUrls;
+    (void)privateKey;
+    throw std::runtime_error(
+        "Legacy social-post construction is disabled: funded inputs and "
+        "a versioned signing format are not implemented");
 }
 //=============================================================================
 //                              Get address w/ Balance
@@ -2975,7 +2954,8 @@ bool Wallet::generateNewAddressEncrypted(
     std::string& addressOut,
     std::string& publicKeyHexOut,
     std::uint32_t& indexOut,
-    std::string* errorOut)
+    std::string* errorOut,
+    bool selectNewAddress)
 {
     std::lock_guard<std::mutex> mutationLock(encryptedMutationMutex_);
 
@@ -3086,7 +3066,7 @@ bool Wallet::generateNewAddressEncrypted(
         }
         addresses.push_back(addr);
         addressIndex = static_cast<std::uint32_t>(addresses.size());
-        currentIndex = idx;
+        if (selectNewAddress) currentIndex = idx;
     }
 
     std::string persistError;
@@ -3724,6 +3704,242 @@ std::string Wallet::send_transaction(const std::string &recipient, uint64_t amou
         throw std::runtime_error("[send_transaction] Unknown error occurred");
     }
 }
+// MANAGED-TRU-01. Preparation never broadcasts and never changes currentIndex.
+// The caller must persist these exact signed bytes before attempting broadcast.
+Transaction Wallet::prepareManagedTransfer(const std::string& sender,
+    const std::string& recipient, uint64_t amountAtoms,
+    uint64_t maxFeeAtoms, uint64_t& feeOut) {
+    std::lock_guard<std::mutex> mutationLock(encryptedMutationMutex_);
+    feeOut = 0;
+    if (!isLocalChain || !blockchainPtr || !blockchainPtr->mempool)
+        throw std::runtime_error("Managed transfers require local chain and mempool");
+    requirePrivateAccess("prepareManagedTransfer");
+    // MANAGED-088-01: do not prepare payments on a fail-stopped recovery state.
+    if (blockchainPtr->getForkRecoveryInfo().value("execution_halted", true))
+        throw std::runtime_error("Managed transfer blocked: fork recovery halted");
+    const auto owned = getAddresses();
+    if (std::find(owned.begin(), owned.end(), sender) == owned.end())
+        throw std::runtime_error("Managed source is not in this Core wallet");
+    if (sender == recipient) throw std::runtime_error("Managed self-transfer rejected");
+    if (!maxFeeAtoms || maxFeeAtoms > tru_limits::MAX_MONEY)
+        throw std::runtime_error("Invalid managed fee cap");
+    // Validate inputs
+    if (amountAtoms == 0 || amountAtoms > tru_limits::MAX_MONEY) {
+        Logger::log("[send_transaction] Error: Amount outside valid monetary range");
+        throw std::invalid_argument("[send_transaction] Amount must be 1..MAX_MONEY TRU atoms");
+    }
+
+    // The caller supplies the immutable source address.
+    if (sender.empty()) {
+        Logger::log("[send_transaction] Error: No current address set");
+        throw std::runtime_error("[send_transaction] No sender address available");
+    }
+    Logger::log("[send_transaction] Sender address: " + sender);
+
+    // Validate recipient address
+    std::string err;
+    if (!validateBase58Address(recipient, err)) {
+        Logger::log("[send_transaction] Error: Invalid recipient address: " + err);
+        throw std::invalid_argument("[send_transaction] Invalid recipient address: " + err);
+    }
+
+    // 30B3: caller supplies exact TRU atoms; no floating-point conversion.
+    uint64_t fee = WALLET_MIN_BASE_FEE;
+    if (amountAtoms > std::numeric_limits<uint64_t>::max() - fee) {
+        throw std::overflow_error("[send_transaction] amount + fee overflow");
+    }
+    uint64_t needed = amountAtoms + fee;
+    Logger::log("[send_transaction] Amount to send: " + std::to_string(amountAtoms) + " TRU atoms, fee: " +
+                std::to_string(fee) + ", total needed: " + std::to_string(needed));
+
+    // Fetch UTXOs
+    std::vector<UTXO> utxos;
+    if (isLocalChain && blockchainPtr) {
+        utxos = blockchainPtr->utxoSet.getUTXOsForAddress(sender);
+        Logger::log("[send_transaction] Retrieved " + std::to_string(utxos.size()) + " UTXOs from local chain for " + sender);
+    } else {
+        throw std::runtime_error("Managed transfers require the local chain");
+        Logger::log("[send_transaction] Retrieved " + std::to_string(utxos.size()) + " UTXOs via RPC for " + sender);
+    }
+
+    // FIX(patch54-safe-spend): apply consensus spendability rules before
+    // ordinary TRU input selection.
+    std::vector<UTXO> availableUtxos;
+    if (isLocalChain && blockchainPtr) {
+        LevelDBStorage* storage = blockchainPtr->getStorage();
+        const int tipHeight = blockchainPtr->getBestTipHeight();
+        if (!storage || tipHeight < 0) throw std::runtime_error("Managed chain state unavailable");
+        const uint32_t candidateHeight =
+            tipHeight >= 0 ? static_cast<uint32_t>(tipHeight + 1) : 0;
+
+        for (const auto& u : utxos) {
+            const std::string outpoint = u.txid + ":" + std::to_string(u.vout);
+
+            if (blockchainPtr->mempool->isUTXOSpentInMempool(u.txid, u.vout)) {
+                Logger::log("[send_transaction] UTXO spent in mempool, skipped: " + outpoint);
+                continue;
+            }
+            if (isSwapPreparedFundingInputReserved(storage, u.txid, u.vout)) {
+                Logger::log(
+                    "[send_transaction] Prepared-funding reserved UTXO skipped: " +
+                    outpoint);
+                continue;
+            }
+
+            // Never spend a token-controlling output as ordinary TRU.
+            if (storage && storage->exists("tokenUTXO:" + u.txid + ":" + std::to_string(u.vout))) {
+                Logger::log("[send_transaction] Token-controlling UTXO skipped: " + outpoint);
+                continue;
+            }
+
+            if (u.isCoinbase) {
+                if (tipHeight < 0 || candidateHeight <= u.createdAtHeight ||
+                    (candidateHeight - u.createdAtHeight) <
+                        static_cast<uint32_t>(COINBASE_MATURITY)) {
+                    const uint32_t spendableAt =
+                        u.createdAtHeight + static_cast<uint32_t>(COINBASE_MATURITY);
+                    Logger::log(
+                        "[send_transaction] Immature coinbase skipped: " + outpoint +
+                        " created=" + std::to_string(u.createdAtHeight) +
+                        " tip=" + std::to_string(tipHeight) +
+                        " spendableAt=" + std::to_string(spendableAt));
+                    continue;
+                }
+            }
+
+            // FIX(patch55-standard-tru-utxo): ordinary TRU sends may
+            // spend only canonical P2PKH coin outputs owned by `sender`.
+            // Protocol/data/control outputs can carry TRU atoms too, but
+            // must never be treated as generic spendable TRU.
+            const std::string& spk = u.scriptPubKey;
+            const bool canonicalP2PKH =
+                spk.size() == 50 &&
+                spk.rfind("76a914", 0) == 0 &&
+                spk.compare(spk.size() - 4, 4, "88ac") == 0 &&
+                std::all_of(spk.begin(), spk.end(),
+                    [](unsigned char c) {
+                        return std::isxdigit(c) != 0;
+                    });
+
+            if (!canonicalP2PKH) {
+                Logger::log(
+                    "[send_transaction] Non-P2PKH/protocol UTXO skipped: " +
+                    outpoint + " script=" + spk);
+                continue;
+            }
+
+            if (!doesScriptPayToAddress(spk, sender)) {
+                Logger::log(
+                    "[send_transaction] P2PKH UTXO does not pay sender, skipped: " +
+                    outpoint);
+                continue;
+            }
+
+            availableUtxos.push_back(u);
+            Logger::log("[send_transaction] Spendable standard P2PKH UTXO: " +
+                        outpoint + " amount=" + std::to_string(u.amount));
+        }
+    } else {
+        // Remote mode relies on listunspent RPC to return spendable UTXOs.
+        availableUtxos = utxos;
+    }
+
+    if (availableUtxos.empty()) {
+        Logger::log("[send_transaction] Error: No available UTXOs for sender");
+        throw std::runtime_error("[send_transaction] No available UTXOs for sender");
+    }
+
+    // Select UTXOs
+    uint64_t totalInput = 0;
+    std::vector<UTXO> selected;
+    for (const auto& u : availableUtxos) {
+        Logger::log("[send_transaction] Evaluating UTXO: txid=" + u.txid + ", vout=" + std::to_string(u.vout) +
+                    ", amount=" + std::to_string(u.amount) + " TRU atoms");
+        if (u.amount == 0) {
+            Logger::log("[send_transaction] Skipping UTXO with zero amount: " + u.txid + ":" + std::to_string(u.vout));
+            continue;
+        }
+
+        // FIX(patch55-standard-tru-utxo): defense in depth.
+        const std::string& selectedSpk = u.scriptPubKey;
+        const bool selectedIsP2PKH =
+            selectedSpk.size() == 50 &&
+            selectedSpk.rfind("76a914", 0) == 0 &&
+            selectedSpk.compare(selectedSpk.size() - 4, 4, "88ac") == 0 &&
+            std::all_of(selectedSpk.begin(), selectedSpk.end(),
+                [](unsigned char c) {
+                    return std::isxdigit(c) != 0;
+                });
+
+        if (!selectedIsP2PKH ||
+            !doesScriptPayToAddress(selectedSpk, sender)) {
+            Logger::log(
+                "[send_transaction] Defensive selection reject: " +
+                u.txid + ":" + std::to_string(u.vout));
+            continue;
+        }
+
+        selected.push_back(u);
+        if (u.amount > tru_limits::MAX_MONEY || totalInput > tru_limits::MAX_MONEY - u.amount)
+            throw std::runtime_error("Managed input amount overflow");
+        totalInput += u.amount;
+        if (totalInput >= needed) break;
+    }
+
+    if (totalInput < needed) {
+        Logger::log("[send_transaction] Error: Insufficient balance: need=" + std::to_string(needed) +
+                    ", have=" + std::to_string(totalInput));
+        throw std::runtime_error("[send_transaction] Insufficient balance: need " + std::to_string(needed) +
+                                 ", have " + std::to_string(totalInput));
+    }
+    Logger::log("[send_transaction] Selected " + std::to_string(selected.size()) +
+                " UTXOs with total input: " + std::to_string(totalInput) + " TRU atoms");
+
+    // Build transaction
+    Transaction tx(false);
+    tx.set_sender(sender);
+    for (const auto& s : selected) {
+        Logger::log("[send_transaction] Adding input: txid=" + s.txid + ", vout=" + std::to_string(s.vout));
+        tx.vin.emplace_back(s.txid, s.vout);
+    }
+
+    std::string recScript = createP2PKHScriptHexFromAddress(recipient);
+    Logger::log("[send_transaction] Adding output: amount=" + std::to_string(amountAtoms) +
+                " TRU atoms, scriptPubKey=" + recScript);
+    tx.vout.emplace_back(amountAtoms, recScript);
+
+    uint64_t leftover = totalInput - needed;
+    std::size_t feeBearingVout = WALLET_NO_FEE_BEARING_VOUT;
+    if (leftover > 0) {
+        std::string changeScript = createP2PKHScriptHexFromAddress(sender);
+        Logger::log("[send_transaction] Adding change output: amount=" + std::to_string(leftover) +
+                    " TRU atoms, scriptPubKey=" + changeScript);
+        tx.vout.emplace_back(leftover, changeScript);
+        feeBearingVout = tx.vout.size() - 1;
+    }
+
+    fee = applyWalletPolicyFee(
+        tx, fee, feeBearingVout, "send_transaction");
+
+    // Sign transaction, passing nodeIP and nodePort for RPC mode
+    Logger::log("[send_transaction] Signing transaction");
+    if (fee > maxFeeAtoms) throw std::runtime_error("Managed transfer fee exceeds approved cap");
+    if (blockchainPtr->getForkRecoveryInfo().value("execution_halted", true))
+        throw std::runtime_error("Managed transfer blocked: fork recovery halted");
+    if (!signTransaction(tx)) {
+        Logger::log("[send_transaction] Error: Failed to sign transaction");
+        throw std::runtime_error("[send_transaction] Failed to sign transaction");
+    }
+
+    // Compute TXID
+    tx.computeTxId();
+    Logger::log("[send_transaction] Transaction ID computed: " + tx.txid);
+
+
+    feeOut = fee;
+    return tx;
+}
+
 //====================================================================================
 //              MS-01D — Deterministic Multisig / Escrow V1 Spend Template
 //====================================================================================
@@ -6792,34 +7008,32 @@ std::string Wallet::issueExtendedNCFT(
 // Calculate the atom ordinal.
 //=========================================================
 uint64_t Wallet::calculateCurrentSatNumber() {
-    uint64_t totalSats = 0;
-    uint32_t currentHeight = blockchainPtr->getBestTipHeight();
-    
-    for (uint32_t height = 0; height <= currentHeight; height++) {
-        uint64_t blockReward = getBlockReward(height);
-        totalSats += blockReward;
+    if (!blockchainPtr) {
+        throw std::runtime_error("Local chain not available");
     }
-    
-    // Return the next available TRU atom ordinal
+    const int currentHeight = blockchainPtr->getBestTipHeight();
+    uint64_t totalSats = 0;
+    // Genesis is height 1. This is scheduled issuance metadata, not a count
+    // of actual coinbase claims or ownership of a particular TRU atom.
+    for (int64_t height = 1; height <= currentHeight; ++height) {
+        const uint64_t reward = getBlockReward(static_cast<uint32_t>(height));
+        if (reward == 0) break;
+        totalSats += reward;
+    }
     return totalSats;
 }
 //==========================================================
 // 			GET BLOCKREWARD FOR 
 //=========================================================
 uint64_t Wallet::getBlockReward(uint32_t height) {
-    // Genesis block and first 210,000 blocks: 50 TRU = 5,000,000,000 TRU atoms
-    if (height < 210000) {
-        return 5000000000; // NOT 10000000000!
+    if (!blockchainPtr) {
+        throw std::runtime_error("Local chain not available");
     }
-    // Halving every 210,000 blocks
-    uint32_t halvings = height / 210000;
-    uint64_t reward = 5000000000;
-    
-    for (uint32_t i = 0; i < halvings && reward > 0; i++) {
-        reward /= 2;
+    if (height == 0) return 0; // No block before height-1 genesis.
+    if (height > static_cast<uint32_t>(std::numeric_limits<int>::max())) {
+        throw std::out_of_range("Block height exceeds consensus height type");
     }
-    
-    return reward;
+    return blockchainPtr->calculateSubsidy(static_cast<int>(height));
 }
 
 //==========================================================================================

@@ -21042,7 +21042,7 @@ std::string Blockchain::mineBlockGPUChain(P2PNode* p2p, const std::string& miner
     cbase.vin.emplace_back("COINBASE", 0);
     cbase.vin[0].scriptSig.assign(rnd.begin(), rnd.end());
     std::string spk = createP2PKHScriptHexFromAddress(minerAddr);
-    cbase.vout.emplace_back(blockReward, spk);
+    cbase.vout.emplace_back(calculateSubsidy(newHeight), spk);
     cbase.computeTxId();
     newBlk.transactions.push_back(cbase);
 
@@ -21400,7 +21400,7 @@ Block Blockchain::mineBlockCPU(P2PNode* p2p, const std::string& minerAddr) {
     coinbase.vin.emplace_back("COINBASE", 0);
     coinbase.vin[0].scriptSig.assign(data.begin(), data.end());
     std::string spk = createP2PKHScriptHexFromAddress(minerAddr);
-    coinbase.vout.emplace_back(blockReward, spk);
+    coinbase.vout.emplace_back(calculateSubsidy(newHeight), spk);
     coinbase.computeTxId();
     newBlk.transactions.push_back(coinbase);
 

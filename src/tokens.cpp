@@ -42,39 +42,37 @@ std::string buildTRUScript_OPRETURN(const std::string& text,
     // Convert JSON to string
     std::string jsonStr = metadata.dump();
     
-    // Convert to hex
-    std::string dataHex;
-    for (unsigned char c : jsonStr) {
-        char buf[3];
-        sprintf(buf, "%02x", c);
-        dataHex += buf;
+    // Local construction bound: OP_PUSHDATA2 carries at most 65535 bytes.
+    // Check serialized JSON, including escaping, before expanding it to hex.
+    // This does not change the script interpreter or consensus size limits.
+    const size_t dataLen = jsonStr.size();
+    if (dataLen > 65535u) {
+        throw std::length_error(
+            "TRUScript serialized metadata exceeds 65535 bytes");
     }
-    
-    // Build OP_RETURN script
-    // Format: OP_RETURN <length> <data>
-    size_t dataLen = dataHex.length() / 2;
-    std::string lenHex;
-    
-    if (dataLen <= 75) {
-        // Direct push
-        char buf[3];
-        sprintf(buf, "%02x", (unsigned int)dataLen);
-        lenHex = buf;
-    } else if (dataLen <= 255) {
-        // OP_PUSHDATA1
-        lenHex = "4c";
-        char buf[3];
-        sprintf(buf, "%02x", (unsigned int)dataLen);
-        lenHex += buf;
+
+    static constexpr char hex[] = "0123456789abcdef";
+    std::string scriptHex;
+    scriptHex.reserve(8u + dataLen * 2u);
+    const auto appendByte = [&](unsigned char value) {
+        scriptHex.push_back(hex[value >> 4]);
+        scriptHex.push_back(hex[value & 0x0f]);
+    };
+    appendByte(0x6a); // OP_RETURN
+    if (dataLen <= 75u) {
+        appendByte(static_cast<unsigned char>(dataLen));
+    } else if (dataLen <= 255u) {
+        appendByte(0x4c); // OP_PUSHDATA1
+        appendByte(static_cast<unsigned char>(dataLen));
     } else {
-        // OP_PUSHDATA2 (for larger data)
-        lenHex = "4d";
-        char buf[5];
-        sprintf(buf, "%02x%02x", (unsigned int)(dataLen & 0xFF), (unsigned int)(dataLen >> 8));
-        lenHex += buf;
+        appendByte(0x4d); // OP_PUSHDATA2, little-endian length
+        appendByte(static_cast<unsigned char>(dataLen & 0xffu));
+        appendByte(static_cast<unsigned char>((dataLen >> 8) & 0xffu));
     }
-    
-    return "6a" + lenHex + dataHex;
+    for (unsigned char value : jsonStr) {
+        appendByte(value);
+    }
+    return scriptHex;
 }
 
 //========================================================================

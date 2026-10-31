@@ -508,7 +508,13 @@ public:
         std::string& addressOut,
         std::string& publicKeyHexOut,
         std::uint32_t& indexOut,
-        std::string* errorOut = nullptr);
+        std::string* errorOut = nullptr,
+        bool selectNewAddress = true);
+
+    // MANAGED-TRU-01: explicit source, signed preparation only; no address selection mutation.
+    Transaction prepareManagedTransfer(const std::string& sender,
+        const std::string& recipient, uint64_t amountAtoms,
+        uint64_t maxFeeAtoms, uint64_t& feeOut);
 
     // TRU-SWAP-B: deterministic public view of reserved swap role keys.
     // Requires the encrypted wallet to be authenticated/unlocked.
@@ -662,7 +668,7 @@ private:
         const std::string& targetPrefix,
         const std::string& privateKeyPEM);
     
-    // Wallet helper declaration.
+    // Add this helper if you don't have it already
     std::string extractTargetFromMagicLockScript(const std::string& scriptHex) const;
 };
 

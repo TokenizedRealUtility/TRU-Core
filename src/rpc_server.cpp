@@ -9766,9 +9766,11 @@ static bool consumeRpcBucket(std::unordered_map<std::string, RpcRateBucket>& buc
 
 static double rpcMethodCost(const std::string& method) {
     if(method=="quantumwallet" || method=="getquantuminput" || method=="sendquantumtransaction") return 20.0;
+    if(method=="marketwalletsign09")return 20.0;
     if(method=="getmarketportfolio")return 8.0;
     if(method=="getmagicsecret" || method=="preparemagicsecret" || method=="publishmagicsecret") return 20.0;
     static const std::unordered_set<std::string> expensive = {
+        "getnewmanagedaddress", "sendfromaddress",
         "submitblock", "sendtoaddress", "sendrawtransaction", "sendrawtransactionWeb",
         "signrawtransactionwithkey", "signrawtransactionwithkeyWeb",
         "issuetoken", "issuetokensigned", "createcontracttransaction",
@@ -9997,9 +9999,73 @@ static json handleSendToAddressLocal(Blockchain& chain, Wallet& wallet, const js
         return makeError(-32075, "local send failed; inspect Core wallet/log (no retry without checking mempool)");
     }
 }
+// MANAGED-TRU-01: local authenticated custody operations. Telegram authorization
+// belongs to the bot; possession of the Core RPC cookie is operator authority.
+static json handleManagedAddress(Wallet& wallet, const json& p, int id,
+                                  const std::string& peer) {
+    if (!rpcLocalPeer(peer) || !rpcEnvEnabled("TRU_RPC_MANAGED_WALLET_ENABLE") ||
+        !rpcEnvEnabled("TRU_RPC_WALLET_SEND_ENABLE"))
+        return makeError(-32070, "managed wallet RPC disabled or non-local peer");
+    if (!p.is_object() || !p.empty()) return makeError(-32602, "no parameters expected");
+    try {
+        std::lock_guard<std::mutex> guard(g_cliSendMutex);
+        std::string address, pub, error;
+        std::uint32_t index = 0;
+        if (!wallet.generateNewAddressEncrypted(address, pub, index, &error, false))
+            return makeError(-32073, "managed address generation failed; inspect Core wallet state");
+        return makeResult(id, json{{"address",address},{"publicKey",pub},{"index",index},
+            {"selected_address_changed",false},{"managed_wallet_version",1}});
+    } catch (...) {
+        return makeError(-32073, "managed address generation failed; inspect Core wallet state");
+    }
+}
+
+static json handleSendFromAddress(Blockchain& chain, Wallet& wallet, const json& p,
+                                  int id, const std::string& peer) {
+    if (!rpcLocalPeer(peer) || !rpcEnvEnabled("TRU_RPC_MANAGED_WALLET_ENABLE") ||
+        !rpcEnvEnabled("TRU_RPC_WALLET_SEND_ENABLE"))
+        return makeError(-32070, "managed wallet RPC disabled or non-local peer");
+    if (!p.is_object() || p.size()!=5 || !p.contains("from") || !p["from"].is_string() ||
+        !p.contains("address") || !p["address"].is_string() ||
+        !p.contains("amount") || !p["amount"].is_string() ||
+        !p.contains("max_fee") || !p["max_fee"].is_string() ||
+        !p.contains("prepare_only") || !p["prepare_only"].is_boolean())
+        return makeError(-32602, "requires from, address, amount, max_fee strings and prepare_only boolean");
+    const std::string from = p["from"].get<std::string>();
+    const std::string to = p["address"].get<std::string>();
+    if (from.size()>128 || to.size()>128 || !chain.isValidAddress(from) || !chain.isValidAddress(to))
+        return makeError(-32602, "invalid source or destination");
+    uint64_t n=0, cap=0, fee=0;
+    std::string why;
+    if (!parseJsonTRUAmount(p["amount"],n,why) || !n ||
+        !parseJsonTRUAmount(p["max_fee"],cap,why) || !cap ||
+        !rpcMaxSendAtoms() || n>rpcMaxSendAtoms())
+        return makeError(-32602, "invalid amount, fee cap, or operator send limit");
+    try {
+        std::lock_guard<std::mutex> guard(g_cliSendMutex);
+        if (chain.getForkRecoveryInfo().value("execution_halted", true))
+            return makeError(-32076, "managed transfer blocked: fork recovery halted");
+        Transaction tx = wallet.prepareManagedTransfer(from,to,n,cap,fee);
+        json out={{"from",from},{"address",to},{"amount_atoms",n},{"fee_atoms",fee},
+                  {"txid",tx.txid},{"broadcast",false},{"managed_wallet_version",1}};
+        if (p["prepare_only"].get<bool>()) {
+            out["txHex"]=bytesToHex(tx.serializeBinary());
+        } else {
+            if (chain.getForkRecoveryInfo().value("execution_halted", true))
+                return makeError(-32076, "managed broadcast blocked: fork recovery halted");
+            if (!chain.broadcastTransaction(tx))
+                return makeError(-32074, "managed send not accepted; inspect transaction history before retrying");
+            out["broadcast"]=true;
+        }
+        return makeResult(id,out);
+    } catch (...) {
+        return makeError(-32075, "managed transfer failed; inspect Core wallet/log; do not blindly retry a send");
+    }
+}
 } // namespace
 
 #include "market_rpc09.inc"
+#include "market_wallet_rpc_v1.inc"
 
 void startRPCServer(Blockchain &chain, Wallet &wallet, P2PNode &node, int port,
                     const std::string &bindIP, int maxConnections,
@@ -10080,6 +10146,8 @@ void startRPCServer(Blockchain &chain, Wallet &wallet, P2PNode &node, int port,
         else if (m=="burntoken")           response=handleBurnToken(chain,wallet,params,id);
         else if (m=="gettokenburninfo")    response=handleGetTokenBurnInfo(id);
         else if (m=="getnewaddress")       response=handleGetNewAddress(wallet,params,id);
+        else if (m=="getnewmanagedaddress") response=handleManagedAddress(wallet,params,id,req.remote_addr);
+        else if (m=="sendfromaddress") response=handleSendFromAddress(chain,wallet,params,id,req.remote_addr);
         else if (m=="reportmineractivity") response=handleReportMinerActivityOptimized(chain,params,id);
         else if (m=="getblocktemplate") {
             try {
@@ -10143,6 +10211,10 @@ void startRPCServer(Blockchain &chain, Wallet &wallet, P2PNode &node, int port,
                     response=makeResult(id,wallet.quantumTransaction(action,params));
                 }
             } catch(const std::exception& e){response=makeError(-32080,e.what());}
+        }
+        else if (m=="marketwalletsign09") {
+            if(!rpcLocalPeer(req.remote_addr)||!rpcEnvEnabled("TRU_RPC_MARKET_SIGN_ENABLE")) response=makeError(-32070,"Local market signing requires loopback and TRU_RPC_MARKET_SIGN_ENABLE=1");
+            else { std::lock_guard<std::mutex> guard(g_cliSendMutex); response=marketWalletSignV1(chain,wallet,params,id); }
         }
         else if (m=="getconsensus09info") response=consensusInfo09(chain,id);
         else if (m=="buildmarkettransaction09") response=buildMarket09(chain,params,id);
