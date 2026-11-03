@@ -21,6 +21,18 @@ static uint64_t add(uint64_t a,uint64_t b) {
 }
 static std::string outpoint(const UTXO& u) { return u.txid+":"+std::to_string(u.vout); }
 struct Coin { UTXO u; std::string address; std::string excluded; };
+static Coin classify(Blockchain& chain,const UTXO& u,const std::string& address,
+                     const std::string& script,int tip) {
+            Coin c{u,address,""}; std::string reserved;
+            if(u.scriptPubKey!=script) c.excluded="nonstandard_or_contract";
+            else if(chain.getStorage()->exists("tokenUTXO:"+outpoint(u))) c.excluded="token_control";
+            else if(chain.getStorage()->getWithDataChecksum(tru_swap_prepared_funding::inputKey(u.txid,u.vout),reserved)) c.excluded="reserved";
+            else if(u.createdAtHeight>static_cast<uint32_t>(tip)) c.excluded="unconfirmed";
+            else if(u.isCoinbase && static_cast<uint64_t>(tip)+1 < static_cast<uint64_t>(u.createdAtHeight)+COINBASE_MATURITY) c.excluded="immature_coinbase";
+            else if(chain.mempool->isUTXOSpentInMempool(u.txid,u.vout)) c.excluded="pending_spend";
+            else if(u.amount==0) c.excluded="zero_value";
+    return c;
+}
 static std::vector<Coin> scan(Blockchain& chain, Wallet& wallet) {
     need(wallet.isLocalChainAvailable() && chain.getStorage() && chain.mempool,"Local chain/storage/mempool required");
     const int tip=chain.getBestTipHeight(); need(tip>=0 && tip<INT_MAX,"Invalid tip");
@@ -31,14 +43,7 @@ static std::vector<Coin> scan(Blockchain& chain, Wallet& wallet) {
         for(const auto& u:chain.utxoSet.getUTXOsForAddress(address)) {
             if(!seen.insert(outpoint(u)).second) continue;
             need(result.size()<MAX_SCAN,"Too many UTXOs for this bounded tool");
-            Coin c{u,address,""}; std::string reserved;
-            if(u.scriptPubKey!=script) c.excluded="nonstandard_or_contract";
-            else if(chain.getStorage()->exists("tokenUTXO:"+outpoint(u))) c.excluded="token_control";
-            else if(chain.getStorage()->getWithDataChecksum(tru_swap_prepared_funding::inputKey(u.txid,u.vout),reserved)) c.excluded="reserved";
-            else if(u.createdAtHeight>static_cast<uint32_t>(tip)) c.excluded="unconfirmed";
-            else if(u.isCoinbase && static_cast<uint64_t>(tip)+1 < static_cast<uint64_t>(u.createdAtHeight)+COINBASE_MATURITY) c.excluded="immature_coinbase";
-            else if(chain.mempool->isUTXOSpentInMempool(u.txid,u.vout)) c.excluded="pending_spend";
-            else if(u.amount==0) c.excluded="zero_value";
+            Coin c=classify(chain,u,address,script,tip);
             result.push_back(c);
         }
     }
@@ -92,6 +97,34 @@ static std::vector<Coin> choose(const json& p, const std::vector<Coin>& all, uin
     }
     need(!result.empty(),"No eligible coins"); return result;
 }
+// Explicit inputs use canonical outpoint reads, never address-index membership.
+// Both pre-sign and post-sign prepare calls perform these checks afresh.
+static std::vector<Coin> selected(Blockchain& chain,Wallet& wallet,const json& p) {
+    need(wallet.isLocalChainAvailable() && chain.getStorage() && chain.mempool,"Local chain/storage/mempool required");
+    const int tip=chain.getBestTipHeight(); need(tip>=0 && tip<INT_MAX,"Invalid tip");
+    const auto addresses=wallet.getAddresses(); need(addresses.size()<=MAX_SCAN,"Too many addresses for this bounded tool");
+    std::map<std::string,std::string> owners;
+    for(const auto& address:addresses) owners.emplace(createP2PKHScriptHexFromAddress(address),address);
+    const auto& refs=p.at("inputs");
+    need(refs.is_array() && !refs.empty() && refs.size()<=MAX_INPUTS,"Expected 1..100 inputs");
+    std::set<std::string> seen; std::vector<Coin> result;
+    for(const auto& r:refs) {
+        keys(r,{"txid","vout"});
+        need(r.contains("txid") && r.at("txid").is_string() && r.contains("vout") && r.at("vout").is_number_integer(),"Invalid input reference");
+        const auto v=r.at("vout").get<int64_t>(); need(v>=0 && v<=INT_MAX,"Invalid output index");
+        const auto txid=r.at("txid").get<std::string>(); need(txid.size()==64 && isHex(txid),"Invalid txid");
+        need(seen.insert(txid+":"+std::to_string(v)).second,"Duplicate input");
+        UTXO u;
+        need(chain.utxoSet.getUTXO(txid,static_cast<uint32_t>(v),u),"Input missing or spent");
+        need(u.txid==txid && u.vout==static_cast<uint32_t>(v),"Outpoint lookup mismatch");
+        const auto owner=owners.find(u.scriptPubKey);
+        need(owner!=owners.end(),"Input is not an ordinary wallet coin");
+        auto c=classify(chain,u,owner->second,owner->first,tip);
+        need(c.excluded.empty(),"Input unavailable or excluded");
+        result.push_back(c);
+    }
+    return result;
+}
 struct Prepared { Transaction tx; std::vector<Coin> coins; json plan; uint64_t fee; };
 static Prepared prepare(Blockchain& chain,Wallet& wallet,const json& p) {
     keys(p,{"action","mode","address","count","amount","max_fee","inputs"});
@@ -99,17 +132,21 @@ static Prepared prepare(Blockchain& chain,Wallet& wallet,const json& p) {
     const auto address=p.at("address").get<std::string>();
     const auto owned=wallet.getAddresses();
     need(chain.isValidAddress(address) && std::find(owned.begin(),owned.end(),address)!=owned.end(),"Destination must belong to this wallet");
-    const auto mode=p.value("mode",std::string("split")); need(mode=="split" || mode=="consolidate","Invalid mode");
+    const auto mode=p.value("mode",std::string("split")); need(mode=="split" || mode=="consolidate" || mode=="pay","Invalid mode");
     const bool consolidate=mode=="consolidate";
     uint64_t each=0, outputTotal=0; size_t count=1;
-    if(!consolidate) {
+    if(mode=="pay") {
+        need(!p.contains("count"),"Pay does not take count");
+        each=amount(p,"amount"); need(each>=tru_limits::MIN_OUTPUT_DUST_ATOMS,"Output below dust threshold");
+        outputTotal=each;
+    } else if(!consolidate) {
         need(p.contains("count") && p.at("count").is_number_integer(),"Integer count required");
         const auto n=p.at("count").get<int64_t>(); need(n>=2 && n<=99,"Split count must be 2..99; one slot reserved for change"); count=static_cast<size_t>(n);
         each=amount(p,"amount"); need(each>=tru_limits::MIN_OUTPUT_DUST_ATOMS,"Output below dust threshold");
         need(each<=tru_limits::MAX_MONEY/count,"Output total overflow"); outputTotal=each*count;
     } else need(!p.contains("amount") && !p.contains("count"),"Consolidation does not take count/amount");
     const auto cap=amount(p,"max_fee");
-    auto coins=choose(p,scan(chain,wallet),add(outputTotal,cap),consolidate);
+    auto coins=choose(p,p.contains("inputs") ? selected(chain,wallet,p) : scan(chain,wallet),add(outputTotal,cap),consolidate);
     uint64_t total=0; Transaction tx(false);
     for(const auto& c:coins) { total=add(total,c.u.amount); tx.vin.emplace_back(c.u.txid,c.u.vout); }
     need(total>=add(outputTotal,cap),"Insufficient selected funds including maximum-fee reserve");
@@ -130,7 +167,7 @@ static Prepared prepare(Blockchain& chain,Wallet& wallet,const json& p) {
     }
     need(tx.vout.size()<=MAX_OUTPUTS,"Too many outputs"); tx.computeTxId();
     json request={{"mode",mode},{"address",address},{"max_fee",tru_amount::formatNumeric(cap)},{"inputs",coinRefs(coins)}};
-    if(!consolidate) {request["count"]=count;request["amount"]=tru_amount::formatNumeric(each);}
+    if(!consolidate) {if(mode=="split") request["count"]=count;request["amount"]=tru_amount::formatNumeric(each);}
     json outputs=json::array(); for(size_t i=0;i<tx.vout.size();++i) outputs.push_back({{"vout",i},{"address",address},{"amount_atoms",tx.vout[i].amount},{"amount",tru_amount::formatNumeric(tx.vout[i].amount)}});
     json plan={{"tool_version",1},{"request",request},{"txid",tx.txid},{"unsigned_hex",bytesToHex(tx.serializeBinary())},
         {"input_atoms",total},{"fee_atoms",actualFee},{"fee",tru_amount::formatNumeric(actualFee)},
