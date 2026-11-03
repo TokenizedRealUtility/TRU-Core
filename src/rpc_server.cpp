@@ -21,6 +21,7 @@
 #include "utils.h"
 #include "logging.h"
 #include "wallet.h"
+#include "tru_swap_prepared_funding_guard.h"
 #include "tru_swap_v1_state.h"  // TRU-SWAP-A automation foundation
 #include <cstdlib>  // TRU_SWAP_RPC_TOKEN
 #include "hdwallet.h"
@@ -9770,7 +9771,7 @@ static double rpcMethodCost(const std::string& method) {
     if(method=="getmarketportfolio")return 8.0;
     if(method=="getmagicsecret" || method=="preparemagicsecret" || method=="publishmagicsecret") return 20.0;
     static const std::unordered_set<std::string> expensive = {
-        "getnewmanagedaddress", "sendfromaddress",
+        "walletutxotools", "getnewmanagedaddress", "sendfromaddress",
         "submitblock", "sendtoaddress", "sendrawtransaction", "sendrawtransactionWeb",
         "signrawtransactionwithkey", "signrawtransactionwithkeyWeb",
         "issuetoken", "issuetokensigned", "createcontracttransaction",
@@ -9999,6 +10000,8 @@ static json handleSendToAddressLocal(Blockchain& chain, Wallet& wallet, const js
         return makeError(-32075, "local send failed; inspect Core wallet/log (no retry without checking mempool)");
     }
 }
+#include "wallet_utxo_tools_v1.inc"
+
 // MANAGED-TRU-01: local authenticated custody operations. Telegram authorization
 // belongs to the bot; possession of the Core RPC cookie is operator authority.
 static json handleManagedAddress(Wallet& wallet, const json& p, int id,
@@ -10147,6 +10150,7 @@ void startRPCServer(Blockchain &chain, Wallet &wallet, P2PNode &node, int port,
         else if (m=="gettokenburninfo")    response=handleGetTokenBurnInfo(id);
         else if (m=="getnewaddress")       response=handleGetNewAddress(wallet,params,id);
         else if (m=="getnewmanagedaddress") response=handleManagedAddress(wallet,params,id,req.remote_addr);
+        else if (m=="walletutxotools") response=tru_utxo_tools_v1::run(chain,wallet,params,id,req.remote_addr);
         else if (m=="sendfromaddress") response=handleSendFromAddress(chain,wallet,params,id,req.remote_addr);
         else if (m=="reportmineractivity") response=handleReportMinerActivityOptimized(chain,params,id);
         else if (m=="getblocktemplate") {

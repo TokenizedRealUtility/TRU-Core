@@ -88,6 +88,8 @@ Options:
 
 Friendly commands -- these are all implemented direct command wrappers:
   getinfo                          aggregate node + wallet snapshot
+  utxo <list|prepare|submit> [JSON or @file]
+                                   wallet UTXO inventory, split/consolidate preview and submit
   getbalance [address]             ordinary spendable TRU balance
   sendtoaddress <addr> <amount> [--dry-run]
                                    ordinary TRU send; local wallet opt-in required
@@ -458,6 +460,30 @@ int main(int argc, char** argv) {
             json resp = rpcCall(cfg, method, params);
             printResultRaw(resp);
             return (resp.contains("error") && !resp["error"].is_null()) ? 2 : 0;
+        }
+
+        // UTXO-TOOLS-01: public-data-only requests; keys never leave Core.
+        if (cmd == "utxo") {
+            if (pos.size()<2 || pos.size()>3) { std::cerr << "utxo <list|prepare|submit> [JSON or @file]\n"; return 2; }
+            const auto action=pos[1];
+            if(action!="list" && action!="prepare" && action!="submit") throw std::runtime_error("Unknown utxo action");
+            if(cfg.ip!="127.0.0.1" && cfg.ip!="localhost" && cfg.ip!="::1") throw std::runtime_error("utxo requires local Core RPC");
+            json p=json::object();
+            if(pos.size()==3) {
+                std::string data=pos[2];
+                if(!data.empty() && data[0]=='@') {
+                    std::ifstream file(data.substr(1),std::ios::binary);
+                    if(!file) throw std::runtime_error("Cannot open UTXO request file");
+                    data.clear(); char ch;
+                    while(file.get(ch)) { if(data.size()>=262144) throw std::runtime_error("UTXO request file too large"); data.push_back(ch); }
+                }
+                p=json::parse(data);
+            }
+            if(!p.is_object()) throw std::runtime_error("UTXO parameters must be an object");
+            if(p.contains("action")) throw std::runtime_error("Action belongs in CLI subcommand, not JSON");
+            p["action"]=action;
+            const auto r=rpcCall(cfg,"walletutxotools",p); printResultRaw(r);
+            return r.contains("error") && !r["error"].is_null()?2:0;
         }
 
         // Dedicated quantum namespace; JSON contains public data only.
