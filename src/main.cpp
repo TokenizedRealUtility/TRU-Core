@@ -6779,45 +6779,72 @@ void startCLI(Blockchain &chain, P2PNode &node, Wallet &wallet,
             }
         }
         else if (choice == "4") {
-            // Generate new address
+            // WALLET-ADDRESS-01 / SEC-14E: use authenticated encrypted
+            // persistence in the CLI just as getnewaddress does in RPC.
+            // Never fall back to the legacy plaintext mutator for encrypted wallets.
             try {
-                std::string newAddress = wallet.generateNewAddress();
-                uint32_t idx = wallet.getAddressIndex() - 1;
-                //printQRCode(newAddress);
-                viewAddressQRCode(newAddress);
-                // Derive private key and public key
-                std::string privPEM = wallet.deriveHDPrivateKey(idx);
-                ECDSAKey newKey = ECDSAKey::fromPrivateKey(privPEM);
-                std::vector<unsigned char> derivedPubKey = newKey.getCompressedSec1();
+                const auto securityMode = wallet.getWalletSecurityMode();
+                if (securityMode == WalletSecurityModeV1::ENCRYPTED_LOCKED) {
+                    displayOutput("[CLI] Wallet locked: unlock the authenticated encrypted wallet before creating an address.", rows, coutMutex);
+                } else if (securityMode == WalletSecurityModeV1::ENCRYPTED_UNLOCKED) {
+                    std::string newAddress;
+                    std::string publicKeyHex;
+                    uint32_t idx = 0U;
+                    std::string error;
+                    if (!wallet.generateNewAddressEncrypted(newAddress, publicKeyHex, idx, &error)) {
+                        displayOutput("[CLI] Failed to generate new address: " +
+                                      (error.empty() ? std::string("authenticated encrypted address creation failed") : error),
+                                      rows, coutMutex);
+                    } else {
+                        // Wallet API has already verified the private/public key
+                        // binding and atomically committed public address metadata.
+                        viewAddressQRCode(newAddress);
+                        displayOutput("[CLI] New address generated, verified and persisted: " + newAddress, rows, coutMutex);
+                        displayOutput("[CLI] HD index: " + std::to_string(idx), rows, coutMutex);
+                        displayOutput("[CLI] Compressed PubKey: " + publicKeyHex, rows, coutMutex);
+                    }
+                } else if (securityMode == WalletSecurityModeV1::LEGACY_PLAINTEXT) {
+                    // Preserve existing plaintext behavior for explicitly legacy wallets.
+                    std::string newAddress = wallet.generateNewAddress();
+                    uint32_t idx = wallet.getAddressIndex() - 1;
+                    //printQRCode(newAddress);
+                    viewAddressQRCode(newAddress);
+                    // Derive private key and public key
+                    std::string privPEM = wallet.deriveHDPrivateKey(idx);
+                    ECDSAKey newKey = ECDSAKey::fromPrivateKey(privPEM);
+                    std::vector<unsigned char> derivedPubKey = newKey.getCompressedSec1();
 
-                // Get the original public key for comparison
-                std::vector<unsigned char> originalPubKey = wallet.deriveHDPublicKey(idx);
-                std::string derivedPubKeyHex = bytesToHex(derivedPubKey);
-                std::string originalPubKeyHex = bytesToHex(originalPubKey);
-                displayOutput("[CLI] Derived PubKey: " + derivedPubKeyHex, rows, coutMutex);
-                displayOutput("[CLI] Original PubKey: " + originalPubKeyHex, rows, coutMutex);
+                    // Get the original public key for comparison
+                    std::vector<unsigned char> originalPubKey = wallet.deriveHDPublicKey(idx);
+                    std::string derivedPubKeyHex = bytesToHex(derivedPubKey);
+                    std::string originalPubKeyHex = bytesToHex(originalPubKey);
+                    displayOutput("[CLI] Derived PubKey: " + derivedPubKeyHex, rows, coutMutex);
+                    displayOutput("[CLI] Original PubKey: " + originalPubKeyHex, rows, coutMutex);
 
-                // Compute address from derived public key
-                unsigned char hash160[HASH160_LEN];
-                if (wally_hash160(derivedPubKey.data(), derivedPubKey.size(), hash160, HASH160_LEN) != WALLY_OK) {
-                    throw std::runtime_error("Failed to compute hash160");
-                }
-                unsigned char verplus[1 + HASH160_LEN];
-                verplus[0] = tru_network::MAINNET_P2PKH_VERSION;
-                memcpy(verplus + 1, hash160, HASH160_LEN);
-                char* computedAddr = nullptr;
-                if (wally_base58_from_bytes(verplus, sizeof(verplus), BASE58_FLAG_CHECKSUM, &computedAddr) != WALLY_OK) {
-                    throw std::runtime_error("Failed to compute address from public key");
-                }
-                std::string computedAddress(computedAddr);
-                wally_free_string(computedAddr);
+                    // Compute address from derived public key
+                    unsigned char hash160[HASH160_LEN];
+                    if (wally_hash160(derivedPubKey.data(), derivedPubKey.size(), hash160, HASH160_LEN) != WALLY_OK) {
+                        throw std::runtime_error("Failed to compute hash160");
+                    }
+                    unsigned char verplus[1 + HASH160_LEN];
+                    verplus[0] = tru_network::MAINNET_P2PKH_VERSION;
+                    memcpy(verplus + 1, hash160, HASH160_LEN);
+                    char* computedAddr = nullptr;
+                    if (wally_base58_from_bytes(verplus, sizeof(verplus), BASE58_FLAG_CHECKSUM, &computedAddr) != WALLY_OK) {
+                        throw std::runtime_error("Failed to compute address from public key");
+                    }
+                    std::string computedAddress(computedAddr);
+                    wally_free_string(computedAddr);
 
-                // Verify
-                if (computedAddress != newAddress) {
-                    displayOutput("[CLI] Error: Generated address does not match derived public key! " +
-                                  newAddress + " != " + computedAddress, rows, coutMutex);
+                    // Verify
+                    if (computedAddress != newAddress) {
+                        displayOutput("[CLI] Error: Generated address does not match derived public key! " +
+                                      newAddress + " != " + computedAddress, rows, coutMutex);
+                    } else {
+                        displayOutput("[CLI] New address generated and verified: " + newAddress, rows, coutMutex);
+                    }
                 } else {
-                    displayOutput("[CLI] New address generated and verified: " + newAddress, rows, coutMutex);
+                    displayOutput("[CLI] Unsupported wallet security state: address creation refused.", rows, coutMutex);
                 }
             } catch (const std::exception& e) {
                 displayOutput("[CLI] Failed to generate new address: " + std::string(e.what()), rows, coutMutex);
