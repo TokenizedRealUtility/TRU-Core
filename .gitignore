@@ -100,3 +100,7 @@ build-desktop-mac01-qt6-test/
 .tru-patch-backups/
 /scripts/
 /market/*.md
+
+# Personal documentation - keep locally, exclude from GitHub
+/swap/*.md
+/swap/agent/*.md
