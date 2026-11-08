@@ -71,7 +71,7 @@ public:
         second->addWidget(workerAccept);second->addWidget(workerDecline);
         second->addWidget(customerAccept);second->addWidget(settlement);
         actionLayout->addLayout(second);outer->addWidget(actionBox);
-        connect(signIn,&QPushButton::clicked,this,[this]{ login(); });
+        connect(signIn,&QPushButton::clicked,this,[this]{ this->login(); });
         connect(signOut,&QPushButton::clicked,this,[this]{ logout(); });
         connect(network,&QPushButton::clicked,this,[this]{ fetch("/api/v1/network/summary",[this](const QJsonObject& o){ showJson(o); }); });
         connect(refresh,&QPushButton::clicked,this,[this]{ fetch("/api/health",[this](const QJsonObject& o){
