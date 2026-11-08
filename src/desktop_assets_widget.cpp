@@ -1310,6 +1310,7 @@ void DesktopAssetsWidget::sendToken(
 
     wallet_->selectSafeFeeUtxo(
         minimumFeeUtxo,
+        owner,
         [this, tokenID, owner, recipient, sendRaw](
             QJsonObject feeUtxo,
             QString feeError) {
@@ -1501,6 +1502,7 @@ void DesktopAssetsWidget::sendTRUScript(
 
     wallet_->selectSafeFeeUtxo(
         feeAtoms + dustAtoms,
+        owner,
         [this, inscriptionTxid, owner, recipient](
             QJsonObject feeUtxo,
             QString feeError) {
