@@ -224,7 +224,7 @@ private:
         }
         busy(true);
         QPointer<TruDesktopStudio07> self(this);
-        wallet_->selectSafeFeeUtxo(kFee+kDust,
+        wallet_->selectSafeFeeUtxo(kFee+kDust, from,
           [self,type,tokenID,name,symbol,desc,art,supply,from,ownScript,hash160]
           (QJsonObject utxo,QString e) {
             if(!self)return;
@@ -303,7 +303,7 @@ private:
         const QString script="6a"+push+QString::fromLatin1(bytes.toHex());
         busy(true);
         QPointer<TruDesktopStudio07> self(this);
-        wallet_->selectSafeFeeUtxo(kFee+kDust,[self,script,text,from,ownScript](QJsonObject utxo,QString e){
+        wallet_->selectSafeFeeUtxo(kFee+kDust, from,[self,script,text,from,ownScript](QJsonObject utxo,QString e){
             if(!self)return;
             if(!e.isEmpty()){self->busy(false);QMessageBox::warning(self,"TRUScript",e);return;}
             std::uint64_t input=0;
@@ -450,7 +450,7 @@ private:
         busy(true);
         QPointer<TruDesktopStudio07> self(this);
         // Require >dust change; the exact-amount fee audit rejects dust-burn ambiguity.
-        wallet_->selectSafeFeeUtxo(amount+kFee+kDust+1,
+        wallet_->selectSafeFeeUtxo(amount+kFee+kDust+1, from,
           [self,name,title,options,end,amount,from,owner,initHex](QJsonObject utxo,QString e){
             if(!self)return;
             if(!e.isEmpty()){self->busy(false);QMessageBox::warning(self,"Voting V1",e);return;}
@@ -544,7 +544,7 @@ private:
         catch(const std::exception& ex){QMessageBox::warning(this,"Voting V1",ex.what());return;}
         const auto addr=wallet_->currentWalletAddress();
         busy(true);QPointer<TruDesktopStudio07> self(this);
-        wallet_->selectSafeFeeUtxo(kFee+kDust,
+        wallet_->selectSafeFeeUtxo(kFee+kDust, addr,
           [self,root,choice,addr,anchor,snapshot,unlock,call]
           (QJsonObject utxo,QString e){
             if(!self)return;
@@ -707,7 +707,7 @@ private:
         QPointer<TruDesktopStudio07> self(this);
         const std::uint64_t minimum=amount>std::numeric_limits<std::uint64_t>::max()-kFee-kDust-1
             ?std::numeric_limits<std::uint64_t>::max():amount+kFee+kDust+1;
-        wallet_->selectSafeFeeUtxo(minimum,
+        wallet_->selectSafeFeeUtxo(minimum, from,
           [self,family,name,script,amount,display,from,ownScript](QJsonObject utxo,QString e){
             if(!self)return;
             if(!e.isEmpty()){self->busy(false);QMessageBox::warning(self,"Create Contract",e);return;}

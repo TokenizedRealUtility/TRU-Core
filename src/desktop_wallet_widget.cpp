@@ -226,6 +226,13 @@ DesktopWalletWidget::DesktopWalletWidget(
     balance_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     heroRight->addWidget(balanceCaption, 0, Qt::AlignRight);
     heroRight->addWidget(balance_, 0, Qt::AlignRight);
+    // TRU_LIVE_BALANCE_01: unconfirmed activity never enters safe-spendable.
+    pendingBalance_ = new QLabel("Pending: none reported");
+    pendingBalance_->setObjectName("truWalletPendingBalance");
+    pendingBalance_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    pendingBalance_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    pendingBalance_->setStyleSheet("color:#8bc4d2;font-size:11px;");
+    heroRight->addWidget(pendingBalance_, 0, Qt::AlignRight);
     heroRight->addStretch();
 
     heroLayout->addLayout(heroLeft, 1);
@@ -568,6 +575,22 @@ DesktopWalletWidget::DesktopWalletWidget(
 
     updateUi();
 
+    // Polling is read-only and UI-only; never triggers signing or broadcasting.
+    auto* pendingPoll = new QTimer(this);
+    connect(pendingPoll, &QTimer::timeout, this, [this] {
+        if (!isVisible() || !wallet_.isUnlocked()) return;
+        livePollBroadcast();
+        livePollIncoming();
+    });
+    pendingPoll->start(8000);
+
+    // Safety-filtered balance remains authoritative and may require several
+    // read-only node RPCs. Never overlap two full balance scans.
+    auto* safePoll = new QTimer(this);
+    connect(safePoll, &QTimer::timeout, this, [this] {
+        if (isVisible() && wallet_.isUnlocked()) refreshBalance();
+    });
+    safePoll->start(60000);
 }
 
 void DesktopWalletWidget::openAxonHandoff(const QString& uri) {
@@ -1044,6 +1067,10 @@ void DesktopWalletWidget::updateUi() {
         didStatus_->setText("—");
         addressCount_->setText("— generated addresses");
         balance_->setText("— TRU");
+        if (pendingBalance_) pendingBalance_->setText("Pending: wallet locked");
+        liveObservedTxid_.clear();
+        livePendingAddress_.clear();
+        livePendingDescription_.clear();
     }
 }
 
@@ -1737,7 +1764,110 @@ void DesktopWalletWidget::safetyFilter(
     (*step)();
 }
 
+// TRU_LIVE_BALANCE_01: Status comes only from node observations. Never
+// infer spendability or transaction finality from a broadcast response.
+void DesktopWalletWidget::liveRecordBroadcast(
+    const QString& txid, const QString& description, const QString& address) {
+    static const QRegularExpression txidRule("^[0-9a-fA-F]{64}$");
+    if (!txidRule.match(txid).hasMatch()) return;
+    if (!wallet_.isUnlocked()) return;
+    // Address may be a non-current wallet address used in the approved action.
+    if (!walletAddresses().contains(address)) return;
+    liveObservedTxid_ = txid.toLower();
+    livePendingDescription_ = description;
+    livePendingAddress_ = address;
+    pendingBalance_->setText("Pending broadcast: " + description + " | 0 confirmations");
+    logLine("Broadcast accepted; confirmation is pending. TXID: " + txid);
+    livePollBroadcast();
+}
+
+void DesktopWalletWidget::livePollBroadcast() {
+    if (liveStatusBusy_ || liveObservedTxid_.isEmpty() ||
+        !wallet_.isUnlocked() || !rpc_ || !rpc_->endpoint().isValid()) return;
+    liveStatusBusy_ = true;
+    const QString txid = liveObservedTxid_;
+    const QString address = livePendingAddress_;
+    QJsonObject p;
+    p.insert("txid", txid);
+    rpc_->call("gettransaction", objectParams(p),
+        [this, txid, address](const QJsonValue& value, const QByteArray&,
+                             const QString& error) {
+            liveStatusBusy_ = false;
+            if (txid != liveObservedTxid_ ||
+                !wallet_.isUnlocked() ||
+                !walletAddresses().contains(address)) return;
+            if (!error.isEmpty() || !value.isObject()) {
+                pendingBalance_->setText("Broadcast status unavailable; check TXID " + txid.left(12));
+                return;
+            }
+            const QJsonObject o = value.toObject();
+            const int confirmations = o.value("confirmations").toInt(0);
+            const bool active = o.value("active").toBool(false);
+            const bool reorg = o.value("reorgSignal").toBool(false);
+            if (confirmations > 0 && active && !reorg) {
+                pendingBalance_->setText("Confirmed (" + QString::number(confirmations) +
+                    "): " + livePendingDescription_ + " | safe balance refreshing");
+                liveObservedTxid_.clear();
+                livePendingAddress_.clear();
+                livePendingDescription_.clear();
+                refreshBalance();
+            } else {
+                pendingBalance_->setText("Pending / not final: " + livePendingDescription_ +
+                    " | " + QString::number(qMax(0, confirmations)) + " conf");
+            }
+        });
+}
+
+void DesktopWalletWidget::livePollIncoming() {
+    if (liveIncomingBusy_ || !wallet_.isUnlocked() ||
+        !rpc_ || !rpc_->endpoint().isValid()) return;
+    const QString address = QString::fromStdString(wallet_.currentAddress());
+    if (address.isEmpty()) return;
+    QString expectedScript;
+    try { expectedScript = QString::fromStdString(wallet_.scriptForAddress(address.toStdString())).toLower(); }
+    catch (...) { return; }
+    liveIncomingBusy_ = true;
+    QJsonObject p;
+    p.insert("address", address);
+    rpc_->call("listunspentWeb", objectParams(p),
+        [this, address, expectedScript](const QJsonValue& value, const QByteArray&,
+                                        const QString& error) {
+            liveIncomingBusy_ = false;
+            if (!wallet_.isUnlocked() ||
+                QString::fromStdString(wallet_.currentAddress()) != address ||
+                !error.isEmpty()) return;
+            QJsonArray items;
+            if (value.isArray()) items = value.toArray();
+            else if (value.isObject() && value.toObject().value("utxos").isArray())
+                items = value.toObject().value("utxos").toArray();
+            else return;
+            std::uint64_t pendingAtoms = 0;
+            bool sawPending = false;
+            for (const auto& item : items) {
+                if (!item.isObject()) continue;
+                const auto u = item.toObject();
+                if (u.value("confirmations").toInt(-1) != 0) continue;
+                if (scriptHex(u.value("scriptPubKey")) != expectedScript) continue;
+                std::uint64_t atoms = 0;
+                if (!exactAtoms(u, atoms) || atoms == 0 ||
+                    pendingAtoms > std::numeric_limits<std::uint64_t>::max() - atoms) continue;
+                pendingAtoms += atoms;
+                sawPending = true;
+            }
+            if (sawPending) {
+                const QString amount = QString::fromStdString(DesktopWalletCore::formatAmount(pendingAtoms));
+                if (liveObservedTxid_.isEmpty())
+                    pendingBalance_->setText("Unconfirmed incoming: " + amount +
+                        " TRU (not spendable; node-reported)");
+            } else if (liveObservedTxid_.isEmpty() &&
+                       pendingBalance_->text().startsWith("Unconfirmed incoming:")) {
+                pendingBalance_->setText("Pending: none reported at current address");
+            }
+        });
+}
+
 void DesktopWalletWidget::refreshBalance() {
+    if (liveSafeRefreshBusy_) return;
     if (!wallet_.isUnlocked()) {
         QMessageBox::warning(
             this, "Refresh Balance",
@@ -1745,6 +1875,7 @@ void DesktopWalletWidget::refreshBalance() {
         return;
     }
 
+    liveSafeRefreshBusy_ = true;
     logLine("Reading and safety-checking wallet UTXOs…");
 
     collectUtxos(
@@ -1752,6 +1883,7 @@ void DesktopWalletWidget::refreshBalance() {
             std::vector<DesktopWalletUtxo> all,
             QString error) {
             if (!error.isEmpty()) {
+                liveSafeRefreshBusy_ = false;
                 logLine(error);
                 return;
             }
@@ -1761,6 +1893,7 @@ void DesktopWalletWidget::refreshBalance() {
                 [this](
                     std::vector<DesktopWalletUtxo> safe,
                     QString error2) {
+                    liveSafeRefreshBusy_ = false;
                     if (!error2.isEmpty()) {
                         logLine(error2);
                         return;
@@ -1886,7 +2019,7 @@ void DesktopWalletWidget::publishArcadeAchievement() {
        try {tx=wallet_.buildAndSignArcadeAnchor(funding,script.toStdString(),fee);}
        catch(const std::exception& e){QMessageBox::critical(this,"Arcade Signing",e.what());return;}
        rpc_->call("sendrawtransaction",objectParams({{"txHex",QString::fromStdString(tx.rawHex)}}),
-          [this,tx,code,run,post](const QJsonValue& result,const QByteArray&,const QString& error){
+          [this,tx,code,run,post,selected](const QJsonValue& result,const QByteArray&,const QString& error){
              if(!error.isEmpty()){
                  QMessageBox::warning(this,"Arcade Broadcast",
                     "Broadcast status unknown: "+error+"\nCheck transaction history before attempting again.");return;
@@ -1895,6 +2028,8 @@ void DesktopWalletWidget::publishArcadeAchievement() {
              if(txid.compare(QString::fromStdString(tx.txid),Qt::CaseInsensitive)!=0){
                 QMessageBox::warning(this,"Arcade Broadcast","Node returned a different TXID. Check transaction history before retrying.");return;
              }
+             liveRecordBroadcast(txid, "Arcade achievement fee 0.00020000 TRU",
+                 selected);
              QString status="Signed and broadcast: "+txid+". Await chain confirmation.";
              try {
                  const auto claim=post("complete",{{"code",code},{"txid",txid.toLower()}});
@@ -2116,6 +2251,16 @@ void DesktopWalletWidget::sendTru() {
                                         .value("txid")
                                         .toString();
 
+                            // Live status is cosmetic and never authorizes a spend.
+                            const QString localTxid = QString::fromStdString(tx.txid);
+                            if (!returned.isEmpty() && returned.compare(localTxid, Qt::CaseInsensitive) != 0) {
+                                logLine("Node TXID differed from locally signed TXID; check manually.");
+                                return;
+                            }
+                            liveRecordBroadcast(localTxid,
+                                "Send " + QString::fromStdString(DesktopWalletCore::formatAmount(tx.sendAtoms)) +
+                                " TRU + fee " + QString::fromStdString(DesktopWalletCore::formatAmount(tx.feeAtoms)),
+                                QString::fromStdString(wallet_.currentAddress()));
                             logLine(
                                 "Signed transaction accepted by "
                                 "RPC: " +

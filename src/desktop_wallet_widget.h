@@ -82,6 +82,20 @@ private:
     QLabel* state_;
     QLabel* address_;
     QLabel* balance_;
+    // TRU_LIVE_BALANCE_01: display-only pending state, not spending authority.
+    QLabel* pendingBalance_ = nullptr;
+    bool liveSafeRefreshBusy_ = false;
+    QString liveObservedTxid_;
+    QString livePendingDescription_;
+    QString livePendingAddress_;
+    bool liveStatusBusy_ = false;
+    bool liveIncomingBusy_ = false;
+
+    void liveRecordBroadcast(const QString& txid, const QString& description,
+                             const QString& address);
+    void livePollBroadcast();
+    void livePollIncoming();
+
     QLabel* addressCount_;
     QLabel* did_;
     QLabel* didStatus_;

@@ -73,7 +73,7 @@ class TruMagicSecretWidgetV2 final:public QWidget {
   if(!wallet_->walletUnlocked()){failure("Unlock your standalone wallet on the Wallet tab first.");return;}
   const QString script=ready_;
   busy(true);QPointer<TruMagicSecretWidgetV2> self(this);
-  wallet_->selectSafeFeeUtxo(10546,[self,script](QJsonObject selected,QString error){
+  wallet_->selectSafeFeeUtxo(10546, wallet_->currentWalletAddress(),[self,script](QJsonObject selected,QString error){
    if(!self)return;if(!error.isEmpty()){self->failure(error);return;}
    const QString own=selected.value("scriptPubKey").toString().toLower();QString address;
    for(const auto& a:self->wallet_->walletAddresses())if(self->wallet_->walletScriptForAddress(a).toLower()==own){address=a;break;}
