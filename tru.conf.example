@@ -1,3 +1,4 @@
+
 # ============================================================
 # TRU Blockchain Configuration Example
 # ============================================================
@@ -37,12 +38,30 @@ automaticReorg=1
 #TRU_RPC_WALLET_SEND_MAX_ATOMS=unlimited
 
 # ------------------------------------------------------------
+# TRU ARCADE — Native Achievement Publishing (06B)
+# ------------------------------------------------------------
+
+# Keep disabled until ready to enable = 1 
+TRU_ARCADE_PUBLISH_ENABLE=0
+
+# Address belonging to the connected Headless Core wallet
+TRU_ARCADE_PUBLISH_ADDRESS=YOUR_CONNECTED_CORE_ADDRESS
+
+# Browser-generated public approval key (NOT a private key)
+TRU_ARCADE_PUBLISH_APPROVER_SPKI_HEX=YOUR_PUBLIC_APPROVAL_KEY
+
+# Maximum network fee per achievement (atoms)
+TRU_ARCADE_PUBLISH_MAX_FEE_ATOMS=100000
+
+# Maximum total Arcade network fees per day (atoms)
+TRU_ARCADE_PUBLISH_DAILY_FEE_BUDGET_ATOMS=1000000
+
+# ------------------------------------------------------------
 # EXTERNAL IP
 # ------------------------------------------------------------
-#externalip=192.168.1.209
+#externalip=74.192.87.30
 
 [default]
-
 # Local RPC address used by TRU miners/oracle components.
 node.ip=127.0.0.1
 node.port=21832
@@ -51,8 +70,8 @@ node.port=21832
 # TOKEN EVOLUTION / ORACLE
 # ------------------------------------------------------------
 
-#oracle.address=YOUR_ORACLE_ADDRESS
-#oracle.wallet=tru.dat
+oracle.address=TRU_ADDRESS_HERE
+oracle.wallet=tru.dat
 
 # ------------------------------------------------------------
 # AI Agent Settings  

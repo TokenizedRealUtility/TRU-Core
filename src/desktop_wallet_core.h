@@ -79,6 +79,12 @@ public:
     bool validateAddress(const std::string& address) const;
     std::string scriptForAddress(const std::string& address) const;
 
+    // ARCADE-DESKTOP-07: wallet-local exact achievement anchor, never server-signs.
+    DesktopWalletSignedTx buildAndSignArcadeAnchor(
+        const DesktopWalletUtxo& funding,
+        const std::string& receiptScriptHex,
+        std::uint64_t feeAtoms) const;
+
     DesktopWalletSignedTx buildAndSign(
         const std::vector<DesktopWalletUtxo>& inputs,
         const std::string& recipient,

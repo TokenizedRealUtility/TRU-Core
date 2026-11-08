@@ -35,6 +35,7 @@ public:
 
     void selectSafeFeeUtxo(
         std::uint64_t minimumAtoms,
+        const QString& onlyAddress,
         std::function<void(QJsonObject, QString)> done);
 
     bool inspectPreparedIntent(
@@ -102,6 +103,7 @@ private:
     void refreshBalance();
     void quantumTransactions();
     void sendTru();
+    void publishArcadeAchievement();
     void refreshDidStatus(const QString& address, const QString& did);
     void showQrCodes();
 

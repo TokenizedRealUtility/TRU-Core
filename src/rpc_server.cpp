@@ -56,6 +56,11 @@
 #include "peer_observability_v1.h"
 #include <curl/curl.h>  // AXON UX-03B outbound handoff fetch
 #include <openssl/sha.h>
+#include <openssl/evp.h>
+#include <openssl/x509.h>
+#include <openssl/ecdsa.h>
+#include <openssl/ec.h>
+#include "config_reader.h"
 #include <fstream>
 #include <ctime>
 
@@ -10001,6 +10006,7 @@ static json handleSendToAddressLocal(Blockchain& chain, Wallet& wallet, const js
     }
 }
 #include "wallet_utxo_tools_v1.inc"
+#include "arcade_native06b.inc"
 
 // MANAGED-TRU-01: local authenticated custody operations. Telegram authorization
 // belongs to the bot; possession of the Core RPC cookie is operator authority.
@@ -10151,6 +10157,7 @@ void startRPCServer(Blockchain &chain, Wallet &wallet, P2PNode &node, int port,
         else if (m=="getnewaddress")       response=handleGetNewAddress(wallet,params,id);
         else if (m=="getnewmanagedaddress") response=handleManagedAddress(wallet,params,id,req.remote_addr);
         else if (m=="walletutxotools") response=tru_utxo_tools_v1::run(chain,wallet,params,id,req.remote_addr);
+        else if (m=="arcadepublish06b") response=tru_arcade_native06b::run(chain,wallet,params,id,req.remote_addr);
         else if (m=="sendfromaddress") response=handleSendFromAddress(chain,wallet,params,id,req.remote_addr);
         else if (m=="reportmineractivity") response=handleReportMinerActivityOptimized(chain,params,id);
         else if (m=="getblocktemplate") {

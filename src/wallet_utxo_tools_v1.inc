@@ -33,6 +33,28 @@ static Coin classify(Blockchain& chain,const UTXO& u,const std::string& address,
             else if(u.amount==0) c.excluded="zero_value";
     return c;
 }
+// PERF01: address-scoped enumeration only for the enrolled Arcade wallet.
+// Keep the same per-coin classification as inventory(); no cache or policy relaxation.
+// prepare()/submit() still revalidate each explicit outpoint through selected().
+static std::vector<Coin> scanEnrolledAddress(Blockchain& chain,Wallet& wallet,const std::string& address) {
+    need(wallet.isLocalChainAvailable() && chain.getStorage() && chain.mempool,
+         "Local chain/storage/mempool required");
+    const int tip=chain.getBestTipHeight(); need(tip>=0 && tip<INT_MAX,"Invalid tip");
+    const auto addresses=wallet.getAddresses();
+    need(addresses.size()<=MAX_SCAN,"Too many addresses for this bounded tool");
+    need(std::find(addresses.begin(),addresses.end(),address)!=addresses.end(),
+         "Enrolled address is not owned by this Core wallet");
+    const auto script=createP2PKHScriptHexFromAddress(address);
+    std::vector<Coin> result;
+    std::set<std::string> seen;
+    for(const auto& u:chain.utxoSet.getUTXOsForAddress(address)) {
+        if(!seen.insert(outpoint(u)).second)continue;
+        need(result.size()<MAX_SCAN,"Too many address UTXOs for this bounded tool");
+        result.push_back(classify(chain,u,address,script,tip));
+    }
+    return result;
+}
+
 static std::vector<Coin> scan(Blockchain& chain, Wallet& wallet) {
     need(wallet.isLocalChainAvailable() && chain.getStorage() && chain.mempool,"Local chain/storage/mempool required");
     const int tip=chain.getBestTipHeight(); need(tip>=0 && tip<INT_MAX,"Invalid tip");
@@ -127,15 +149,29 @@ static std::vector<Coin> selected(Blockchain& chain,Wallet& wallet,const json& p
 }
 struct Prepared { Transaction tx; std::vector<Coin> coins; json plan; uint64_t fee; };
 static Prepared prepare(Blockchain& chain,Wallet& wallet,const json& p) {
-    keys(p,{"action","mode","address","count","amount","max_fee","inputs"});
+    keys(p,{"action","mode","address","count","amount","max_fee","inputs","op_return_script_hex"});
     need(p.contains("address") && p.at("address").is_string(),"Destination required");
     const auto address=p.at("address").get<std::string>();
     const auto owned=wallet.getAddresses();
     need(chain.isValidAddress(address) && std::find(owned.begin(),owned.end(),address)!=owned.end(),"Destination must belong to this wallet");
-    const auto mode=p.value("mode",std::string("split")); need(mode=="split" || mode=="consolidate" || mode=="pay","Invalid mode");
+    const auto mode=p.value("mode",std::string("split")); need(mode=="split" || mode=="consolidate" || mode=="pay" || mode=="anchor","Invalid mode");
     const bool consolidate=mode=="consolidate";
-    uint64_t each=0, outputTotal=0; size_t count=1;
-    if(mode=="pay") {
+    const bool anchor=(mode=="anchor"); std::string anchorScript;
+    if(anchor) {
+        need(!p.contains("count") && !p.contains("amount"),"Anchor carries no payments");
+        need(p.contains("op_return_script_hex") && p.at("op_return_script_hex").is_string(),"Missing anchor script");
+        anchorScript=p.at("op_return_script_hex").get<std::string>();
+        need(anchorScript.size()>=82 && anchorScript.size()<=154 && isHex(anchorScript),"Invalid anchor script");
+        const auto b=hexDecode(anchorScript);
+        need(b.size()>=41 && b.size()<=77 && b[0]==0x6a && b[1]==b.size()-2,"Noncanonical OP_RETURN");
+        need(b[2]=='T' && b[3]=='R' && b[4]=='U' && b[5]=='A' && b[6]=='1',"Not TRUA1");
+        size_t pos=39; need(pos<b.size(),"No name length");
+        const size_t nl=b[pos++];need(nl<=24 && pos+nl<b.size(),"Bad name length");pos+=nl;
+        const size_t sl=b[pos++];need(sl<=36 && nl+sl<=36 && pos+sl==b.size(),"Bad statement length");
+    } else need(!p.contains("op_return_script_hex"),"Unexpected anchor data");
+    uint64_t each=0, outputTotal=0; size_t count=anchor?0:1;
+    if(anchor) { /* OP_RETURN + self-change only. */ }
+    else if(mode=="pay") {
         need(!p.contains("count"),"Pay does not take count");
         each=amount(p,"amount"); need(each>=tru_limits::MIN_OUTPUT_DUST_ATOMS,"Output below dust threshold");
         outputTotal=each;
@@ -152,6 +188,7 @@ static Prepared prepare(Blockchain& chain,Wallet& wallet,const json& p) {
     need(total>=add(outputTotal,cap),"Insufficient selected funds including maximum-fee reserve");
     const auto script=createP2PKHScriptHexFromAddress(address);
     for(size_t i=0;i<count;++i) tx.vout.emplace_back(consolidate?total:each,script);
+    if(anchor) tx.vout.emplace_back(0,anchorScript);
     // Size an upper-bound signed transaction, including a possible change output.
     if(!consolidate) tx.vout.emplace_back(total-outputTotal,script);
     Transaction sized=tx;
@@ -167,8 +204,14 @@ static Prepared prepare(Blockchain& chain,Wallet& wallet,const json& p) {
     }
     need(tx.vout.size()<=MAX_OUTPUTS,"Too many outputs"); tx.computeTxId();
     json request={{"mode",mode},{"address",address},{"max_fee",tru_amount::formatNumeric(cap)},{"inputs",coinRefs(coins)}};
-    if(!consolidate) {if(mode=="split") request["count"]=count;request["amount"]=tru_amount::formatNumeric(each);}
-    json outputs=json::array(); for(size_t i=0;i<tx.vout.size();++i) outputs.push_back({{"vout",i},{"address",address},{"amount_atoms",tx.vout[i].amount},{"amount",tru_amount::formatNumeric(tx.vout[i].amount)}});
+    if(anchor) request["op_return_script_hex"]=anchorScript;
+    if(!consolidate && !anchor) {if(mode=="split") request["count"]=count;request["amount"]=tru_amount::formatNumeric(each);}
+    json outputs=json::array(); for(size_t i=0;i<tx.vout.size();++i) {
+        json output={{"vout",i},{"amount_atoms",tx.vout[i].amount},{"amount",tru_amount::formatNumeric(tx.vout[i].amount)}};
+        if(anchor && i==0) {output["type"]="arcade_op_return";output["script_hex"]=anchorScript;}
+        else output["address"]=address;
+        outputs.push_back(output);
+    }
     json plan={{"tool_version",1},{"request",request},{"txid",tx.txid},{"unsigned_hex",bytesToHex(tx.serializeBinary())},
         {"input_atoms",total},{"fee_atoms",actualFee},{"fee",tru_amount::formatNumeric(actualFee)},
         {"inputs_count",coins.size()},{"outputs_count",tx.vout.size()},{"outputs",outputs},
@@ -176,7 +219,7 @@ static Prepared prepare(Blockchain& chain,Wallet& wallet,const json& p) {
         {"broadcast",false},{"note","Preview only. Inputs are not reserved; submission rechecks availability. Combining addresses links them publicly."}};
     return {tx,coins,plan,actualFee};
 }
-static json run(Blockchain& chain,Wallet& wallet,const json& p,int id,const std::string& peer) {
+static json run(Blockchain& chain,Wallet& wallet,const json& p,int id,const std::string& peer,bool arcadeAuthorized=false) {
     try {
         need(rpcLocalPeer(peer),"UTXO tools require local authenticated RPC");
         need(p.is_object(),"Expected parameters object"); const auto action=p.value("action",std::string("list"));
@@ -186,10 +229,16 @@ static json run(Blockchain& chain,Wallet& wallet,const json& p,int id,const std:
         need(!chain.getForkRecoveryInfo().value("execution_halted",true),"Fork recovery halted");
         if(action=="prepare") return makeResult(id,prepare(chain,wallet,p).plan);
         keys(p,{"action","plan","confirm"});
-        need(rpcEnvEnabled("TRU_RPC_WALLET_SEND_ENABLE"),"Wallet sends disabled; enable existing TRU_RPC_WALLET_SEND_ENABLE setting");
+        need(arcadeAuthorized || rpcEnvEnabled("TRU_RPC_WALLET_SEND_ENABLE"),"Wallet sends disabled");
         need(p.contains("plan") && p.at("plan").is_object() && p.value("confirm",std::string())=="SUBMIT","Explicit confirm=SUBMIT required");
         const auto& reviewed=p.at("plan");
         need(reviewed.contains("request"),"Missing reviewed request");
+        if(arcadeAuthorized) {
+            const auto& r=reviewed.at("request");
+            need(r.value("mode",std::string())=="anchor","Arcade only permits OP_RETURN anchor mode");
+            need(r.contains("op_return_script_hex") && r.at("op_return_script_hex").is_string(),"Missing arcade script");
+            need(reviewed.at("fee_atoms").get<uint64_t>()<=1000000ULL,"Absolute 06B fee ceiling exceeded");
+        }
         auto built=prepare(chain,wallet,reviewed.at("request"));
         need(reviewed==built.plan,"Preview changed or was edited; prepare and review again");
         wallet.requirePrivateAccess("UTXO self-management submission");

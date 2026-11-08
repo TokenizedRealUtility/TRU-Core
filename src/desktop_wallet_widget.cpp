@@ -16,6 +16,12 @@
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QEventLoop>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QNetworkProxy>
+#include <QUrl>
 #include <QInputDialog>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -311,6 +317,9 @@ DesktopWalletWidget::DesktopWalletWidget(
     auto* marketConnectButton = new QPushButton("Connect Marketplace", this);
     marketConnectButton->setObjectName("truPrimaryAction");
     marketConnectButton->setToolTip("Enter the single-use pairing code from Marketplace > Desktop Wallet. No coins move.");
+    auto* arcadePublish = new QPushButton("Publish Arcade Achievement", this);
+    arcadePublish->setObjectName("truPrimaryAction");
+    arcadePublish->setToolTip("Enter a short-lived code from Arcade; approve an exact zero-value TRUA1 transaction locally.");
     auto* marketLogin = new QPushButton("Manual / Offline Login");
     marketLogin->setObjectName("truSecondaryAction");
     marketLogin->setToolTip("Advanced fallback: sign a full marketplace challenge and copy the response manually.");
@@ -333,6 +342,7 @@ DesktopWalletWidget::DesktopWalletWidget(
     actions->addWidget(axonFund, 2, 0, 1, 3);
     actions->addWidget(marketConnectButton, 3, 0, 1, 3);
     actions->addWidget(marketLogin, 4, 0, 1, 3);
+    actions->addWidget(arcadePublish, 6, 0, 1, 3);
     auto* quantum = new QPushButton("Quantum Transactions (WOTS+)");
     actions->addWidget(quantum, 5, 0, 1, 3);
     connect(quantum, &QPushButton::clicked, this, [this]{ quantumTransactions(); });
@@ -403,6 +413,7 @@ DesktopWalletWidget::DesktopWalletWidget(
         });
     };
     connect(marketConnectButton,&QPushButton::clicked,this,[connectMarket]{connectMarket({});});
+    connect(arcadePublish,&QPushButton::clicked,this,[this]{publishArcadeAchievement();});
     auto* marketConnectTimer=new QTimer(this);
     connect(marketConnectTimer,&QTimer::timeout,this,[marketConnectBusy,connectMarket]{
         if(*marketConnectBusy)return;
@@ -667,6 +678,7 @@ bool DesktopWalletWidget::validateWalletAddress(
 
 void DesktopWalletWidget::selectSafeFeeUtxo(
     std::uint64_t minimumAtoms,
+    const QString& onlyAddress,
     std::function<void(QJsonObject, QString)> done) {
     if (!wallet_.isUnlocked()) {
         done({}, "Unlock the standalone wallet first.");
@@ -674,7 +686,7 @@ void DesktopWalletWidget::selectSafeFeeUtxo(
     }
 
     collectUtxos(
-        [this, minimumAtoms, done = std::move(done)](
+        [this, minimumAtoms, onlyAddress, done = std::move(done)](
             std::vector<DesktopWalletUtxo> all,
             QString error) mutable {
             if (!error.isEmpty()) {
@@ -684,7 +696,7 @@ void DesktopWalletWidget::selectSafeFeeUtxo(
 
             safetyFilter(
                 std::move(all),
-                [minimumAtoms, done = std::move(done)](
+                [this, minimumAtoms, onlyAddress, done = std::move(done)](
                     std::vector<DesktopWalletUtxo> safe,
                     QString error2) mutable {
                     if (!error2.isEmpty()) {
@@ -694,6 +706,10 @@ void DesktopWalletWidget::selectSafeFeeUtxo(
 
                     const DesktopWalletUtxo* selected = nullptr;
                     for (const auto& candidate : safe) {
+                        // Desktop07: only an input belonging to the exact connected address.
+                        if (candidate.keyIndex>=wallet_.addressCount() ||
+                            QString::fromStdString(wallet_.address(candidate.keyIndex))!=onlyAddress)
+                            continue;
                         if (candidate.amountAtoms < minimumAtoms)
                             continue;
                         if (!selected ||
@@ -1773,6 +1789,122 @@ void DesktopWalletWidget::refreshBalance() {
                             .arg(safe.size()));
                 });
         });
+}
+
+// ARCADE-DESKTOP-07: Desktop user types a short-lived Arcade code,
+// inspects local-wallet plan, and approves BEFORE any signing/broadcast.
+void DesktopWalletWidget::publishArcadeAchievement() {
+    if (!wallet_.isUnlocked()) {
+        QMessageBox::warning(this,"Arcade Publication","Unlock this Desktop Wallet first.");return;
+    }
+    bool ok=false;
+    QString code=QInputDialog::getText(this,"TRU Arcade Achievement",
+        "In Arcade > My Records > Prepare Achievement > Publish with Desktop Wallet, copy the one-time code:",
+        QLineEdit::Normal,{},&ok).trimmed().toLower();
+    if(!ok)return;
+    if(!QRegularExpression("^[0-9a-f]{32}$").match(code).hasMatch()) {
+        QMessageBox::warning(this,"Arcade Publication","Invalid 32-character one-time code.");return;
+    }
+    const QStringList addresses=walletAddresses();
+    if(addresses.isEmpty())return;
+    const QString selected=addresses.size()==1 ? addresses.first() :
+        QInputDialog::getItem(this,"TRU Arcade Achievement","Choose the Marketplace-connected address",addresses,0,false,&ok);
+    if(!ok || selected.isEmpty())return;
+    // Fixed TLS origin; never use arbitrary host/URL from a pasted code.
+    auto post=[](const QString& endpoint,const QJsonObject& requestBody)->QJsonObject {
+        QNetworkAccessManager manager;
+        manager.setProxy(QNetworkProxy(QNetworkProxy::NoProxy));
+        QNetworkRequest req(QUrl("https://market.tokenizedrealutility.com/api/arcade/v7/"+endpoint));
+        req.setHeader(QNetworkRequest::ContentTypeHeader,"application/json");
+        req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,QNetworkRequest::ManualRedirectPolicy);
+        QNetworkReply* reply=manager.post(req,QJsonDocument(requestBody).toJson(QJsonDocument::Compact));
+        QEventLoop loop;QTimer timer;timer.setSingleShot(true);
+        QObject::connect(&timer,&QTimer::timeout,reply,&QNetworkReply::abort);
+        QObject::connect(reply,&QNetworkReply::finished,&loop,&QEventLoop::quit);
+        timer.start(15000);loop.exec();timer.stop();
+        const QByteArray bytes=reply->readAll();
+        const int status=reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const bool failed=reply->error()!=QNetworkReply::NoError || status!=200 || bytes.size()>32768;
+        reply->deleteLater();
+        QJsonParseError err;const auto doc=QJsonDocument::fromJson(bytes,&err);
+        if(failed||err.error!=QJsonParseError::NoError||!doc.isObject())
+            throw std::runtime_error("Marketplace Arcade request rejected, timed out, or malformed");
+        return doc.object();
+    };
+    QJsonObject offer;
+    try {offer=post("fetch",{{"code",code},{"address",selected}});}
+    catch(const std::exception& e){QMessageBox::warning(this,"Arcade Publication",e.what());return;}
+    const QString script=offer.value("op_return_script_hex").toString().toLower();
+    const QString owner=offer.value("address").toString();
+    const QString run=offer.value("run_id").toString();
+    if(owner!=selected || !QRegularExpression("^6a[0-9a-f]{80,152}$").match(script).hasMatch() ||
+       !QRegularExpression("^[a-f0-9]{32}$").match(run).hasMatch()) {
+       QMessageBox::critical(this,"Arcade Publication","Receipt or owner mismatch. Refusing to sign.");return;
+    }
+    const std::uint64_t fee=20000; // 0.00020000 TRU, locally enforced in Core method.
+    const QString summary=QString(
+        "TRU Arcade verified achievement publication\n\n"
+        "Network: TRU mainnet\nWallet: %1\nGame: Asteroids\nScore: %2\n"
+        "Public player name: %3\nPublic statement: %4\n\n"
+        "Exact OP_RETURN script: %5\n\n"
+        "Fee: 0.00020000 TRU\nAll change returns to your own selected wallet address.\n"
+        "The public inscription is permanent once confirmed.\n\n"
+        "Proceed to SELECT a local funding UTXO? (No signing yet)")
+        .arg(selected,QString::number(offer.value("score").toInt()),
+             offer.value("public_name").toString(),offer.value("public_statement").toString(),script);
+    if(QMessageBox::question(this,"Review Arcade Achievement",summary,
+                             QMessageBox::Yes|QMessageBox::No,QMessageBox::No)!=QMessageBox::Yes)return;
+    selectSafeFeeUtxo(fee+546,selected,[this,fee,code,selected,script,run,post](QJsonObject u,QString error) {
+       if(!error.isEmpty()){QMessageBox::warning(this,"Arcade Funding",error);return;}
+       const QString utxoScript=scriptHex(u.value("scriptPubKey"));
+       std::uint32_t index=wallet_.addressCount();
+       for(std::uint32_t i=0;i<wallet_.addressCount();++i) {
+          if(QString::fromStdString(wallet_.address(i))==selected &&
+             QString::fromStdString(wallet_.scriptForAddress(wallet_.address(i)))==utxoScript)
+             {index=i;break;}
+       }
+       if(index==wallet_.addressCount()){
+          QMessageBox::critical(this,"Arcade Funding","Selected safe UTXO does not belong to the paired address.");return;
+       }
+       bool amountOk=false;
+       const auto atoms=u.value("amount_atoms").toString().toULongLong(&amountOk);
+       if(!amountOk || atoms<=fee+546){QMessageBox::critical(this,"Arcade Funding","Invalid UTXO amount.");return;}
+       DesktopWalletUtxo funding;
+       funding.txid=u.value("txid").toString().toStdString();
+       funding.vout=static_cast<std::uint32_t>(u.value("vout").toInt(-1));
+       funding.amountAtoms=atoms;funding.scriptPubKey=utxoScript.toStdString();funding.keyIndex=index;
+       if(QMessageBox::question(this,"Approve Arcade Broadcast",
+            QString("This will spend exactly 0.00020000 TRU in fees.\n"
+                    "Change back to %1: %2 TRU\n"
+                    "Funding: %3:%4\n"
+                    "Public TRUA1 achievement will be permanently visible.\n\n"
+                    "SIGN AND BROADCAST now?")
+                 .arg(selected,QString::fromStdString(DesktopWalletCore::formatAmount(atoms-fee)),
+                      u.value("txid").toString(),QString::number(funding.vout)),
+            QMessageBox::Yes|QMessageBox::No,QMessageBox::No)!=QMessageBox::Yes)return;
+       DesktopWalletSignedTx tx;
+       try {tx=wallet_.buildAndSignArcadeAnchor(funding,script.toStdString(),fee);}
+       catch(const std::exception& e){QMessageBox::critical(this,"Arcade Signing",e.what());return;}
+       rpc_->call("sendrawtransaction",objectParams({{"txHex",QString::fromStdString(tx.rawHex)}}),
+          [this,tx,code,run,post](const QJsonValue& result,const QByteArray&,const QString& error){
+             if(!error.isEmpty()){
+                 QMessageBox::warning(this,"Arcade Broadcast",
+                    "Broadcast status unknown: "+error+"\nCheck transaction history before attempting again.");return;
+             }
+             const QString txid=result.isString()?result.toString():result.toObject().value("txid").toString();
+             if(txid.compare(QString::fromStdString(tx.txid),Qt::CaseInsensitive)!=0){
+                QMessageBox::warning(this,"Arcade Broadcast","Node returned a different TXID. Check transaction history before retrying.");return;
+             }
+             QString status="Signed and broadcast: "+txid+". Await chain confirmation.";
+             try {
+                 const auto claim=post("complete",{{"code",code},{"txid",txid.toLower()}});
+                 status+="\nArcade verification: "+claim.value("state").toString();
+             } catch(const std::exception&) {
+                 status+="\nArcade receipt claim pending. Use Verify your TXID on website.";
+             }
+             QMessageBox::information(this,"TRU Arcade Publication",status);
+          });
+    });
 }
 
 void DesktopWalletWidget::sendTru() {

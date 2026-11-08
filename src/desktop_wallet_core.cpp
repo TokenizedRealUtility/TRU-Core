@@ -1221,6 +1221,55 @@ DesktopWalletSignedTx DesktopWalletCore::buildAndSign(
     return out;
 }
 
+// ARCADE-DESKTOP-07: only spend one ordinary local-wallet UTXO to
+// one zero-value TRUA1 OP_RETURN and P2PKH change to that SAME input key.
+DesktopWalletSignedTx DesktopWalletCore::buildAndSignArcadeAnchor(
+    const DesktopWalletUtxo& funding,
+    const std::string& receiptScriptHex,
+    std::uint64_t feeAtoms) const {
+    if (!unlocked_) throw std::runtime_error("Unlock Desktop Wallet first");
+    if (feeAtoms < 10000 || feeAtoms > 100000)
+        throw std::runtime_error("Arcade fee outside strict 10k..100k atom bound");
+    if (funding.txid.size()!=64 || funding.keyIndex>=nextIndex_ ||
+        funding.amountAtoms<=feeAtoms+kDustAtoms)
+        throw std::runtime_error("Invalid Arcade fee funding UTXO");
+    std::vector<unsigned char> op;
+    if(!fromHex(receiptScriptHex,op) || op.size()<39 || op.size()>77 ||
+       op[0]!=0x6a || op[1]!=op.size()-2 ||
+       std::string(op.begin()+2,op.begin()+7)!="TRUA1")
+        throw std::runtime_error("Invalid canonical TRUA1 OP_RETURN payload");
+    const auto fundingAddress=address(funding.keyIndex);
+    const auto expectedScript=scriptForAddress(fundingAddress);
+    std::string supplied=funding.scriptPubKey;
+    std::transform(supplied.begin(),supplied.end(),supplied.begin(),[](unsigned char v){return static_cast<char>(std::tolower(v));});
+    if(supplied!=expectedScript)
+        throw std::runtime_error("Funding coin is not an ordinary owned P2PKH output");
+    std::vector<unsigned char> prevScript;
+    if(!fromHex(expectedScript,prevScript))throw std::runtime_error("Invalid P2PKH input script");
+    const auto change=funding.amountAtoms-feeAtoms;
+    Tx tx;
+    TxInput vin;vin.txid=funding.txid;vin.vout=funding.vout;
+    tx.vin.push_back(std::move(vin));
+    tx.vout.push_back({0,op});
+    tx.vout.push_back({change,p2pkhScript(fundingAddress)});
+    const auto hash=canonicalSigHash(tx,0,prevScript);
+    auto secret=derivePrivate(funding.keyIndex);
+    try {
+        auto pub=compressedPublic(secret);
+        auto sig=strictDerLowSSign(secret,hash);sig.push_back(0x01);
+        std::vector<unsigned char> unlock;pushData(unlock,sig);pushData(unlock,pub);
+        tx.vin[0].scriptSig=std::move(unlock);
+        sodium_memzero(secret.data(),secret.size());
+    } catch (...) {sodium_memzero(secret.data(),secret.size());throw;}
+    Tx unsignedForId=tx;unsignedForId.vin[0].scriptSig.clear();
+    auto rawId=serializeTx(unsignedForId);const auto id=doubleSha(rawId.data(),rawId.size());
+    DesktopWalletSignedTx result;
+    result.txid=toHex(id.data(),id.size());result.rawHex=toHex(serializeTx(tx));
+    result.inputAtoms=funding.amountAtoms;result.sendAtoms=0;
+    result.feeAtoms=feeAtoms;result.changeAtoms=change;
+    return result;
+}
+
 void DesktopWalletCore::assertPreparedOneInputV1(
     const std::string& unsignedTxHex,
     const std::string& expectedTxid,
