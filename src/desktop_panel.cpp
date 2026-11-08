@@ -9,6 +9,7 @@
 #include "desktop_assets_widget.h"
 #include "desktop_ai_widget.h"
 #include "desktop_wallet_widget.h"
+#include "tru_axon_portal_widget.h"
 #include "tru_network_params.h"
 #include <QComboBox>
 #include <QDateTime>
@@ -1045,6 +1046,10 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
     auto* aiPage =
         new DesktopAIWidget(&rpc_, walletPage_, pages_);
     pages_->insertTab(3, desktopScrollablePage(aiPage), "AI");
+    // AXON-DESKTOP-PORTAL-01: native customer/worker portal + existing Core handoff.
+    auto* axonPage = new TruAxonPortalWidget(
+        [this](const QString& uri) { openAxonHandoff(uri); }, pages_);
+    pages_->insertTab(4, desktopScrollablePage(axonPage), "AXON / NEROMESH");
     aiPage->applyTheme(initialTheme);
 
     // Existing audited local-signing issuance + contract workflows, now
@@ -1057,8 +1062,8 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
     pages_->insertTab(5, desktopScrollablePage(contractsPage), "Smart Contracts");
     auto* magicPage = new TruMagicSecretWidgetV2(&rpc_, walletPage_, pages_);
     pages_->insertTab(6, desktopScrollablePage(magicPage), "Magic Secrets");
-    pages_->setTabToolTip(4,"Create FT, NFT, SFT and NCFT; inscribe TRUScripts. Requires local Core.");
-    pages_->setTabToolTip(5,"Create experimental Hash/Time/Data contracts; inspect and redeem, or use Voting V1.");
+    pages_->setTabToolTip(5,"Create FT, NFT, SFT and NCFT; inscribe TRUScripts. Requires local Core.");
+    pages_->setTabToolTip(6,"Create experimental Hash/Time/Data contracts; inspect and redeem, or use Voting V1.");
 
     connect(themeToggle, &QPushButton::clicked, this,
             [this, themeToggle, aiPage, darkThemeSheet, lightThemeOverrides] {
