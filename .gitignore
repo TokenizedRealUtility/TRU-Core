@@ -99,3 +99,4 @@ build-desktop-mac01-qt6-test/
 .tru-patches/
 .tru-patch-backups/
 /scripts/
+/market/*.md
