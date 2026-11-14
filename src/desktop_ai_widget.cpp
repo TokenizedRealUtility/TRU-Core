@@ -460,9 +460,9 @@ DesktopAIWidget::DesktopAIWidget(
     heroRow->setContentsMargins(18, 15, 18, 15);
 
     auto* titleStack = new QVBoxLayout;
-    auto* eyebrow = new QLabel("TRU AI / LIVING TOKEN CONTROL PLANE");
+    auto* eyebrow = new QLabel("TRU TOOLBOX / AI WORKSPACE");
     eyebrow->setObjectName("aiEyebrow");
-    auto* title = new QLabel("AI Assets & Provenance");
+    auto* title = new QLabel("AI & Agents");
     title->setObjectName("aiTitle");
     auto* subtitle = new QLabel(
         "Read-only view of AI-marked wallet assets, configured AI providers, "
@@ -2175,4 +2175,13 @@ void DesktopAIWidget::deleteEncryptedCredential() {
     } else {
         settingsStatus_->setText("Could not delete encrypted AI credential vault.");
     }
+}
+QJsonObject DesktopAIWidget::guideConnection() const {
+    if (coreMode_->isChecked()) return {{"mode", "core"}};
+    const bool local = localMode_->isChecked();
+    return {{"mode", local ? "local" : "cloud"},
+            {"provider", local ? localFlavor_->currentText() : cloudProvider_->currentText()},
+            {"endpoint", (local ? localEndpoint_->text() : cloudEndpoint_->text()).trimmed()},
+            {"model", (local ? localModel_->text() : cloudModel_->text()).trimmed()},
+            {"key", local ? localApiKey_->text() : cloudApiKey_->text()}};
 }

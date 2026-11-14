@@ -508,7 +508,7 @@ DesktopAssetsWidget::DesktopAssetsWidget(
     auto* titleStack = new QVBoxLayout;
     auto* eyebrow = new QLabel("ON-CHAIN ASSET GALLERY");
     eyebrow->setObjectName("truAssetEyebrow");
-    auto* title = new QLabel("Tokens & TRUScripts");
+    auto* title = new QLabel("Digital Assets & Data");
     title->setObjectName("truAssetTitle");
     auto* subtitle = new QLabel(
         "Read-only ownership view for the addresses in your standalone wallet. "
@@ -568,8 +568,8 @@ DesktopAssetsWidget::DesktopAssetsWidget(
     scriptPageLayout->addLayout(scriptHeader);
     scriptPageLayout->addWidget(makeAssetScroll(scriptHost, scriptGrid_), 1);
 
-    tabs->addTab(tokenPage, "Tokens");
-    tabs->addTab(scriptPage, "TRUScripts");
+    tabs->addTab(tokenPage, "Digital Assets");
+    tabs->addTab(scriptPage, "Data & Proof · TRUScripts");
     root->addWidget(tabs, 1);
 
     auto* privacy = new QLabel(

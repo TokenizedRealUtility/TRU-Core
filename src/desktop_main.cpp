@@ -1,8 +1,9 @@
 #include "desktop_panel.h"
+#include "tru_toolbox_091.h"
 #if __has_include("tru_desktop_version.h")
 #include "tru_desktop_version.h"
 #else
-#define TRU_DESKTOP_BUILD_VERSION "source"
+#define TRU_DESKTOP_BUILD_VERSION "0.09.1"
 #endif
 #include <QApplication>
 #include <QFileOpenEvent>
@@ -68,6 +69,7 @@ int main(int argc, char** argv) {
     }
     app.setApplicationName("TRU Core Desktop");
     app.setOrganizationName("TRUBlockchain");
+    app.setApplicationDisplayName("TRU Toolbox");
     app.setFont(QFont("Sans Serif", 10));
     app.setStyleSheet(
         "QWidget {background:#0b1220;color:#dce8f3;}"
@@ -85,9 +87,9 @@ int main(int argc, char** argv) {
     desktop.setWindowFlags(Qt::Window | Qt::WindowTitleHint |
                            Qt::WindowSystemMenuHint | Qt::WindowMinMaxButtonsHint |
                            Qt::WindowCloseButtonHint);
-    desktop.setWindowTitle(QString("TRU Core Desktop v%1").arg(TRU_DESKTOP_BUILD_VERSION));
+    desktop.setWindowTitle(QString("TRU Toolbox v%1").arg(tru_toolbox_091::releaseVersion));
     desktop.setMinimumSize(720, 520);
-    desktop.resize(1120, 780);
+    desktop.resize(1280, 860);
     desktop.show();
     // A deterministic screenshot hook is useful for package QA; no connection,
     // signing, mining or external action occurs during this preview.

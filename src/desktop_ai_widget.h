@@ -26,6 +26,9 @@ public:
     ~DesktopAIWidget() override = default;
 
     // Presentation-only theme switch. No provider/RPC semantics are changed.
+    QJsonObject guideConnection() const;
+
+    // Presentation-only theme switch. No provider/RPC semantics are changed.
     void applyTheme(const QString& theme);
 
 private:

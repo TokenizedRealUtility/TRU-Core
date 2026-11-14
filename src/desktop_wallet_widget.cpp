@@ -209,7 +209,7 @@ DesktopWalletWidget::DesktopWalletWidget(
     auto* heroLeft = new QVBoxLayout;
     auto* eyebrow = new QLabel("SELF-CUSTODY  //  LOCAL KEYS  //  LOCAL SIGNING");
     eyebrow->setObjectName("truWalletEyebrow");
-    auto* title = new QLabel("Standalone TRU Wallet");
+    auto* title = new QLabel("Credits & Vault");
     title->setObjectName("truWalletTitle");
     state_ = new QLabel;
     state_->setObjectName("truWalletState");
@@ -219,7 +219,7 @@ DesktopWalletWidget::DesktopWalletWidget(
     heroLeft->addStretch();
 
     auto* heroRight = new QVBoxLayout;
-    auto* balanceCaption = new QLabel("SAFE SPENDABLE");
+    auto* balanceCaption = new QLabel("TRU CREDITS · SAFE SPENDABLE");
     balanceCaption->setObjectName("truWalletBalanceCaption");
     balance_ = new QLabel("— TRU");
     balance_->setObjectName("truWalletBalanceValue");
@@ -238,6 +238,10 @@ DesktopWalletWidget::DesktopWalletWidget(
     heroLayout->addLayout(heroLeft, 1);
     heroLayout->addLayout(heroRight);
     root->addWidget(hero);
+    auto* creditUnits = new QLabel("1 displayed TRU credit = 1 TRU. Network fees and transaction amounts remain in TRU.");
+    creditUnits->setObjectName("toolboxCopy");
+    creditUnits->setWordWrap(true);
+    root->addWidget(creditUnits);
 
     auto* receiveCard = new QFrame;
     receiveCard->setObjectName("truReceiveCard");
@@ -313,16 +317,16 @@ DesktopWalletWidget::DesktopWalletWidget(
 
     root->addWidget(receiveCard);
 
-    auto* actionsBox = new QGroupBox("TRU WALLET");
+    auto* actionsBox = new QGroupBox("CREDITS && CONNECTED TOOLS");
     auto* actions = new QGridLayout(actionsBox);
     actions->setHorizontalSpacing(9);
     actions->setVerticalSpacing(9);
 
-    auto* send = new QPushButton("Send TRU");
+    auto* send = new QPushButton("Send credits (TRU)");
     send->setObjectName("truPrimaryAction");
     // MARKET-03C: pairing is the primary marketplace action on every desktop OS.
     auto* marketConnectButton = new QPushButton("Connect Marketplace", this);
-    marketConnectButton->setObjectName("truPrimaryAction");
+    marketConnectButton->setObjectName("toolboxMarketConnect");
     marketConnectButton->setToolTip("Enter the single-use pairing code from Marketplace > Desktop Wallet. No coins move.");
     auto* arcadePublish = new QPushButton("Publish Arcade Achievement", this);
     arcadePublish->setObjectName("truPrimaryAction");
@@ -351,6 +355,7 @@ DesktopWalletWidget::DesktopWalletWidget(
     actions->addWidget(marketLogin, 4, 0, 1, 3);
     actions->addWidget(arcadePublish, 6, 0, 1, 3);
     auto* quantum = new QPushButton("Quantum Transactions (WOTS+)");
+    quantum->setObjectName("toolboxQuantum");
     actions->addWidget(quantum, 5, 0, 1, 3);
     connect(quantum, &QPushButton::clicked, this, [this]{ quantumTransactions(); });
     for (int column = 0; column < 3; ++column)
@@ -375,7 +380,7 @@ DesktopWalletWidget::DesktopWalletWidget(
     root->addWidget(securityBox);
 
     auto* activityHeader = new QHBoxLayout;
-    auto* activityTitle = new QLabel("RECENT WALLET ACTIVITY");
+    auto* activityTitle = new QLabel("RECENT CREDIT ACTIVITY");
     activityTitle->setObjectName("truAssetSectionTitle");
     auto* activityHint = new QLabel("Local events only  ·  secrets are never logged");
     activityHint->setObjectName("truWalletMeta");
@@ -1061,6 +1066,8 @@ void DesktopWalletWidget::updateUi() {
                 .arg(wallet_.addressCount() == 1 ? "" : "es"));
         if (balance_->text().trimmed().isEmpty())
             balance_->setText("— TRU");
+    if (pendingBalance_ && pendingBalance_->text() == "Pending: wallet locked")
+            pendingBalance_->setText("Pending: checking current address");
     } else {
         address_->setText("—");
         did_->setText("—");
@@ -1860,7 +1867,8 @@ void DesktopWalletWidget::livePollIncoming() {
                     pendingBalance_->setText("Unconfirmed incoming: " + amount +
                         " TRU (not spendable; node-reported)");
             } else if (liveObservedTxid_.isEmpty() &&
-                       pendingBalance_->text().startsWith("Unconfirmed incoming:")) {
+                       (pendingBalance_->text().startsWith("Unconfirmed incoming:") ||
+                        pendingBalance_->text() == "Pending: checking current address")) {
                 pendingBalance_->setText("Pending: none reported at current address");
             }
         });

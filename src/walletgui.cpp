@@ -141,7 +141,7 @@ WalletGUI::WalletGUI(Wallet &walletRef, QWidget *parent, int rpcPort, const QByt
     updateNetworkStatus();
     
     // Set window properties
-    setWindowTitle("TRU Core " + QString::fromStdString(tru_version::coreReleaseVersion()) + " — Wallet & Node");
+    setWindowTitle("TRU Toolbox " + QString::fromStdString(tru_version::coreReleaseVersion()) + " — Core & Node");
     resize(1280, 900);
     
     // Load custom logo/branding
@@ -185,7 +185,7 @@ void WalletGUI::setupUI() {
     setupMultisigTab();
     corePanel = new DesktopPanel(this);
     corePanel->useLocalNode(localRpcPort, localRpcToken);
-    tabWidget->addTab(corePanel, "Core / AI / Swaps");
+    tabWidget->addTab(corePanel, "Toolbox / AI / Swaps");
     tabWidget->setUsesScrollButtons(true);
     // Long forms remain usable on laptop and HiDPI screens.
     for (int i = 0; i < tabWidget->count(); ++i) {
@@ -314,7 +314,7 @@ void WalletGUI::setupWalletTab() {
     connect(address_combo, QOverload<int>::of(&QComboBox::currentIndexChanged), 
             this, &WalletGUI::on_address_selection_changed);
     
-    tabWidget->addTab(walletTab, "Wallet");
+    tabWidget->addTab(walletTab, "Credits && Vault");
 
     QPushButton *refresh_wallet_button = new QPushButton("Refresh Wallet", this);
     refresh_wallet_button->setIcon(QIcon::fromTheme("view-refresh"));
@@ -416,7 +416,7 @@ void WalletGUI::setupSendTab() {
                 }
             });
     
-    tabWidget->addTab(sendTab, "Send");
+    tabWidget->addTab(sendTab, "Send TRU");
 }
 
 void WalletGUI::setupTokensTab() {
@@ -516,7 +516,7 @@ void WalletGUI::setupTokensTab() {
     connect(tokens_table, &QTableWidget::itemSelectionChanged,
             [this]() { transfer_token_button->setEnabled(tokens_table->currentRow() >= 0); });
     
-    tabWidget->addTab(tokensTab, "Tokens");
+    tabWidget->addTab(tokensTab, "Digital Assets");
 }
 
 void WalletGUI::setupTRUScriptTab() {
@@ -571,7 +571,7 @@ void WalletGUI::setupTRUScriptTab() {
     connect(tru_scripts_table, &QTableWidget::itemSelectionChanged,
             [this]() { transfer_script_button->setEnabled(tru_scripts_table->currentRow() >= 0); });
     
-    tabWidget->addTab(scriptTab, "TRUScript");
+    tabWidget->addTab(scriptTab, "Data & Proof");
 }
 
 void WalletGUI::setupTransactionsTab() {
@@ -602,7 +602,7 @@ void WalletGUI::setupTransactionsTab() {
     connect(refresh_tx_button, &QPushButton::clicked, this, &WalletGUI::refresh_transactions);
     connect(show_all_addresses_check, &QCheckBox::toggled, this, &WalletGUI::refresh_transactions);
 
-    tabWidget->addTab(txTab, "Transactions");
+    tabWidget->addTab(txTab, "Activity");
    
 }
 
@@ -1717,7 +1717,7 @@ void WalletGUI::setupContractsTab() {
     connect(contracts_table, &QTableWidget::itemSelectionChanged,
             this, &WalletGUI::on_contract_selected);
     
-    tabWidget->addTab(contractsTab, "Contracts");
+    tabWidget->addTab(contractsTab, "Agreements");
 }
 
 void WalletGUI::on_contract_type_changed(int index) {

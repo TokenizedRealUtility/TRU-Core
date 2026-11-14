@@ -1,17 +1,86 @@
-# TRU Core 0.08.9 — `tru-cli` and UTXO Tools R2
+# TRU v0.09.2 — CLI, Toolbox Guide and UTXO Tools
 
 `tru-cli` is TRU's standalone command-line client for node administration, scripting, diagnostics, wallet reads, mining information, and raw JSON-RPC access.
 
-This guide covers authenticated CLI administration and the optional UTXO-TOOLS-01 R2 update. Commands depend on the features included in the installed Core and CLI build.
+This README targets **v0.09.2 across Core, tru-cli and Desktop Toolbox**. It covers the shared offline Guide, authenticated CLI administration and existing UTXO-TOOLS-01 R2 workflows. Commands depend on the code included in the installed binaries; version labels alone do not establish capabilities.
 
 The current TRU source tree already includes:
 
 - the `getbalance` RPC,
 - the `getinfo` aggregate RPC,
 - the `tru-cli` build target,
-- Patch-05 authenticated RPC transport.
+- Patch-05 authenticated RPC transport,
+- the shared offline Guide when built with the Guide 06 update.
 
 No separate Patch 31 installation or manual copy of `tru-cli.cpp` is required for the current release tree.
+
+---
+
+# Built-in Guide — v0.09.2
+
+The **v0.09.2 Guide** is a built-in help and tutorial interface. It describes
+workflows and can open a related desktop workspace; it does not sign, broadcast,
+execute commands, accept jobs or verify that a tutorial step actually succeeded.
+
+## Open the Guide
+
+| Interface | Entry point | Available help |
+|---|---|---|
+| Desktop Toolbox | **Toolbox Guide** in the workspace navigation | Offline tutorials, question matching, step navigation, related workspace links and optional AI explanations |
+| Core operator menu | Run `tru_advanced --cli`, then type `guide` | Offline search and paged reading of the same collection |
+| Standalone CLI | `tru-cli guide` | Interactive offline reader |
+| Standalone CLI | `tru-cli guide list` | Article numbers and titles |
+| Standalone CLI | `tru-cli guide search "datafeed"` | Matching articles |
+| Standalone CLI | `tru-cli guide read NUMBER` | Complete article text; replace NUMBER with a listed number |
+
+Use these exact Guide command forms with `guide` immediately after the executable.
+They do not require RPC options, a running node, a wallet unlock or an RPC cookie.
+In the interactive reader, type a question or topic, choose an article number,
+and use `n` / `p` to page, `b` to return from an article, or `q` to exit. `list`
+restores the article list. The menu display wraps long lines; use `guide read`
+for exact code lines. Article numbers may change when the collection is updated.
+
+```bash
+cd ~/NEW_TRU/build-native/bin
+./tru-cli guide list
+./tru-cli guide search "quantum retry"
+./tru-cli guide search "UTXO split"
+./tru-cli guide search "checkpoint memory"
+```
+
+Core's existing guided evolution flows remain separate from the general Guide.
+The Guide update does not add an assistant to the Web Toolbox.
+
+## Tutorial coverage and prerequisites
+
+The initial 0.09.2 collection contains **210 entries**: desktop tutorials,
+Advanced Tools references, all seven supplied manuals with indexed sections,
+scope notes and a current-source RPC-name index.
+
+| Topic | Included material |
+|---|---|
+| Everyday Toolbox use | Connection, keys/recovery, receive/send, balances, assets, TRUScripts, contracts, voting and Magic Secrets |
+| AI and compute | Provider setup, token evolution, AXON customer/worker workflow and existing approval steps |
+| Core RPC | Authenticated JSON-RPC reference and current-source name index |
+| CLI / UTXOs | Authentication, coin inventory, split/consolidation, preparation, submission and recovery checks |
+| Quantum transactions | Funding, WOTS+ spending, explicit submission, retry and current sidecar requirements |
+| DataFeed | Queue, preview, publish, retrieve/verify, inline/hash modes, HAM/science examples and batch inputs |
+| NCFT agents | Identity, persistent memory, checkpoints, approved and bounded automatic anchoring, watcher and recovery instructions |
+| Explorer HTTP API | Routes, access boundaries and deployment notes |
+
+Older manuals retain their version scope and historical examples. Read their
+review notes and full prerequisites before using an indexed section. Registered
+RPC names do not prove public-gateway access or runtime permission. The supplied
+older reference contains 111 RPC names; all appear in the reviewed current
+dispatcher, whose name index contains 122. This is not an exhaustive validation
+of every parameter or every live deployment.
+
+**Separate dependencies:** the Python DataFeed helper and NCFT agent runtime,
+configuration examples and service files must be installed separately where
+required. Their tutorials are included; the Guide does not install those tools.
+A related-workspace link does not create a GUI for CLI-only functions.
+
+Desktop users may also enable optional AI explanations through their existing direct-provider configuration in AI & Agents. **The Core and CLI readers do not call AI providers.** Connecting Core AI does not enable chat in `tru-cli guide`.
 
 ---
 
@@ -152,7 +221,7 @@ Use the actual binary path/name present in the image if it differs.
 ./tru-cli gettransaction <TXID>
 ./tru-cli getrawmempool
 ./tru-cli getmininginfo
-./tru-cli gettokenmetadata <TOKEN_ID>
+./tru-cli raw gettokenmetadata '{"txid":"PUT_REAL_ISSUANCE_TXID_HERE"}'
 ./tru-cli verifytokenbalance <TRU_ADDRESS> <TOKEN_ID>
 ```
 
@@ -160,9 +229,9 @@ Use the actual binary path/name present in the image if it differs.
 
 ---
 
-# Wallet UTXO tools — 0.08.9 / UTXO-TOOLS-01 R2
+# Wallet UTXO tools — retained UTXO-TOOLS-01 R2 functionality
 
-These commands require both Core and `tru-cli` to be rebuilt with UTXO-TOOLS-01 R2. The version label remains 0.08.9, so that label alone does not prove the tools are installed. Check `tru-cli --help`, the installer `verify` result, and the running executable.
+These commands originated in the 0.08.9 UTXO-TOOLS-01 R2 update and remain documented for 0.09.2. Both Core and CLI must include the implementation. Check `tru-cli --help` and the running executable; changing a version string does not install a feature.
 
 The update adds wallet-wide ordinary-coin inventory, self-splitting, consolidation, manual input selection, and an optional bounded self-transfer runner. It does not change consensus, the subsidy, block validation, script execution, transaction serialization or existing getinfo/getbalance behavior.
 
@@ -462,10 +531,12 @@ Friendly wrappers cover common operations. `raw` can call any RPC method exposed
 
 ```bash
 ./tru-cli raw getblocktemplate
-./tru-cli raw gettokenmetadata '{"tokenID":"example"}'
+./tru-cli raw gettokenmetadata '{"txid":"PUT_REAL_ISSUANCE_TXID_HERE"}'
 ./tru-cli raw listunspent '{"address":"<TRU_ADDRESS>"}'
 ./tru-cli raw verifytokenbalance '{"address":"<TRU_ADDRESS>","tokenID":"example"}'
 ```
+
+**Metadata compatibility:** the reviewed friendly `gettokenmetadata <id>` alias supplies `tokenID`, while the handler expects `txid`. Use the raw form above with a real issuance transaction ID.
 
 Raw access is privileged. Availability through `tru-cli raw` does not mean a method is safe for a public website.
 
@@ -520,14 +591,15 @@ Public websites should use the restricted server-side TRU web gateway rather tha
 | `-timeout=<sec>` | read timeout | `30` |
 | `-h`, `--help` | show command help | — |
 
-RPC authentication is not disabled by these options.
+RPC authentication is not disabled by these options. The separate `guide` command is local help and does not use RPC options. Put `guide` immediately after `tru-cli`, as shown above.
 
 ---
 
 # Friendly commands → RPC methods
 
-| `tru-cli` command | Node method |
+| `tru-cli` command | Node method or local operation |
 |---|---|
+| `guide` / `guide list` / `guide search QUESTION` / `guide read NUMBER` | Local embedded documentation; no RPC |
 | `getinfo` | `getinfo` |
 | `getbalance [address]` | `getbalance` |
 | `getblockcount` | `getblockcount` |
@@ -545,7 +617,7 @@ RPC authentication is not disabled by these options.
 | `gettransaction <txid>` | `gettransaction` |
 | `getrawmempool` | `getrawmempool` |
 | `getmininginfo` | `getminerstatus` |
-| `gettokenmetadata <id>` | `gettokenmetadata` |
+| `raw gettokenmetadata '{"txid":"..."}'` | `gettokenmetadata`; use an issuance transaction ID |
 | `verifytokenbalance <addr> <id>` | `verifytokenbalance` |
 | `utxo list` | `walletutxotools`, action `list` |
 | `utxo prepare JSON` | `walletutxotools`, action `prepare` |
@@ -585,4 +657,18 @@ Example:
 
 ## Release status
 
-This document retains the authenticated RPC and signed-DID guidance and adds UTXO-TOOLS-01 R2 usage for Core 0.08.9. The UTXO tools require patched Core and CLI binaries. This documentation is not a claim that every release integration test has passed.
+Documentation target: **v0.09.2 for Core, CLI and Desktop Toolbox**. The Guide 06
+update adds shared documentation and help interfaces; it leaves consensus,
+wallet signing and transaction approval rules unchanged. Its installer retains
+the prior version metadata, so release packaging must set and verify 0.09.2
+separately in the built artifacts. Editing this README does not rebuild binaries.
+
+The Guide's Linux desktop/CLI builds, Core syntax check, offline reader tests,
+mock AI adapter tests and installer/rollback checks passed. Full linked Core
+runtime, Windows/macOS builds and live provider tests were not established by
+those checks. Earlier UTXO regression/qualification notes above retain their own
+scope and are not new 0.09.2 end-to-end results.
+
+The documentation includes DataFeed and NCFT agent runtime workflows, but their
+separate Python tools and service files must be installed and checked independently.
+The Guide is help, not an installer or an automatic transaction executor.

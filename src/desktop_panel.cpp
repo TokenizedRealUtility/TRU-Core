@@ -1,10 +1,12 @@
 #include "magic_secret_widget_v2.h"
 #include "desktop_panel.h"
+#include "tru_toolbox_091.h"
+#include "tru_toolbox_guide.h"
 #include "tru_desktop_studio_07.h"
 #if __has_include("tru_desktop_version.h")
 #include "tru_desktop_version.h"
 #else
-#define TRU_DESKTOP_BUILD_VERSION "source"
+#define TRU_DESKTOP_BUILD_VERSION "0.09.1"
 #endif
 #include "desktop_assets_widget.h"
 #include "desktop_ai_widget.h"
@@ -163,7 +165,7 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
     // Presentation only: no RPC, wallet, consensus or P2P semantics.
     setStyleSheet(R"TRUQSS(
         QWidget {
-            background-color: #040d18;
+            background-color: #0b141b;
             color: #dcecf6;
             font-size: 13px;
         }
@@ -171,12 +173,12 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
         QTabWidget::pane {
             border: 1px solid #163d57;
             border-radius: 10px;
-            background-color: #06131f;
+            background-color: #101c24;
             top: -1px;
         }
 
         QTabBar::tab {
-            background-color: #081a2a;
+            background-color: #11212b;
             color: #809fb4;
             border: 1px solid #15374f;
             border-bottom: none;
@@ -194,8 +196,8 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
         }
 
         QGroupBox {
-            background-color: #071725;
-            border: 1px solid #19445f;
+            background-color: #14232c;
+            border: 1px solid #30434f;
             border-radius: 12px;
             margin-top: 13px;
             padding: 18px 12px 12px 12px;
@@ -211,15 +213,15 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
         QGroupBox[truMetric="true"] {
             background: qlineargradient(
                 x1:0, y1:0, x2:1, y2:1,
-                stop:0 #071927,
-                stop:0.55 #082033,
-                stop:1 #092a40);
+                stop:0 #14252c,
+                stop:0.55 #18312f,
+                stop:1 #1d3a33);
             border: 1px solid #245d7a;
             min-height: 100px;
         }
 
         QLabel#truMetricValue {
-            color: #67f4df;
+            color: #64e4be;
             font-size: 31px;
             font-weight: 800;
             padding: 8px;
@@ -234,7 +236,7 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
             border:1px solid #286d80; border-radius:7px;
         }
         QLabel#truBrand {
-            color: #73ecff;
+            color: #e9f3f5;
             font-size: 25px;
             font-weight: 800;
             padding: 0px;
@@ -314,10 +316,10 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
         QFrame#truAssetsHero {
             background: qlineargradient(
                 x1:0, y1:0, x2:1, y2:0,
-                stop:0 #071a2b,
-                stop:0.55 #0a2c40,
-                stop:1 #081a2d);
-            border: 1px solid #286882;
+                stop:0 #15252e,
+                stop:0.55 #1c3b36,
+                stop:1 #1a302e);
+            border: 1px solid #3b625a;
             border-radius: 13px;
         }
         QLabel#truWalletEyebrow,
@@ -364,7 +366,7 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
             font-weight: 800;
         }
         QLabel#truWalletBalanceValue {
-            color: #75f6df;
+            color: #64e4be;
             font-size: 30px;
             font-weight: 800;
         }
@@ -377,8 +379,8 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
             padding: 9px 11px;
         }
         QFrame#truReceiveCard {
-            background-color: #071827;
-            border: 1px solid #1d4a64;
+            background-color: #14232c;
+            border: 1px solid #30434f;
             border-radius: 11px;
         }
         QLabel#truWalletAddress {
@@ -405,9 +407,9 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
         QFrame#truAssetCard {
             background: qlineargradient(
                 x1:0, y1:0, x2:1, y2:1,
-                stop:0 #071725,
+                stop:0 #14232c,
                 stop:1 #0a2133);
-            border: 1px solid #1e516d;
+            border: 1px solid #30434f;
             border-radius: 12px;
         }
         QLabel#truAssetImage {
@@ -419,7 +421,7 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
             font-weight: 800;
         }
         QLabel#truScriptGlyph {
-            background-color: #06131f;
+            background-color: #101c24;
             color: #63e7dc;
             border: 1px solid #1e536d;
             border-radius: 9px;
@@ -443,7 +445,7 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
             font-weight: 800;
         }
         QLabel#truAssetAmount {
-            color: #74f2d9;
+            color: #64e4be;
             font-size: 17px;
             font-weight: 800;
         }
@@ -473,7 +475,7 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
         }
 
         QPushButton {
-            background-color: #0b2b41;
+            background-color: #1c3639;
             color: #dcf6fb;
             border: 1px solid #256783;
             border-radius: 8px;
@@ -481,7 +483,7 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
             font-weight: 700;
         }
         QPushButton:hover {
-            background-color: #10445d;
+            background-color: #2a4e4b;
             border-color: #48d1ea;
             color: #ffffff;
         }
@@ -494,10 +496,10 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
         QPushButton#truPrimaryAction {
             background: qlineargradient(
                 x1:0, y1:0, x2:1, y2:0,
-                stop:0 #0d4b62,
-                stop:1 #08706f);
+                stop:0 #1b6959,
+                stop:1 #227762);
             color: #efffff;
-            border-color: #43d8d0;
+            border-color: #64e4be;
         }
         QPushButton#truSecondaryAction {
             background-color: #0a2437;
@@ -512,7 +514,7 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
         QLineEdit,
         QPlainTextEdit,
         QComboBox {
-            background-color: #081a2a;
+            background-color: #11212b;
             color: #daedf7;
             border: 1px solid #294b63;
             border-radius: 7px;
@@ -572,12 +574,14 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
             height: 2px;
         }
         QToolTip {
-            background-color: #071827;
+            background-color: #14232c;
             color: #d9f5fa;
             border: 1px solid #2b7189;
             padding: 6px;
         }
     )TRUQSS");
+
+    setStyleSheet(styleSheet() + tru_toolbox_091::theme(false));
 
     const QString darkThemeSheet = styleSheet();
     const QString lightThemeOverrides = R"TRULIGHT(
@@ -686,7 +690,7 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
             background-color:#ffffff; color:#183443;
             border-color:#7ca7b5;
         }
-    )TRULIGHT";
+    )TRULIGHT"+ tru_toolbox_091::theme(true);
 
     QSettings themeSettings("TRUBlockchain", "CoreDesktop");
     QString initialTheme =
@@ -700,37 +704,23 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
     setObjectName("truAppRoot");
     QTimer::singleShot(0, this, [this] {
         if (window()) {
-            window()->setWindowTitle(QString("TRU Core Desktop v%1").arg(TRU_DESKTOP_BUILD_VERSION));
+            window()->setWindowTitle(QString("TRU Toolbox v%1").arg(tru_toolbox_091::releaseVersion));
             window()->setWindowIcon(QIcon(":/tru/assets/tru_logo.png"));
         }
     });
+    new tru_toolbox_091::MetalBackdrop(this);
     auto root = new QVBoxLayout(this);
     root->setContentsMargins(18, 14, 18, 14);
     root->setSpacing(9);
     auto brandRow = new QHBoxLayout;
     brandRow->setSpacing(12);
 
-    auto logo = new QLabel;
-    logo->setObjectName("truLogo");
-    logo->setFixedSize(58, 58);
-    const QPixmap logoPixmap(":/tru/assets/tru_logo.png");
-    if (!logoPixmap.isNull()) {
-        logo->setPixmap(logoPixmap.scaled(
-            logo->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
-    } else {
-        // Fail visibly instead of silently leaving an empty logo slot.
-        logo->setText("TRU");
-        logo->setAlignment(Qt::AlignCenter);
-        logo->setStyleSheet(
-            "font-size:18px;font-weight:900;color:#6debf3;"
-            "border:1px solid #246680;border-radius:10px;");
-    }
-    brandRow->addWidget(logo, 0, Qt::AlignVCenter);
+    brandRow->addWidget(tru_toolbox_091::bronzeLogo(), 0, Qt::AlignVCenter);
 
-    auto brand = new QLabel("TRU  /  CORE DESKTOP");
+    auto brand = new QLabel("TOOLBOX");
     brand->setObjectName("truBrand");
     brandRow->addWidget(brand, 0, Qt::AlignVCenter);
-    auto* versionBadge = new QLabel(QString("v%1").arg(TRU_DESKTOP_BUILD_VERSION));
+    auto* versionBadge = new QLabel(QString("v%1").arg(tru_toolbox_091::releaseVersion));
     versionBadge->setObjectName("truVersionBadge");
     versionBadge->setToolTip("Version of this Desktop application, not the connected Core node.");
     brandRow->addWidget(versionBadge, 0, Qt::AlignVCenter);
@@ -749,7 +739,7 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
         initialTheme == "light" ? "DARK THEME" : "LIGHT THEME");
     themeToggle->setObjectName("truThemeToggle");
     themeToggle->setToolTip(
-        "Switch TRU Desktop between dark and light appearance. "
+        "Switch TRU Toolbox between dark and light appearance. "
         "The preference is saved on this computer.");
 
     // The large title and right-side badges previously shared one inflexible
@@ -869,7 +859,7 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
     actions->addStretch();
     actions->addWidget(clear);
     toolsLayout->addLayout(actions);
-    pages_->addTab(desktopScrollablePage(tools), "Advanced");
+    pages_->addTab(desktopScrollablePage(tools), "Advanced Tools");
     connect(clear, &QPushButton::clicked, output_, &QPlainTextEdit::clear);
     connect(run_, &QPushButton::clicked, this, [this]{ runOperation(); });
     connect(category_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this] {
@@ -1037,33 +1027,34 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
     // DESKTOP-WALLET-01: independent local-key wallet.
     // UI-02 adds only presentation and read-only asset discovery.
     walletPage_ = new DesktopWalletWidget(&rpc_, pages_);
-    pages_->insertTab(1, desktopScrollablePage(walletPage_), "Wallet");
+    pages_->insertTab(1, desktopScrollablePage(walletPage_), "Credits & Vault");
 
     auto* assetsPage =
         new DesktopAssetsWidget(&rpc_, walletPage_, pages_);
-    pages_->insertTab(2, desktopScrollablePage(assetsPage), "Assets");
+    pages_->insertTab(2, desktopScrollablePage(assetsPage), "Digital Assets");
 
     auto* aiPage =
         new DesktopAIWidget(&rpc_, walletPage_, pages_);
-    pages_->insertTab(3, desktopScrollablePage(aiPage), "AI");
+    pages_->insertTab(3, desktopScrollablePage(aiPage), "AI & Agents");
     // AXON-DESKTOP-PORTAL-01: native customer/worker portal + existing Core handoff.
     auto* axonPage = new TruAxonPortalWidget(
         [this](const QString& uri) { openAxonHandoff(uri); }, pages_);
-    pages_->insertTab(4, desktopScrollablePage(axonPage), "AXON / NEROMESH");
+    pages_->insertTab(4, desktopScrollablePage(axonPage), "Compute / AXON");
     aiPage->applyTheme(initialTheme);
 
     // Existing audited local-signing issuance + contract workflows, now
     // discoverable without burying them inside the Assets gallery.
     auto* creatorPage = new TruDesktopStudio07(
         &rpc_, walletPage_, pages_, TruDesktopStudio07::Surface::Tokens);
-    pages_->insertTab(4, desktopScrollablePage(creatorPage), "Create Tokens");
+    pages_->insertTab(4, desktopScrollablePage(creatorPage), "Create & Publish");
     auto* contractsPage = new TruDesktopStudio07(
         &rpc_, walletPage_, pages_, TruDesktopStudio07::Surface::Contracts);
-    pages_->insertTab(5, desktopScrollablePage(contractsPage), "Smart Contracts");
+    pages_->insertTab(5, desktopScrollablePage(contractsPage), "Agreements");
     auto* magicPage = new TruMagicSecretWidgetV2(&rpc_, walletPage_, pages_);
     pages_->insertTab(6, desktopScrollablePage(magicPage), "Magic Secrets");
-    pages_->setTabToolTip(5,"Create FT, NFT, SFT and NCFT; inscribe TRUScripts. Requires local Core.");
-    pages_->setTabToolTip(6,"Create experimental Hash/Time/Data contracts; inspect and redeem, or use Voting V1.");
+    pages_->setTabToolTip(4,"Create FT, NFT, SFT and NCFT; publish TRUScripts. Requires local Core.");
+    pages_->setTabToolTip(5,"Existing Hash/Time/Data contracts, redemption and Voting V1.");
+    pages_->setTabToolTip(6,"Existing Magic Secrets tools.");
 
     connect(themeToggle, &QPushButton::clicked, this,
             [this, themeToggle, aiPage, darkThemeSheet, lightThemeOverrides] {
@@ -1090,6 +1081,20 @@ DesktopPanel::DesktopPanel(QWidget* parent) : QWidget(parent), rpc_(this) {
         pages_->removeTab(configIndex);
         pages_->insertTab(7, configPage, "Connection");
     }
+
+    tru_toolbox_091::installOverview(overview, pages_, walletPage_, assetsPage, aiPage, axonPage, creatorPage);
+    auto* guide = new tru_guide::Guide(QJsonArray{},
+        [aiPage] { return aiPage->guideConnection(); },
+        [this](const QString& name) {
+            for (int i=0;i<pages_->count();++i) if(pages_->tabText(i)==name && pages_->isTabEnabled(i)) {
+                pages_->setCurrentIndex(i); return true;
+            }
+            return false;
+        }, pages_);
+    pages_->addTab(desktopScrollablePage(guide), "Toolbox Guide");
+    pages_->setTabToolTip(pages_->count()-1, "Offline tutorials and optional AI help. No automatic transactions.");
+    root->removeWidget(pages_);
+    root->addWidget(new tru_toolbox_091::Shell(pages_, this), 1);
 
     connect(
         browseCookie_,

@@ -46,6 +46,55 @@
 //  Exit code 0 on success, 1 on transport error, 2 on RPC error.
 // ============================================================================
 
+#include "tru_core_guide.h"
+// ============================================================================
+//  tru-cli  --  Bitcoin-cli-style command-line client for the TRU node
+// ----------------------------------------------------------------------------
+//  Talks JSON-RPC to a running tru_advanced node over HTTP POST /rpc, exactly
+//  like the standalone miners do (httplib + nlohmann::json, endpoint "/rpc",
+//  body {jsonrpc, method, params, id}).
+//
+//  BUILD (see CMake snippet delivered alongside this file):
+//      add_executable(tru-cli src/tru-cli.cpp)
+//      target_link_libraries(tru-cli ...)   # same libs your other tools use
+//
+//  USAGE:
+//      tru-cli [options] <command> [args...]
+//      tru-cli [options] raw <method> ['{"json":"params"}']
+//
+//  OPTIONS:
+//      -rpcconnect=<ip>     node IP     (default 127.0.0.1)
+//      -rpcport=<port>      node port   (default 21832)
+//      -conf=<file>         read rpcconnect/rpcport from a tru.conf-style file
+//      -json                print the raw JSON result (no pretty summary)
+//      -timeout=<sec>       read timeout seconds (default 30)
+//      -h / --help          this help
+//
+//  FRIENDLY COMMANDS (mapped to RPC methods, bitcoin-cli-like):
+//      getinfo                          -> getinfo
+//      getbalance [address]             -> getbalance {address?}
+//      getblockcount                    -> getblockcount
+//      getchaininfo                     -> getchaininfo
+//      getbestblockhash                 -> getchaininfo (prints bestHash)
+//      getdifficulty                    -> getchaininfo (prints difficulty)
+//      getpeerinfo                      -> getpeerinfo
+//      getconnectioncount               -> getpeerinfo (prints count)
+//      getnewaddress                    -> getnewaddress
+//      listaddresses                    -> listaddresses
+//      listunspent <address>            -> listunspent {address}
+//      listtransactions <address>       -> listtransactions {address}
+//      getblock <hash>                  -> getblock {hash}
+//      getblockbyheight <height>        -> getblockbyheight {height}
+//      gettransaction <txid>            -> gettransaction {txid}
+//      getrawmempool                    -> getrawmempool
+//      getmininginfo                    -> getminerstatus (best-effort)
+//      gettokenmetadata <tokenID>       -> gettokenmetadata {tokenID}
+//      verifytokenbalance <addr> <tid>  -> verifytokenbalance {address,tokenID}
+//      raw <method> [jsonparams]        -> passthrough to ANY node method
+//
+//  Exit code 0 on success, 1 on transport error, 2 on RPC error.
+// ============================================================================
+
 #include "tru_network_params.h"
 #include "rpc_utils.h"  // Bearer/cookie RPC authentication
 #include <iostream>
@@ -88,6 +137,7 @@ Options:
 
 Friendly commands -- these are all implemented direct command wrappers:
   getinfo                          aggregate node + wallet snapshot
+  guide [list|search QUESTION|read NUMBER]  offline tutorials (no RPC)
   utxo <list|prepare|submit> [JSON or @file]
                                    wallet UTXO inventory, split/consolidate preview and submit
   getbalance [address]             ordinary spendable TRU balance
@@ -427,6 +477,7 @@ static const json& mustResult(const json& resp) {
 
 // ------------------------------- main ---------------------------------------
 int main(int argc, char** argv) {
+    if(argc>1 && std::string(argv[1])=="guide") return tru_core_guide::command(argc,argv);
     Config cfg;
     std::vector<std::string> pos;   // positional args (command + params)
 

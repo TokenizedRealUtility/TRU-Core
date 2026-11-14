@@ -104,3 +104,6 @@ build-desktop-mac01-qt6-test/
 # Personal documentation - keep locally, exclude from GitHub
 /swap/*.md
 /swap/agent/*.md
+
+# TRU Toolbox local patch backups
+.tru-toolbox-*-backups/

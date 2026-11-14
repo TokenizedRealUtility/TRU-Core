@@ -747,14 +747,15 @@ public:
       :QWidget(parent),rpc_(rpc),wallet_(wallet) {
         auto* root=new QVBoxLayout(this);
         auto* headline=new QLabel(
-            surface==Surface::Tokens ? "TRU / CREATE TOKENS + TRUSCRIPTS" :
-            surface==Surface::Contracts ? "TRU / SMART CONTRACT STUDIO" :
-            "TRU / CREATOR STUDIO");
+            surface==Surface::Tokens ? "TRU TOOLBOX / CREATE & PUBLISH" :
+            surface==Surface::Contracts ? "TRU TOOLBOX / AUTOMATED AGREEMENTS" :
+            "TRU TOOLBOX / CREATOR STUDIO");
         headline->setObjectName("truAssetTitle");root->addWidget(headline);
         notice_=new QLabel("All writes require LOCAL CORE and an unlocked STANDALONE WALLET. "
             "Keys stay inside the desktop wallet. Review each transaction before broadcast.");
         notice_->setWordWrap(true);root->addWidget(notice_);
         auto* tabs=new QTabWidget;
+        tabs->setObjectName("toolboxCreatorSections");
         tabs->setUsesScrollButtons(true);
         tabs->setElideMode(Qt::ElideRight);
         root->addWidget(tabs,1);
@@ -772,7 +773,7 @@ public:
         supply_=new QLineEdit("1");tf->addRow("Supply (integer units)",supply_);
         desc_=new QLineEdit;desc_->setMaxLength(200);tf->addRow("Description",desc_);
         image_=new QLineEdit;image_->setPlaceholderText("https://... (optional)");tf->addRow("HTTPS artwork URL",image_);
-        mint_=new QPushButton("REVIEW & MINT TOKEN");tf->addRow(mint_);
+        mint_=new QPushButton("REVIEW & CREATE ASSET");tf->addRow(mint_);
         auto* typeHint=new QLabel;
         typeHint->setWordWrap(true);
         typeHint->setObjectName("truTokenClassHint");
@@ -786,7 +787,7 @@ public:
         typeHint->setText("FT · Fungible token. Eight decimal places in the existing issuance workflow.");
         auto* tnote=new QLabel("NCFT/SFT issuance does not automatically delegate editing. "
             "Use the issuer authorization workflow for future artwork changes.");tnote->setWordWrap(true);tf->addRow(tnote);
-        tabs->addTab(tokens,"Mint FT / NFT / SFT / NCFT");
+        tabs->addTab(tokens,"Create FT / NFT / SFT / NCFT");
         QObject::connect(mint_,&QPushButton::clicked,this,[this]{issueToken();});
         QObject::connect(type_,&QComboBox::currentTextChanged,this,[this](const QString& t){
             if(t=="NFT")supply_->setText("1");});
@@ -797,9 +798,9 @@ public:
         scriptInfo->setWordWrap(true);sl->addWidget(scriptInfo);
         inscription_=new QPlainTextEdit;inscription_->setPlaceholderText("Text or public JSON (1–1024 bytes)");
         sl->addWidget(inscription_,1);
-        inscribe_=new QPushButton("REVIEW & INSCRIBE");sl->addWidget(inscribe_);
+        inscribe_=new QPushButton("REVIEW & PUBLISH");sl->addWidget(inscribe_);
         QObject::connect(inscribe_,&QPushButton::clicked,this,[this]{inscribe();});
-        tabs->addTab(scripts,"Inscribe TRUScript");
+        tabs->addTab(scripts,"Publish Data · TRUScript");
         // Contract creation: canonical non-stateful families only. Voting V1 below.
         auto* create=new QWidget;auto* cf=new QFormLayout(create);
         kind_=new QComboBox;kind_->addItems({"HASH LOCK","TIME LOCK","OP_RETURN"});cf->addRow("Contract family",kind_);

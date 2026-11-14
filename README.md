@@ -75,12 +75,41 @@ No reserved founder or project mining reward
 
 ## Current Version and Upgrade Status
 
-**Documentation target: TRU Core 0.08.8 (QUANTUM-RECOVERY-02 candidate).**
+**Documentation target: TRU Core, tru-cli and Desktop Toolbox v0.09.2.**
 
-The 0.08.5 mainnet consensus upgrade activated at **block 50,000, inclusive**.
-Versions 0.08.6–0.08.8 retain that activation and the existing WOTS+ parameters.
-They address recovery, maintenance, and wallet behavior without scheduling a new
-consensus activation.
+This release brings the Toolbox interface and the shared **Toolbox Guide** into
+one documented release across Core, CLI and desktop. The Guide is available in
+the desktop workspace, the Core terminal menu and the standalone `tru-cli`.
+Desktop users can optionally request explanations from their configured direct
+AI provider; Core and CLI help are offline.
+
+The Guide changes do not alter consensus, transaction formats, wallet signing,
+settlement rules or the existing approval screens. The 0.08.5 mainnet activation
+remains **block 50,000, inclusive**. A release-number change alone does not change
+network activation rules.
+
+| Release | User-facing changes |
+|---|---|
+| **0.09.0** | Native NEROMESH / AXON customer/worker portal integration and supported funding/acceptance workflows. |
+| **0.09.1** | Desktop Wallet renamed to **TRU Toolbox**, with refreshed navigation, Toolbox background/emblem and presentation fixes. |
+| **0.09.2** | Shared Guide collection: 210 entries, seven full manuals with indexed sections and review notes, offline question matching, Core menu help, CLI help commands, and optional desktop AI explanations. |
+
+The Guide 06 source update is the basis for these help features. Release builds
+must include that update and carry the intended 0.09.2 version metadata; editing
+this README does not change executable versions. Rebuild Core, CLI and each
+desktop platform, verify the produced artifacts, and publish new checksums.
+
+**Validation scope:** the Guide update passed Linux desktop and CLI compilation,
+Core `main.cpp` syntax compilation, offline reader and desktop integration checks,
+mock AI-protocol tests, and installer/rollback checks. These results do not claim
+a full linked Core runtime test, Windows/macOS build validation, live commercial
+AI-provider certification, or validation of separately installed Python tools.
+See [Testing and Qualification](#testing-and-qualification) for historical evidence.
+
+### Historical maintenance releases
+
+The following records retain their original version labels and qualification
+scope; they are not new v0.09.2 test results.
 
 | Version | Main changes |
 |---|---|
@@ -89,7 +118,7 @@ consensus activation.
 | **0.08.7** | Addressed height lookup/locking, automatic reorg defaults, rollback balance-cache work, canonical quantum address display, and admission limits for expensive peer transaction work. |
 | **0.08.8 candidate** | Adds a second encrypted quantum state copy, conservative replica repair, explicit encrypted backup/recovery-only import, and persistent destination-use reservations. Preserves existing signing-intent and exact-byte retry safeguards. |
 
-**Qualification:** both 0.08.8 candidate cores passed full node/client builds,
+**Historical 0.08.8 qualification:** both candidate cores passed full node/client builds,
 native wallet-state regression tests, and the controlled live P2P/reorg/crash
 suite. A throwaway-wallet RPC workflow check remains before recommending
 funded-wallet deployment or public release. Qt GUI runtime and the independent
@@ -110,6 +139,8 @@ height is the next block height; it is not the current tip height.
 ---
 
 ## Highlights
+
+- **Shared Toolbox Guide** across desktop, Core menu and CLI, with optional direct-provider AI explanations on desktop.
 
 - **UTXO-based Layer 1** with Bitcoin-style inputs, outputs, P2PKH/P2SH, transaction IDs, Merkle roots, and cumulative-work fork choice.
 - **Nakamoto Proof-of-Work** using TRU's `SHA256d + 21E8` puzzle.
@@ -148,38 +179,27 @@ height is the next block height; it is not the current tip height.
 10. [MagicMiner and MagicLock](#magicminer-and-magiclock)
 11. [AI Oracle](#ai-oracle)
 12. [Living Token Evolution](#living-token-evolution)
-13. [Interactive Node CLI](#interactive-node-cli)
-14. [`tru-cli`](#tru-cli)
-15. [Wallets](#wallets)
-16. [Quantum Transactions](#quantum-transactions)
-17. [Marketplace Locks and Atomic Settlement](#marketplace-locks-and-atomic-settlement)
-18. [Mining](#mining)
-19. [P2P Networking](#p2p-networking)
-20. [Storage](#storage)
-21. [JSON-RPC API](#json-rpc-api)
-22. [Prefer authenticated tru-cli for ordinary use:](#prefer-authenticated-tru-cli-for-ordinary-use)
-23. [For direct curl, use a protected token source; never paste the token publicly.](#for-direct-curl-use-a-protected-token-source-never-paste-the-token-publicly)
-24. [The default cookie path for port 21832 is usually ~/.tru/rpc-cookie-21832.](#the-default-cookie-path-for-port-21832-is-usually-trurpc-cookie-21832)
-25. [Block Explorer](#block-explorer)
-26. [Building and Running](#building-and-running)
-27. [Docker](#docker)
-28. [Configuration](#configuration)
-29. [TRU MAINNET EXAMPLE — review values for your own machine](#tru-mainnet-example--review-values-for-your-own-machine)
-30. [Bootstrap peers. Comma-separated IP:port pairs; no spaces after commas.](#bootstrap-peers-comma-separated-ipport-pairs-no-spaces-after-commas)
-31. [Automatic cumulative-work recovery: enabled by default in current builds.](#automatic-cumulative-work-recovery-enabled-by-default-in-current-builds)
-32. [Optional privileged RPC wallet-send feature, DISABLED by default.](#optional-privileged-rpc-wallet-send-feature-disabled-by-default)
-33. [Keys may be set here in [network] or [default], but not twice.](#keys-may-be-set-here-in-network-or-default-but-not-twice)
-34. [Alternative equivalent names recognized by this build:](#alternative-equivalent-names-recognized-by-this-build)
-35. [AI oracle funding / wallet options (only configure when needed).](#ai-oracle-funding--wallet-options-only-configure-when-needed)
-36. [Enable only after installing and reviewing the private policy file.](#enable-only-after-installing-and-reviewing-the-private-policy-file)
-37. [Documentary example: see notes below about which fields are consumed.](#documentary-example-see-notes-below-about-which-fields-are-consumed)
-38. [Implementation Status](#implementation-status)
-39. [Testing and Qualification](#testing-and-qualification)
-40. [Security Notes](#security-notes)
-41. [Scaling Direction](#scaling-direction)
-42. [Additional Documentation](#additional-documentation)
-43. [Project Direction](#project-direction)
-44. [Links](#links)
+13. [Toolbox Guide](#toolbox-guide)
+14. [Interactive Node CLI](#interactive-node-cli)
+15. [`tru-cli`](#tru-cli)
+16. [Toolbox and Wallet Functionality](#toolbox-and-wallet-functionality)
+17. [Quantum Transactions](#quantum-transactions)
+18. [Marketplace Locks and Atomic Settlement](#marketplace-locks-and-atomic-settlement)
+19. [Mining](#mining)
+20. [P2P Networking](#p2p-networking)
+21. [Storage](#storage)
+22. [JSON-RPC API](#json-rpc-api)
+23. [Block Explorer](#block-explorer)
+24. [Building and Running](#building-and-running)
+25. [Docker](#docker)
+26. [Configuration](#configuration)
+27. [Implementation Status](#implementation-status)
+28. [Testing and Qualification](#testing-and-qualification)
+29. [Security Notes](#security-notes)
+30. [Scaling Direction](#scaling-direction)
+31. [Additional Documentation](#additional-documentation)
+32. [Project Direction](#project-direction)
+33. [Links](#links)
 
 ---
 
@@ -900,6 +920,98 @@ Enable checkpoint processing through the separately protected `[agent_checkpoint
 ---
 
 
+# Toolbox Guide
+
+The **v0.09.2 Guide** is a built-in help and tutorial interface. It describes
+workflows and can open a related desktop workspace; it does not sign, broadcast,
+execute commands, accept jobs or verify that a tutorial step actually succeeded.
+
+## Open the Guide
+
+| Interface | Entry point | Available help |
+|---|---|---|
+| Desktop Toolbox | **Toolbox Guide** in the workspace navigation | Offline tutorials, question matching, step navigation, related workspace links and optional AI explanations |
+| Core operator menu | Run `tru_advanced --cli`, then type `guide` | Offline search and paged reading of the same collection |
+| Standalone CLI | `tru-cli guide` | Interactive offline reader |
+| Standalone CLI | `tru-cli guide list` | Article numbers and titles |
+| Standalone CLI | `tru-cli guide search "datafeed"` | Matching articles |
+| Standalone CLI | `tru-cli guide read NUMBER` | Complete article text; replace NUMBER with a listed number |
+
+Use these exact Guide command forms with `guide` immediately after the executable.
+They do not require RPC options, a running node, a wallet unlock or an RPC cookie.
+In the interactive reader, type a question or topic, choose an article number,
+and use `n` / `p` to page, `b` to return from an article, or `q` to exit. `list`
+restores the article list. The menu display wraps long lines; use `guide read`
+for exact code lines. Article numbers may change when the collection is updated.
+
+```bash
+cd ~/NEW_TRU/build-native/bin
+./tru-cli guide list
+./tru-cli guide search "quantum retry"
+./tru-cli guide search "UTXO split"
+./tru-cli guide search "checkpoint memory"
+```
+
+Core's existing guided evolution flows remain separate from the general Guide.
+The Guide update does not add an assistant to the Web Toolbox.
+
+## Tutorial coverage and prerequisites
+
+The initial 0.09.2 collection contains **210 entries**: desktop tutorials,
+Advanced Tools references, all seven supplied manuals with indexed sections,
+scope notes and a current-source RPC-name index.
+
+| Topic | Included material |
+|---|---|
+| Everyday Toolbox use | Connection, keys/recovery, receive/send, balances, assets, TRUScripts, contracts, voting and Magic Secrets |
+| AI and compute | Provider setup, token evolution, AXON customer/worker workflow and existing approval steps |
+| Core RPC | Authenticated JSON-RPC reference and current-source name index |
+| CLI / UTXOs | Authentication, coin inventory, split/consolidation, preparation, submission and recovery checks |
+| Quantum transactions | Funding, WOTS+ spending, explicit submission, retry and current sidecar requirements |
+| DataFeed | Queue, preview, publish, retrieve/verify, inline/hash modes, HAM/science examples and batch inputs |
+| NCFT agents | Identity, persistent memory, checkpoints, approved and bounded automatic anchoring, watcher and recovery instructions |
+| Explorer HTTP API | Routes, access boundaries and deployment notes |
+
+Older manuals retain their version scope and historical examples. Read their
+review notes and full prerequisites before using an indexed section. Registered
+RPC names do not prove public-gateway access or runtime permission. The supplied
+older reference contains 111 RPC names; all appear in the reviewed current
+dispatcher, whose name index contains 122. This is not an exhaustive validation
+of every parameter or every live deployment.
+
+**Separate dependencies:** the Python DataFeed helper and NCFT agent runtime,
+configuration examples and service files must be installed separately where
+required. Their tutorials are included; the Guide does not install those tools.
+A related-workspace link does not create a GUI for CLI-only functions.
+
+## Optional desktop AI explanations
+
+1. Open **AI & Agents** and choose **Use My AI / Cloud Provider** or **Use Local AI on This Computer**.
+2. Configure the actual provider, full endpoint and model. Enter or load the API key using the existing credential controls, and test the connection.
+3. Return to **Toolbox Guide**, enable **AI answers**, and ask a question.
+4. Review the destination/model disclosure and approve the request if intended.
+5. Check the answer against the cited tutorial and the actual action's approval screen.
+
+Adapters support OpenAI-compatible services, Ollama, Anthropic and Gemini.
+Actual model compatibility and charges depend on the selected service. Guide AI
+does not reuse Core's token-interaction inference workflow. **Core menu and CLI
+Guide access remain offline, even when Core has an AI provider configured.**
+
+Each approved request sends the question, up to three previous successful AI
+exchanges and up to four relevant help excerpts (12,000 characters each).
+The Guide does not attach wallet state, addresses, balances, local files or live
+job status. API credentials are authentication headers, not prompt content.
+Never paste passwords, recovery phrases, private keys, unlock codes or other
+secrets into questions. Provider retention and charging rules still apply.
+
+HTTPS is required except HTTP on loopback. Redirects are not followed. AI
+answers are plain text, may be inaccurate, and cannot execute actions. Chat is
+kept in memory; **Clear chat** cancels pending work and clears the local
+conversation but cannot erase requests retained by a provider. Built-in help
+continues to work without AI or network access.
+
+---
+
 # Interactive Node CLI
 
 Start the operator CLI with `./tru_advanced --cli` from the active build directory. The current `main.cpp` includes **TRU CLI UX PATCH 30A5**: the **visible menu uses sequential choices 1–36**, mapped internally to older handler codes. The old 4a/12a/13a aliases remain accepted but are **not** the public menu numbering. Press `M` / `m` to toggle full/compact views.
@@ -915,6 +1027,8 @@ Start the operator CLI with `./tru_advanced --cli` from the active build directo
 | 21–27 | Query/list/update contracts, voting, voting results, mint, token supply (`20`, `20a`, `20u`, `21`, `22`, `23`, `24`) |
 | 28–33 | Chain information, peers, block lookup, mempool, connect peer, peer message (`8`, `9`, `10`, `19`, `16`, `17`) |
 | 34–36 | CPU mine, GPU mine, exit (`7`, `7a`, `11`) |
+
+Type **`guide`** at the main prompt to search/read the shared tutorials; `q` inside the Guide returns to this menu. It does not replace the numbered operations.
 
 These are **source-code mappings**, not a guarantee that each feature is available or enabled in every build/runtime. The legacy `13d` AI-token creation and `13e` AI communication handlers also exist in source but are not listed in this 36-choice public mapping; use the advertised Token AI tools entry and check the exact live menu. Do not publish the old menu table as though it matches v0.07.7/v0.07.8.
 
@@ -934,6 +1048,8 @@ tru_advanced --cli
 tru-cli
     -> scriptable command-line RPC client
 ```
+
+For offline reference, use `./tru-cli guide`; see [Toolbox Guide](#toolbox-guide). Ordinary RPC commands below still require a running node and authentication.
 
 Typical usage:
 
@@ -973,10 +1089,12 @@ Friendly wrappers cover common commands, but `raw` can call any RPC method expos
 
 ```bash
 ./tru-cli raw getblocktemplate
-./tru-cli raw gettokenmetadata '{"tokenID":"example"}'
+./tru-cli raw gettokenmetadata '{"txid":"PUT_REAL_ISSUANCE_TXID_HERE"}'
 ./tru-cli raw listunspent '{"address":"<TRU_ADDRESS>"}'
 ./tru-cli raw verifytokenbalance '{"address":"<TRU_ADDRESS>","tokenID":"example"}'
 ```
+
+**Metadata lookup:** use the raw `gettokenmetadata` form with the issuance `txid`. In the reviewed source, the friendly alias supplies `tokenID`, which does not match the handler.
 
 The dedicated quantum namespace is:
 
@@ -984,7 +1102,7 @@ The dedicated quantum namespace is:
 quantum <receive|list|status|backup|restore|fund|send|exit|retry|input|submit> [JSON]
 ```
 
-`status`, `backup`, and `restore` are new in the 0.08.8 candidate. See
+`status`, `backup`, and `restore` were introduced in the 0.08.8 recovery work. See
 [Quantum Transactions](#quantum-transactions) for access requirements and safety
 boundaries. `sendtoaddress` remains the separate ordinary TRU send command.
 
@@ -1001,7 +1119,7 @@ Useful options include:
 
 ---
 
-# Wallets
+# Toolbox and Wallet Functionality
 
 TRU uses an HD wallet core with BIP32-style key derivation.
 
@@ -1023,7 +1141,7 @@ User interfaces include:
 
 - the node's interactive CLI,
 - wallet CLI functionality,
-- a Qt desktop GUI,
+- the Qt **TRU Toolbox** desktop application (formerly Desktop Wallet),
 - RPC access,
 - `tru-cli` for node/RPC operations.
 
@@ -1083,7 +1201,7 @@ use that checkout's `build-native/bin` instead.
 | `quantum restore` | Import in recovery-only mode; new in 0.08.8 | `quantumwallet`, action `restore` |
 
 The interactive node command is **`qr`**, labelled Quantum Transactions. It is
-separate from `tru-cli quantum …`. The native desktop wallet has a separate
+separate from `tru-cli quantum …`. The native Desktop Toolbox has a separate
 quantum transaction flow. This maintenance package does **not** update the
 independent website/browser signer or the SDK automatically.
 
@@ -1695,7 +1813,7 @@ See `README_DOCKER.md` for the full deployment and persistence guide.
 
 The current project CPU image repository is
 `ghcr.io/tokenizedrealutility/tru-node`. Use an explicitly published, verified
-version tag or immutable digest. This README does not assert that a 0.08.8 image
+version tag or immutable digest. This README does not assert that a 0.09.2 image
 has been published. Container status `Up` alone does not establish that RPC is
 listening, synchronization completed, or a branch was fully validated.
 
@@ -1883,6 +2001,7 @@ qualification results with release records.
 
 | Test area | Observed evidence and scope |
 |---|---|
+| 0.09.2 Guide source update | Linux desktop/CLI builds, Core syntax check, shared reader/search, 210-entry rendering, desktop navigation/theme/compact checks, mock AI adapters and installer/rollback passed. Full Core runtime, Windows/macOS and live AI-provider verification remain separate release checks. |
 | 0.08.5 regressions / isolated chain | Mainnet-dormant and test-height build guards; real-PoW maturity prefix; preactivation behavior; invalid WOTS/payload mutation rejection; market purchase, partial fill, swap, refund, and journal/restart paths passed. |
 | Historical replay | Supplied historical snapshot replay through height 45,837 and restart checks passed. This is bounded snapshot evidence, not an ongoing audit of every later mainnet block or equivalence of all local auxiliary records. |
 | 0.08.5 network/template | Mixed-version preactivation synchronization, activated template outputs/submission, upgraded relay, fresh IBD across activation, higher-work reorg, and restart tests passed. External pool software was a separate integration requirement. |
@@ -1985,7 +2104,8 @@ More focused documentation is available in the repository:
 | `README_DOCKER.md` | Docker/node/miner deployment |
 | `README_OPCODES.md` | Script and opcode reference |
 | `README_TOKENS.md` | FT/NFT/SFT/NCFT token documentation |
-| `TRU_CLI_README.md` | `tru-cli`, `getinfo`, `getbalance`, raw RPC usage |
+| `TRU_CLI_README.md` | v0.09.2 CLI, offline Guide, UTXO tools, authentication and raw RPC usage |
+| Built-in `guide` / `tru-cli guide` | Shared tutorials and version-scoped manuals, available offline |
 
 The top-level README is intended to describe the **current TRU system as a whole**. Feature-specific READMEs should be kept synchronized with the implementation as the protocol evolves.
 

@@ -1,3 +1,4 @@
+#include "tru_core_guide.h"
 #include "tru_security_maintenance_01.h"
 #include "quantum_chain_v1.h"
 #include "tru_agent_auto_policy.h"
@@ -5738,7 +5739,7 @@ static bool truDeckHighlightToken(const std::string& token)
     if (token[0] >= '0' && token[0] <= '9') return true;
     return token == "C" || token == "M" || token == "sync" || token == "auditchain" ||
            token == "marketlogin" || token == "qr" ||
-           token == "hashredeem" || token == "timeredeem" || token == "magic";
+           token == "hashredeem" || token == "timeredeem" || token == "magic" || token == "guide" ;
 }
 
 static std::string truColorizeDeckBody(const std::string& body)
@@ -5929,6 +5930,7 @@ void displayMenu(int rows, std::mutex &coutMutex)
         "║  22 List       23 Update K/V           24 Vote      25 Voting Results      ║",
         "║  26 Mint Tokens    27 Token Supply                                         ║",
         "║  hashredeem Hash Redeem      timeredeem Time Redeem                        ║",
+        "║  guide   Tutorials, manuals and offline questions                          ║",
         "║  magic   Create / Open Private Magic Secrets                               ║",
         "╠════════════════════════════════════════════════════════════════════════════╣",
         "╠═════════════════════════ NETWORK // CHAIN & PEERS ═════════════════════════╣",
@@ -11883,6 +11885,35 @@ void startCLI(Blockchain &chain, P2PNode &node, Wallet &wallet,
                     "[CLI] Hash Lock redemption failed: " +
                     std::string(e.what()));
             }
+            continue;
+        }
+
+        else if (choice == "guide")
+        {
+            struct GuideScreenGuard {
+                std::mutex& output;
+                bool oldSession=g_cliMagicSession.exchange(true);
+                bool oldFullscreen=g_cliFullscreenView.exchange(true);
+                bool oldFocus=g_cliContentFocus.exchange(true);
+                ~GuideScreenGuard() {
+                    clearCliResultState();
+                    std::lock_guard<std::mutex> lock(output);
+                    std::cout << "\033[2J\033[H" << std::flush;
+                    g_cliMagicSession.store(oldSession);
+                    g_cliFullscreenView.store(oldFullscreen);
+                    g_cliContentFocus.store(oldFocus);
+                }
+            } screen{coutMutex};
+            bool reading=true;
+            auto say=[&](const std::string& text) {
+                std::lock_guard<std::mutex> lock(coutMutex);
+                std::cout << "\033[2J\033[H" << text << "\n\n" << std::flush;
+            };
+            auto ask=[&](const std::string& prompt) {
+                {std::lock_guard<std::mutex> lock(coutMutex);std::cout<<prompt<<std::flush;}
+                std::string line;if(!signalAwareGetline(line))reading=false;return line;
+            };
+            tru_core_guide::run(ask,say,[&]{return reading && g_running.load(std::memory_order_acquire);});
             continue;
         }
 
