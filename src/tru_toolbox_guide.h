@@ -59,7 +59,7 @@ class Guide final : public QWidget {
     void busy(bool value){ask_->setEnabled(!value);cancel_->setEnabled(value);useAi_->setEnabled(!value);}
     void showStep(){
         auto a=articles_.at(topics_->currentData().toInt()).toObject();auto steps=a["steps"].toArray();
-        step_=std::max(0,std::min(step_,steps.size()-1));
+        step_=std::max(0,std::min<int>(step_,int(steps.size())-1));
         stepLabel_->setText(QString("Step %1 of %2 — %3").arg(step_+1).arg(steps.size()).arg(steps.at(step_).toString()));
         previous_->setEnabled(step_>0);next_->setEnabled(step_+1<steps.size());
     }
@@ -69,7 +69,7 @@ class Guide final : public QWidget {
         if(found.isEmpty()){append("Built-in Guide","I could not match that question to a documented feature. Choose a tutorial above or ask using a feature name, such as send TRU, backup, voting, or AXON. I will not invent instructions.");return;}
         topics_->setCurrentIndex(topics_->findData(found.first()));
         QString answer=articleText(articles_.at(found.first()).toObject());
-        if(found.size()>1){answer+="\n\nRelated tutorials:";for(int n=1;n<std::min(3,found.size());++n)answer+="\n• "+articles_.at(found[n]).toObject()["title"].toString();}
+        if(found.size()>1){answer+="\n\nRelated tutorials:";for(int n=1;n<std::min<int>(3,int(found.size()));++n)answer+="\n• "+articles_.at(found[n]).toObject()["title"].toString();}
         append("Built-in Guide — documented instructions",answer);
     }
     void ask(){
